@@ -1,0 +1,55 @@
+# ─── .NET build outputs ────────────────────────────────────────────────
+bin/
+obj/
+out/
+publish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+.vscode/
+.idea/
+
+# ─── Logs / coverage / temp ────────────────────────────────────────────
+*.log
+*.tmp
+*.cache
+TestResults/
+coverage*/
+
+# ─── OS junk ───────────────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+
+# ─── Office lock files (when a user has the doc open) ──────────────────
+~$*
+
+# ─── Secrets — NEVER commit ────────────────────────────────────────────
+secrets.json
+appsettings.*.Local.json
+appsettings.Production.json
+appsettings.Development.local.json
+.env
+.env.*
+
+# ─── App-local data: encrypted connection.protected, Data Protection keys ─
+src/Aiwms.Web/App_Data/
+**/App_Data/
+
+# ─── Random photos / spec scans the user dropped here ──────────────────
+temp/
+
+# ─── Publish artefacts ─────────────────────────────────────────────────
+*.pubxml
+*.pubxml.user
+PublishProfiles/
+
+# ─── EF Core ───────────────────────────────────────────────────────────
+*.mdf
+*.ldf
+
+# ─── NuGet ─────────────────────────────────────────────────────────────
+*.nupkg
+*.snupkg
+.nuget/

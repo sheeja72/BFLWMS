@@ -1,0 +1,236 @@
+@page "/admin/users"
+@rendermode RenderMode.InteractiveServer
+@attribute [Authorize(Roles = Aiwms.Core.Roles.Admin)]
+@using Aiwms.Core.Entities
+@using Aiwms.Data
+@using Aiwms.Data.Lpm
+@using Aiwms.Web.Auth
+@using Microsoft.EntityFrameworkCore
+@using Microsoft.Extensions.Caching.Memory
+@inject IDbContextFactory<AiwmsDbContext> DbFactory
+@inject BuildingService Build
+@inject ICurrentUser Me
+@inject ISnackbar Snack
+@inject IMemoryCache Cache
+
+<PageTitle>AIWMS — Users</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Users &amp; Roles</h2>
+    <p>Active users and their assigned roles. Country + Warehouse are required (drives audit trail in lpm.* tables).</p>
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">Add / update user</div>
+    <div class="aiwms-form-row">
+        <label>Username</label>
+        <input @bind="_newUser" placeholder="BFLDomain\username" autocomplete="off" />
+    </div>
+    <div class="aiwms-form-row">
+        <label>Country</label>
+        <select @bind="_newCountry">
+            <option value="">-- Select --</option>
+            @foreach (var c in _countries) { <option value="@c">@c</option> }
+        </select>
+    </div>
+    <div class="aiwms-form-row">
+        <label>Warehouse</label>
+        <select @bind="_newWarehouse">
+            <option value="">-- Select --</option>
+            @foreach (var w in WHForCountry(_newCountry)) { <option value="@w.Warehouse">@w.Warehouse</option> }
+        </select>
+    </div>
+    <div class="aiwms-form-row">
+        <label>Role</label>
+        <select @bind="_newRole">
+            @foreach (var r in _roles) { <option value="@r.RoleCode">@r.RoleName</option> }
+        </select>
+    </div>
+    <div style="margin-top:8px"><button class="aiwms-btn aiwms-btn-primary" @onclick="AddUser" disabled="@(string.IsNullOrEmpty(_newUser) || string.IsNullOrEmpty(_newCountry) || string.IsNullOrEmpty(_newWarehouse))">Save</button></div>
+    @if (!string.IsNullOrEmpty(_err)) { <div class="aiwms-alert error" style="margin-top:10px">@_err</div> }
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">All users</div>
+    <table class="aiwms-table">
+        <thead>
+            <tr><th>Username</th><th>Country</th><th>Warehouse</th><th>Active</th><th>Roles</th><th>Created</th><th style="width:220px"></th></tr>
+        </thead>
+        <tbody>
+            @foreach (var u in _users)
+            {
+                <tr>
+                    <td>@u.Username</td>
+                    @if (_editingUser == u.Username)
+                    {
+                        <td>
+                            <select @bind="_editCountry" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px">
+                                <option value="">--</option>
+                                @foreach (var c in _countries) { <option value="@c">@c</option> }
+                            </select>
+                        </td>
+                        <td>
+                            <select @bind="_editWarehouse" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px">
+                                <option value="">--</option>
+                                @foreach (var w in WHForCountry(_editCountry)) { <option value="@w.Warehouse">@w.Warehouse</option> }
+                            </select>
+                        </td>
+                        <td>@(u.IsActive ? "Yes" : "No")</td>
+                        <td>
+                            <div style="display:flex;flex-wrap:wrap;gap:4px">
+                                @foreach (var r in _roles)
+                                {
+                                    var rc = r.RoleCode;
+                                    <label style="font-size:11px;display:flex;gap:3px;align-items:center">
+                                        <input type="checkbox" checked="@_editRoles.Contains(rc)"
+                                               @onchange="@(e => ToggleEditRole(rc, (bool)e.Value!))" />
+                                        @rc
+                                    </label>
+                                }
+                            </div>
+                        </td>
+                        <td>@u.CreateTS.ToString("yyyy-MM-dd")</td>
+                        <td>
+                            <button class="aiwms-btn aiwms-btn-primary" style="padding:4px 10px;font-size:12px" @onclick="SaveEdit">Save</button>
+                            <button class="aiwms-btn aiwms-btn-secondary" style="padding:4px 10px;font-size:12px" @onclick="CancelEdit">Cancel</button>
+                        </td>
+                    }
+                    else
+                    {
+                        <td>@u.Country</td>
+                        <td>@u.Warehouse</td>
+                        <td>@(u.IsActive ? "Yes" : "No")</td>
+                        <td>@(string.Join(", ", u.UserRoles.Select(ur => ur.RoleCode)))</td>
+                        <td>@u.CreateTS.ToString("yyyy-MM-dd")</td>
+                        <td>
+                            <button class="aiwms-btn aiwms-btn-secondary" style="padding:4px 10px;font-size:12px" @onclick="() => StartEdit(u)">Edit</button>
+                            <button class="aiwms-btn aiwms-btn-secondary" style="padding:4px 10px;font-size:12px" @onclick="() => ToggleActive(u.Username)">@(u.IsActive ? "Disable" : "Enable")</button>
+                        </td>
+                    }
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    private List<AiwmsUser> _users = new();
+    private List<AiwmsRole> _roles = new();
+    private List<AiwmsWHMaster> _whs = new();
+    private List<string> _countries = new();
+    private string _newUser = "", _newRole = "WHAssociate", _newCountry = "", _newWarehouse = "";
+    private string? _err;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Me.EnsureLoadedAsync();
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _roles = await db.Roles.AsNoTracking().OrderBy(r => r.RoleName).ToListAsync();
+        _whs   = await db.WHMasters.AsNoTracking().Where(w => w.Active).OrderBy(w => w.Country).ThenBy(w => w.Warehouse).ToListAsync();
+        try { _countries = await Build.GetCountriesAsync(); }
+        catch { _countries = _whs.Select(w => w.Country).Distinct().OrderBy(c => c).ToList(); }
+        await Reload();
+    }
+
+    private IEnumerable<AiwmsWHMaster> WHForCountry(string c) =>
+        string.IsNullOrEmpty(c) ? Enumerable.Empty<AiwmsWHMaster>()
+                                : _whs.Where(w => w.Country == c);
+
+    private async Task Reload()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _users = await db.Users.AsNoTracking().Include(u => u.UserRoles)
+            .OrderBy(u => u.Username).ToListAsync();
+    }
+
+    private async Task AddUser()
+    {
+        _err = null;
+        if (!_whs.Any(w => w.Country == _newCountry && w.Warehouse == _newWarehouse && w.Active))
+        { _err = $"Warehouse {_newWarehouse} not registered for country {_newCountry} in WHMaster."; return; }
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var u = await db.Users.FirstOrDefaultAsync(x => x.Username == _newUser);
+        if (u is null)
+        {
+            u = new AiwmsUser { Username = _newUser, CreatedBy = Me.Name, CreateTS = DateTime.Now,
+                IsActive = true, Country = _newCountry, Warehouse = _newWarehouse };
+            db.Users.Add(u);
+        }
+        else
+        {
+            u.Country = _newCountry; u.Warehouse = _newWarehouse;
+        }
+        if (!await db.UserRoles.AnyAsync(ur => ur.Username == _newUser && ur.RoleCode == _newRole))
+            db.UserRoles.Add(new AiwmsUserRole { Username = _newUser, RoleCode = _newRole, CreateTS = DateTime.Now });
+        await db.SaveChangesAsync();
+        Cache.Remove(AuthStateCurrentUser.ProfileCacheKey(_newUser));   // user's next page-load picks up new profile
+        Snack.Add($"User {_newUser} saved.", Severity.Success);
+        _newUser = "";
+        await Reload();
+    }
+
+    private async Task ToggleActive(string username)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var u = await db.Users.FirstOrDefaultAsync(x => x.Username == username);
+        if (u is null) return;
+        u.IsActive = !u.IsActive;
+        await db.SaveChangesAsync();
+        Cache.Remove(AuthStateCurrentUser.ProfileCacheKey(username));
+        await Reload();
+    }
+
+    // ---------------- Inline edit ----------------
+    private string? _editingUser;
+    private string _editCountry = "";
+    private string _editWarehouse = "";
+    private HashSet<string> _editRoles = new();
+
+    private void StartEdit(AiwmsUser u)
+    {
+        _editingUser   = u.Username;
+        _editCountry   = u.Country   ?? "";
+        _editWarehouse = u.Warehouse ?? "";
+        _editRoles     = new HashSet<string>(u.UserRoles.Select(r => r.RoleCode), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void CancelEdit()
+    {
+        _editingUser = null;
+    }
+
+    private void ToggleEditRole(string code, bool on)
+    {
+        if (on) _editRoles.Add(code);
+        else    _editRoles.Remove(code);
+    }
+
+    private async Task SaveEdit()
+    {
+        if (_editingUser is null) return;
+        if (!string.IsNullOrEmpty(_editCountry) && !string.IsNullOrEmpty(_editWarehouse) &&
+            !_whs.Any(w => w.Country == _editCountry && w.Warehouse == _editWarehouse && w.Active))
+        {
+            Snack.Add($"WH {_editWarehouse} not in WHMaster for {_editCountry}.", Severity.Error);
+            return;
+        }
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var u = await db.Users.Include(x => x.UserRoles).FirstOrDefaultAsync(x => x.Username == _editingUser);
+        if (u is null) { _editingUser = null; return; }
+        u.Country   = string.IsNullOrEmpty(_editCountry)   ? null : _editCountry;
+        u.Warehouse = string.IsNullOrEmpty(_editWarehouse) ? null : _editWarehouse;
+
+        var existingRoles = u.UserRoles.Select(r => r.RoleCode).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var add in _editRoles.Where(r => !existingRoles.Contains(r)))
+            db.UserRoles.Add(new AiwmsUserRole { Username = u.Username, RoleCode = add, CreateTS = DateTime.Now });
+        foreach (var rem in u.UserRoles.Where(r => !_editRoles.Contains(r.RoleCode)).ToList())
+            db.UserRoles.Remove(rem);
+
+        await db.SaveChangesAsync();
+        Cache.Remove(AuthStateCurrentUser.ProfileCacheKey(_editingUser));
+        Snack.Add($"{_editingUser} updated.", Severity.Success);
+        _editingUser = null;
+        await Reload();
+    }
+}

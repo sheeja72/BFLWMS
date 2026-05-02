@@ -1,0 +1,70 @@
+@inherits LayoutComponentBase
+@using Aiwms.Data.Configuration
+@inject IConnectionConfig Conn
+
+<MudThemeProvider Theme="_theme" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<div class="aiwms-shell">
+    <aside class="aiwms-sidebar">
+        <div class="aiwms-brand">
+            <div class="aiwms-brand-title">AIWMS</div>
+            <div class="aiwms-brand-sub">Warehouse Management</div>
+            <AuthorizeView>
+                <Authorized>
+                    @{
+                        var role = context.User.IsInRole("Admin") ? "Admin"
+                                 : context.User.IsInRole("WHManager") ? "WH Manager"
+                                 : context.User.IsInRole("WHSupervisor") ? "WH Supervisor"
+                                 : context.User.IsInRole("WHAssociate") ? "WH Associate"
+                                 : "User";
+                    }
+                    <span class="aiwms-role-badge">@role</span>
+                    <div class="aiwms-username">@context.User.Identity?.Name</div>
+                    @if (Conn.IsConfigured && Conn.Current is { } cur)
+                    {
+                        <div class="aiwms-server-info" title="@cur.ToDataSource() / @cur.Database">
+                            <span class="aiwms-server-dot">●</span>
+                            <span class="aiwms-server-text">@cur.ToDataSource()</span>
+                        </div>
+                        <div class="aiwms-server-db">db: @cur.Database</div>
+                    }
+                </Authorized>
+            </AuthorizeView>
+        </div>
+        <NavMenu />
+    </aside>
+
+    <main class="aiwms-main">
+        <div class="aiwms-content">
+            @Body
+        </div>
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">×</span>
+</div>
+
+@code {
+    private readonly MudTheme _theme = new()
+    {
+        PaletteLight = new PaletteLight
+        {
+            Primary       = "#2d6bcf",
+            Secondary     = "#64748b",
+            Background    = "#f0f2f5",
+            Surface       = "#ffffff",
+            TextPrimary   = "#0f172a",
+            TextSecondary = "#475569",
+            LinesDefault  = "#e0e0e0",
+            Success       = "#28a745",
+            Error         = "#dc3545",
+            Warning       = "#f0c246",
+        }
+    };
+}

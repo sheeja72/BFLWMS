@@ -1,0 +1,126 @@
+@page "/setup"
+@rendermode RenderMode.InteractiveServer
+@using Aiwms.Data.Configuration
+@using Aiwms.Core
+@inject IConnectionConfig Conn
+@inject NavigationManager Nav
+@inject ISnackbar Snack
+
+<PageTitle>AIWMS — Setup</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Connection Settings</h2>
+    <p>Configure the SQL Server instance, database, and credentials AIWMS will use. Stored encrypted via ASP.NET Core Data Protection.</p>
+</div>
+
+<div class="aiwms-section" style="max-width:760px">
+    <div class="aiwms-card-header">SQL Server Connection</div>
+
+    @if (_msg is not null)
+    {
+        <div class="aiwms-alert @_msgClass">@_msg</div>
+    }
+
+    <EditForm Model="_settings" OnValidSubmit="OnSave">
+        <DataAnnotationsValidator />
+        <div class="aiwms-form-row">
+            <label>Server / IP <span style="color:#dc3545">*</span></label>
+            <input @bind="_settings.Server" placeholder="192.168.10.72" autocomplete="off" />
+        </div>
+        <div class="aiwms-form-row">
+            <label>Instance (optional)</label>
+            <input @bind="_settings.Instance" placeholder="LOGBACKUP (leave empty for default)" autocomplete="off" />
+        </div>
+        <div class="aiwms-form-row">
+            <label>Port (optional)</label>
+            <input type="number" @bind="_settings.Port" placeholder="1433" autocomplete="off" />
+        </div>
+        <div class="aiwms-form-row">
+            <label>Database <span style="color:#dc3545">*</span></label>
+            <input @bind="_settings.Database" placeholder="AIWMS" autocomplete="off" />
+        </div>
+        <div class="aiwms-form-row">
+            <label>SQL Username <span style="color:#dc3545">*</span></label>
+            <input @bind="_settings.Username" autocomplete="off" />
+        </div>
+        <div class="aiwms-form-row">
+            <label>SQL Password <span style="color:#dc3545">*</span></label>
+            <input type="password" @bind="_settings.Password" autocomplete="new-password" />
+        </div>
+        <div class="aiwms-form-row">
+            <label>Trust Server Cert</label>
+            <div><input type="checkbox" @bind="_settings.TrustServerCertificate" /> Yes (recommended for on-prem)</div>
+        </div>
+        <div class="aiwms-form-row">
+            <label>Encrypt</label>
+            <div><input type="checkbox" @bind="_settings.Encrypt" /> Force TLS</div>
+        </div>
+        <div class="aiwms-form-row">
+            <label>Connect timeout (sec)</label>
+            <input type="number" @bind="_settings.ConnectTimeoutSec" min="5" max="120" />
+        </div>
+
+        <div style="margin-top:18px;display:flex;gap:8px">
+            <button type="button" class="aiwms-btn aiwms-btn-secondary" @onclick="OnTest" disabled="@_busy">Test Connection</button>
+            <button type="submit" class="aiwms-btn aiwms-btn-primary" disabled="@_busy">Save</button>
+        </div>
+    </EditForm>
+</div>
+
+@code {
+    private ConnectionSettings _settings = new();
+    private string? _msg;
+    private string _msgClass = "info";
+    private bool _busy;
+
+    protected override void OnInitialized()
+    {
+        if (Conn.Current is { } c)
+        {
+            _settings = new ConnectionSettings
+            {
+                Server = c.Server, Instance = c.Instance, Port = c.Port,
+                Database = c.Database, Username = c.Username,
+                TrustServerCertificate = c.TrustServerCertificate,
+                Encrypt = c.Encrypt, ConnectTimeoutSec = c.ConnectTimeoutSec,
+                Password = "" // never echo
+            };
+        }
+    }
+
+    private async Task OnTest()
+    {
+        _busy = true; _msg = null;
+        try
+        {
+            var ok = await Conn.TestAsync(_settings, default);
+            _msg = ok ? "✓ Connection succeeded." : "✗ Test returned no result.";
+            _msgClass = ok ? "success" : "error";
+        }
+        catch (Exception ex)
+        {
+            _msg = $"✗ {ex.Message}";
+            _msgClass = "error";
+        }
+        finally { _busy = false; }
+    }
+
+    private async Task OnSave()
+    {
+        _busy = true; _msg = null;
+        try
+        {
+            await Conn.TestAsync(_settings, default);
+            await Conn.SaveAsync(_settings);
+            Snack.Add("Connection saved. Reloading...", Severity.Success);
+            await Task.Delay(800);
+            Nav.NavigateTo("/", forceLoad: true);
+        }
+        catch (Exception ex)
+        {
+            _msg = $"✗ {ex.Message}";
+            _msgClass = "error";
+        }
+        finally { _busy = false; }
+    }
+}

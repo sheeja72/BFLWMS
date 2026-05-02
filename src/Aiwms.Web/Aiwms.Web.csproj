@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Aiwms.Web</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Aiwms.Core\Aiwms.Core.csproj" />
+    <ProjectReference Include="..\Aiwms.Data\Aiwms.Data.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.Negotiate" Version="9.0.3" />
+    <PackageReference Include="MudBlazor" Version="7.15.0" />
+  </ItemGroup>
+</Project>

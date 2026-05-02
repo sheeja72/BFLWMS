@@ -1,0 +1,18 @@
+<Router AppAssembly="typeof(Program).Assembly">
+    <Found Context="routeData">
+        <AuthorizeRouteView RouteData="routeData" DefaultLayout="typeof(MainLayout)">
+            <NotAuthorized>
+                <MainLayout>
+                    <div class="aiwms-section">
+                        <h2>Access denied</h2>
+                        <p>Your account is not active in AIWMS. Contact an administrator.</p>
+                    </div>
+                </MainLayout>
+            </NotAuthorized>
+            <Authorizing>
+                <div style="padding:24px;color:#64748b">Authorizing...</div>
+            </Authorizing>
+        </AuthorizeRouteView>
+        <FocusOnNavigate RouteData="routeData" Selector="h1" />
+    </Found>
+</Router>
