@@ -1,0 +1,33 @@
+name: CI
+
+# Build the solution on every push to main and on every pull request.
+# Catches broken commits before they get merged. No deploy here — that comes
+# in a separate workflow once Azure infra is set up.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build & verify
+    runs-on: windows-latest      # MudBlazor + .NET 9 builds clean on Windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      # When unit tests are added later, uncomment:
+      # - name: Test
+      #   run: dotnet test --configuration Release --no-build --verbosity normal

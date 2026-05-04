@@ -1,0 +1,18 @@
+# CODEOWNERS — anyone listed here is auto-requested as a reviewer
+# when a PR touches matching paths.
+#
+# Format: <path-pattern> <github-username-or-team>
+# More specific patterns below override more general ones.
+
+# Default reviewer for everything
+*                                       @sheeja72
+
+# SQL schema needs an extra eye since it hits shared on-prem DBs
+/db/                                    @sheeja72
+
+# Auth + Program.cs changes need careful review
+/src/Aiwms.Web/Auth/                    @sheeja72
+/src/Aiwms.Web/Program.cs               @sheeja72
+
+# CI / GitHub config
+/.github/                               @sheeja72
