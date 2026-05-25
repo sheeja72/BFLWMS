@@ -1,0 +1,412 @@
+@page "/building/process"
+@rendermode RenderMode.InteractiveServer
+@attribute [Authorize(Roles = Aiwms.Core.Roles.AnyWarehouse)]
+@using Aiwms.Data.ContainerProcess
+@using Aiwms.Data.Lpm
+@using Aiwms.Data.Auditing
+@inject ContainerProcessingService Proc
+@inject BuildingService Build
+@inject IActionLogger Audit
+@inject IJSRuntime JS
+@inject NavigationManager Nav
+
+<PageTitle>AIWMS — Building Process</PageTitle>
+
+<div style="display:flex;flex-direction:column;height:calc(100vh - 100px);overflow:hidden">
+
+<div class="aiwms-page-header" style="flex-shrink:0;margin-bottom:12px">
+    <h2>Building Process</h2>
+    <p>Validates and allocates all items in a container to Online / Export / Shop.</p>
+</div>
+
+@if (!string.IsNullOrEmpty(_globalErr))  { <div class="aiwms-alert error" style="flex-shrink:0;margin-bottom:8px">@_globalErr</div>   }
+@if (!string.IsNullOrEmpty(_globalInfo)) { <div class="aiwms-alert info"  style="flex-shrink:0;margin-bottom:8px">@_globalInfo</div>   }
+
+@if (_lastException is not null)
+{
+    <div class="aiwms-section" style="flex-shrink:0;margin-bottom:8px;border-left:4px solid var(--danger);background:#fff5f5">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div>
+                <div style="font-weight:700;color:var(--danger);font-size:14px">@_exContext</div>
+                <div style="font-family:Consolas,monospace;font-size:12px;color:#842029">
+                    @_lastException.GetType().Name: @_lastException.Message
+                </div>
+            </div>
+            <div style="display:flex;gap:6px">
+                <button class="aiwms-btn aiwms-btn-secondary" style="padding:4px 10px;font-size:11px"
+                        @onclick="() => _showStack = !_showStack">@(_showStack ? "Hide" : "Show") trace</button>
+                <button class="aiwms-btn aiwms-btn-secondary" style="padding:4px 10px;font-size:11px"
+                        @onclick="() => _lastException = null">Dismiss</button>
+            </div>
+        </div>
+        @if (_showStack)
+        {
+            <pre style="background:#1f2937;color:#fef2f2;padding:12px;border-radius:6px;font-size:11px;overflow:auto;max-height:200px;white-space:pre-wrap">@_lastException.ToString()</pre>
+        }
+    </div>
+}
+
+<div class="aiwms-build-grid-1x2">
+
+    <!-- ── INPUTS ── -->
+    <div class="aiwms-section aiwms-input-frame">
+        <div class="aiwms-card-header">Container</div>
+        <div class="aiwms-input-grid">
+            <div class="aiwms-input-row">
+                <label class="aiwms-input-lbl">Cont. No <span class="req">*</span></label>
+                <input @ref="_contRef" @bind="_contInput" @bind:event="oninput" @onkeydown="OnContKey"
+                       class="aiwms-input @(_contOk ? "ok" : "")"
+                       placeholder="e.g. AEINT6078" autocomplete="off" disabled="@_busy" />
+            </div>
+        </div>
+
+        <div class="aiwms-input-actions">
+            <button class="aiwms-btn aiwms-btn-primary"   @onclick="RunProcess"        disabled="@(string.IsNullOrWhiteSpace(_contInput) || _busy || _processed)">Process</button>
+            <button class="aiwms-btn aiwms-btn-secondary" @onclick="ResetAll"          disabled="@_busy">Reset</button>
+            <button class="aiwms-btn aiwms-btn-secondary" @onclick="PushToRobo" disabled="@(!_processed || _busy || _roboBusy)">
+                @if (_roboBusy) { <span>Pushing…</span> } else { <span>Open Container - Robo</span> }
+            </button>
+        </div>
+
+        @if (_validation is { Ok: false })
+        {
+            <div style="padding:8px 20px 12px">
+                <div class="aiwms-alert error">
+                    @_validation.Error
+                    @if (_validation.MissingItems.Count > 0)
+                    {
+                        <details style="margin-top:4px">
+                            <summary style="cursor:pointer;font-size:12px">Show @_validation.MissingItems.Count item(s)</summary>
+                            <div style="font-family:Consolas,monospace;font-size:11px;margin-top:4px">
+                                @string.Join(", ", _validation.MissingItems.Take(20))
+                                @if (_validation.MissingItems.Count > 20) { <span> …and @(_validation.MissingItems.Count - 20) more</span> }
+                            </div>
+                        </details>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+
+    <!-- ── PROGRESS / SUMMARY (right column, full height) ── -->
+    <div class="aiwms-section aiwms-item-frame" style="grid-column:2;grid-row:1/-1;display:flex;flex-direction:column;overflow:hidden">
+        <div class="aiwms-card-header">Results</div>
+
+        @if (_processing)
+        {
+            <div style="padding:14px 16px 10px;border-bottom:1px solid var(--border)">
+                <div style="font-size:13px;font-weight:600;margin-bottom:6px;color:var(--text);display:flex;justify-content:space-between;align-items:baseline">
+                    <span>Processing… @_progDone / @_progTotal
+                    @if (!string.IsNullOrEmpty(_progItem)) { <span style="font-family:Consolas,monospace;font-size:11px;color:var(--text-muted);margin-left:8px">@_progItem</span> }</span>
+                    <span style="font-family:Consolas,monospace;font-size:12px;color:var(--text-muted)">@ElapsedStr</span>
+                </div>
+                <div style="background:var(--border);border-radius:4px;height:8px;overflow:hidden">
+                    <div style="background:var(--primary);height:100%;border-radius:4px;transition:width .1s;width:@(ProgressPct)%"></div>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:3px">@ProgressPct% complete</div>
+            </div>
+        }
+        else if (_outcome is { Ok: false })
+        {
+            <div style="padding:16px"><div class="aiwms-alert error">@_outcome.Error</div></div>
+        }
+        else if (_outcome is { Ok: true })
+        {
+            <div style="padding:10px 16px 8px;display:flex;gap:24px;flex-wrap:wrap;border-bottom:1px solid var(--border)">
+                <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Container</span><div style="font-weight:700;font-family:Consolas,monospace">@_contno</div></div>
+                <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">SKUs</span><div style="font-weight:700">@_outcome.TotalSku</div></div>
+                <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Total Qty</span><div style="font-weight:700">@_outcome.TotalQty</div></div>
+                <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Time Taken</span><div style="font-weight:700;font-family:Consolas,monospace">@ElapsedStr</div></div>
+            </div>
+        }
+        else if (!_liveRows.Any())
+        {
+            <div class="aiwms-output-empty">Enter a container number and click Process to see allocation results.</div>
+        }
+
+        @if (_liveRows.Any())
+        {
+            <div style="flex:1;overflow-y:auto;padding:4px 0">
+                <table class="aiwms-table aiwms-table-dense">
+                    <thead>
+                        <tr>
+                            <th>Itemcode</th>
+                            <th>Description</th>
+                            <th>Bldg. Category</th>
+                            <th>Result</th>
+                            <th>LPM Date</th>
+                            <th style="text-align:right">Qty</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in _liveRows.OrderBy(r => r.Itemcode).ThenBy(r => r.Result))
+                        {
+                            <tr>
+                                <td style="font-family:Consolas,monospace;font-size:11px">@row.Itemcode</td>
+                                <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="@row.Itemname">@row.Itemname</td>
+                                <td>@row.Bc</td>
+                                <td><b>@row.Result</b></td>
+                                <td style="font-family:Consolas,monospace;font-size:11px">@(row.LpmDt?.ToString("dd/MM/yyyy") ?? "")</td>
+                                <td style="text-align:right;font-weight:600">@row.Qty</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+
+    <!-- ── CHUTE SUMMARY ── -->
+    <div class="aiwms-section" style="display:flex;flex-direction:column;overflow:hidden">
+        <div class="aiwms-card-header">Chute Location Summary</div>
+        @{ var activeChute = ActiveChuteRows.ToList(); }
+        @if (!activeChute.Any())
+        {
+            <div style="color:var(--text-muted);font-size:13px;padding:8px 4px">Process a container to see result summary.</div>
+        }
+        else
+        {
+            <div style="flex:1;overflow-y:auto;padding:4px 0">
+                <table class="aiwms-table aiwms-table-dense">
+                    <thead>
+                        <tr>
+                            <th>Result</th>
+                            <th>LPM Date</th>
+                            <th>Chute Location</th>
+                            <th style="text-align:right">Qty</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var row in activeChute)
+                        {
+                            <tr>
+                                <td><b>@row.Result</b></td>
+                                <td style="font-family:Consolas,monospace;font-size:11px">@row.LpmDt</td>
+                                <td style="font-family:Consolas,monospace;font-size:11px">@row.ChuteLocation</td>
+                                <td style="text-align:right;font-weight:600">@row.Qty</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </div>
+
+</div><!-- grid -->
+</div><!-- page flex wrapper -->
+
+@code {
+    private bool _busy, _processing, _processed, _roboBusy;
+    private string? _globalErr, _globalInfo;
+    private Exception? _lastException;
+    private string? _exContext;
+    private bool _showStack;
+    private System.Threading.Timer? _refreshTimer;
+
+    private ElementReference _contRef;
+    private string _contInput = "", _contno = "";
+    private bool _contOk;
+
+    private ContProcessValidation? _validation;
+    private ContProcessOutcome? _outcome;
+    private List<ChuteLocationRow> _chuteRows = new();
+
+    private int _progDone, _progTotal;
+    private string _progItem = "";
+    private int ProgressPct => _progTotal > 0 ? (int)Math.Round(_progDone * 100.0 / _progTotal) : 0;
+
+    private System.Diagnostics.Stopwatch _sw = new();
+    private TimeSpan _elapsed;
+    private string ElapsedStr => _processed
+        ? $"{(int)_elapsed.TotalHours:D2}:{_elapsed.Minutes:D2}:{_elapsed.Seconds:D2}"
+        : $"{(int)_sw.Elapsed.TotalHours:D2}:{_sw.Elapsed.Minutes:D2}:{_sw.Elapsed.Seconds:D2}";
+
+    private record LiveItemRow(string Itemcode, string Itemname, string? Bc, string Result, DateTime? LpmDt, int Qty);
+    private readonly List<LiveItemRow> _liveRows = new();
+    private readonly Dictionary<(string Itemcode, string Result), int> _liveIdx = new();
+
+    private record ChuteKey(string Result, string Bc, string Season, string LpmDt);
+    private readonly Dictionary<ChuteKey, int> _chuteLive = new();
+
+    private IEnumerable<ChuteLocationRow> ActiveChuteRows =>
+        _processed
+            ? _chuteRows
+            : _chuteLive.Select(kv =>
+              {
+                  var chute = kv.Key.Result == "Photo Buffer"
+                      ? $"{kv.Key.Result}-{kv.Key.Season}-{kv.Key.LpmDt}"
+                      : $"{kv.Key.Result}-{kv.Key.Bc}-{kv.Key.Season}-{kv.Key.LpmDt}";
+                  return new ChuteLocationRow(kv.Key.Result, kv.Key.LpmDt, chute, kv.Value);
+              }).OrderBy(r => r.Result);
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender) await TryFocus(_contRef);
+    }
+
+    private async Task OnContKey(KeyboardEventArgs e) { if (e.Key == "Enter") await RunProcess(); }
+
+    private async Task RunProcess()
+    {
+        if (_processed) return;
+        ClearTransient(); _busy = true; _processing = true;
+        _progDone = 0; _progTotal = 0; _progItem = "";
+        _sw.Restart();
+
+        var cts = new CancellationTokenSource();
+
+        // All state mutations go through InvokeAsync so they always run on the circuit,
+        // regardless of which thread Progress<T> fires on.  Renders are driven by a
+        // separate timer below — decoupled from the report rate.
+        var progress = new Progress<ContProcessProgress>(p =>
+            _ = InvokeAsync(() =>
+            {
+                _progDone  = p.Done;
+                _progTotal = p.Total;
+                _progItem  = p.CurrentItemcode;
+
+                if (p.CurrentResult != null)
+                {
+                    // Live items table — keyed by (Itemcode, Result) so each result gets its own row
+                    var liveKey = (p.CurrentItemcode, p.CurrentResult);
+                    if (_liveIdx.TryGetValue(liveKey, out var idx))
+                    {
+                        var r = _liveRows[idx];
+                        _liveRows[idx] = r with { Qty = r.Qty + 1 };
+                    }
+                    else
+                    {
+                        _liveIdx[liveKey] = _liveRows.Count;
+                        _liveRows.Add(new LiveItemRow(p.CurrentItemcode, p.CurrentItemname ?? "", p.CurrentBc, p.CurrentResult, p.CurrentLpmDt, 1));
+                    }
+
+                    // Live chute summary — Photo Buffer doesn't use Bc in its chute key
+                    var lpmStr = p.CurrentLpmDt?.ToString("dd/MM/yyyy") ?? "";
+                    var bc     = p.CurrentResult == "Photo Buffer" ? "" : (p.CurrentBc ?? "");
+                    var ck = new ChuteKey(p.CurrentResult, bc, p.CurrentSeason ?? "", lpmStr);
+                    _chuteLive[ck] = _chuteLive.GetValueOrDefault(ck, 0) + 1;
+                }
+            }));
+
+        try
+        {
+            var input = (_contInput ?? "").Trim().ToUpperInvariant();
+            if (string.IsNullOrEmpty(input)) { _globalErr = "Container number is required."; return; }
+
+            // 1. Check container is open and receipt is done
+            var cv = await Build.ValidateContainerAsync(input);
+            if (!cv.Ok) { _globalErr = cv.Error; return; }
+
+            _contno = input; _contOk = true;
+
+            // 2. Pre-process checks: already processed, duplicate session, stored-proc prep, Ramadan, qty match, allocation exists
+            var precheck = await Proc.ValidateAndPrepareAsync(input, cts.Token);
+            if (precheck.IsAlreadyProcessed)
+            {
+                _contno = input; _contOk = true;
+                _outcome   = await Proc.GetExistingOutcomeAsync(input, cts.Token);
+                _chuteRows = await Proc.GetChuteLocationSummaryAsync(input, cts.Token);
+
+                var itemRows = await Proc.GetExistingItemRowsAsync(input, cts.Token);
+                foreach (var r in itemRows)
+                {
+                    var existingKey = (r.Itemcode, r.Result);
+                    if (_liveIdx.TryGetValue(existingKey, out var idx))
+                    {
+                        var existing2 = _liveRows[idx];
+                        _liveRows[idx] = existing2 with { Qty = existing2.Qty + r.Qty };
+                    }
+                    else
+                    {
+                        _liveIdx[existingKey] = _liveRows.Count;
+                        _liveRows.Add(new LiveItemRow(r.Itemcode, r.Itemname, r.Bc, r.Result, r.LpmDt, r.Qty));
+                    }
+                }
+
+                _processed  = true;
+                _globalInfo = $"Container {input} was already processed — showing existing results.";
+                return;
+            }
+            if (!precheck.Ok) { _globalErr = precheck.Error; return; }
+
+            // 3. Item validation (groupcode / BuildingCategory)
+            _validation = await Proc.ValidateItemsAsync(input);
+            if (!_validation.Ok) return;
+
+            await Audit.LogAsync("BuildingProcess.Validate", _contno, 'X', $"BuildingProcess/{_contno}", new { validation_ok = _validation.Ok });
+
+            // Render the progress bar immediately before handing off to background thread
+            StateHasChanged();
+
+            // Timer fires every 150 ms and re-renders the component independently of
+            // how fast or slow the processing thread is reporting progress.
+            _refreshTimer = new System.Threading.Timer(
+                _ => _ = InvokeAsync(StateHasChanged),
+                null, TimeSpan.Zero, TimeSpan.FromMilliseconds(150));
+
+            // 4. Run allocation on a background thread so the Blazor circuit stays free
+            //    to render progress updates as they arrive.
+            _outcome = await Task.Run(() =>
+                Proc.ProcessAsync(_contno, precheck.IsRamadanCont, false, _validation.Items, progress, cts.Token));
+            if (_outcome.Ok)
+            {
+                _processed = true;
+                _chuteRows = await Proc.GetChuteLocationSummaryAsync(_contno, cts.Token);
+                _globalInfo = $"Container {_contno} processed — {_outcome.TotalQty} unit(s) allocated across {_outcome.Summary.Count} result(s).";
+                await Audit.LogAsync("BuildingProcess.Process", _contno, 'I', $"BuildingProcess/{_contno}",
+                    new { skus = _outcome.TotalSku, qty = _outcome.TotalQty });
+            }
+            else
+            {
+                _globalErr = _outcome.Error;
+            }
+        }
+        catch (Exception ex) { CaptureException(ex, "RunProcess"); }
+        finally
+        {
+            _refreshTimer?.Dispose();
+            _refreshTimer = null;
+            _sw.Stop(); _elapsed = _sw.Elapsed; _busy = false; _processing = false;
+        }
+    }
+
+    private async Task PushToRobo()
+    {
+        if (string.IsNullOrEmpty(_contno) || _roboBusy) return;
+        ClearTransient();
+        _roboBusy = true;
+        try
+        {
+            var (ok, error, count) = await Proc.PushContainerToRoboAsync(_contno);
+            if (ok)
+                _globalInfo = error ?? $"Container {_contno} pushed to Robo — {count} row(s) inserted.";
+            else
+                _globalErr = error;
+        }
+        catch (Exception ex) { CaptureException(ex, "PushToRobo"); }
+        finally { _roboBusy = false; }
+    }
+
+    private async Task ResetAll()
+    {
+        _refreshTimer?.Dispose(); _refreshTimer = null;
+        _contInput = ""; _contno = ""; _contOk = false;
+        _validation = null; _outcome = null;
+        _processed = false; _processing = false;
+        _progDone = 0; _progTotal = 0; _progItem = "";
+        _sw.Reset(); _elapsed = TimeSpan.Zero;
+        _liveRows.Clear(); _liveIdx.Clear(); _chuteRows.Clear(); _chuteLive.Clear();
+        ClearTransient();
+        await TryFocus(_contRef);
+    }
+
+    private void ClearTransient() { _globalErr = null; _globalInfo = null; }
+
+    private void CaptureException(Exception ex, string context)
+    {
+        _lastException = ex; _exContext = context; _showStack = false;
+        Console.Error.WriteLine($"[BuildingProcess] {context}\n{ex}");
+    }
+
+    private async Task TryFocus(ElementReference r) { try { await r.FocusAsync(); } catch { } }
+}

@@ -2,7 +2,7 @@
 @using Aiwms.Data.Configuration
 @inject IConnectionConfig Conn
 
-<MudThemeProvider Theme="_theme" />
+<MudThemeProvider Theme="_mudTheme" />
 <MudPopoverProvider />
 <MudDialogProvider />
 <MudSnackbarProvider />
@@ -10,34 +10,73 @@
 <div class="aiwms-shell">
     <aside class="aiwms-sidebar">
         <div class="aiwms-brand">
-            <div class="aiwms-brand-title">AIWMS</div>
-            <div class="aiwms-brand-sub">Warehouse Management</div>
+            <div class="aiwms-brand-logo">
+                <div class="aiwms-logo-mark">AI</div>
+                <div>
+                    <div class="aiwms-brand-name">AIWMS</div>
+                    <div class="aiwms-brand-sub">Warehouse Management</div>
+                </div>
+            </div>
+
             <AuthorizeView>
                 <Authorized>
                     @{
-                        var role = context.User.IsInRole("Admin") ? "Admin"
-                                 : context.User.IsInRole("WHManager") ? "WH Manager"
+                        var rawName = context.User.Identity?.Name ?? "";
+                        var displayName = rawName.Contains('\\')
+                            ? rawName[(rawName.LastIndexOf('\\') + 1)..]
+                            : rawName;
+                        var initials = displayName.Length > 0
+                            ? displayName[0].ToString().ToUpperInvariant()
+                            : "?";
+                        var role = context.User.IsInRole("Admin")        ? "Admin"
+                                 : context.User.IsInRole("WHManager")    ? "WH Manager"
                                  : context.User.IsInRole("WHSupervisor") ? "WH Supervisor"
-                                 : context.User.IsInRole("WHAssociate") ? "WH Associate"
+                                 : context.User.IsInRole("WHAssociate")  ? "WH Associate"
                                  : "User";
                     }
-                    <span class="aiwms-role-badge">@role</span>
-                    <div class="aiwms-username">@context.User.Identity?.Name</div>
+                    <div class="aiwms-user-row">
+                        <div class="aiwms-avatar">@initials</div>
+                        <div class="aiwms-user-info">
+                            <div class="aiwms-username">@displayName</div>
+                            <span class="aiwms-role-badge">@role</span>
+                        </div>
+                    </div>
+
                     @if (Conn.IsConfigured && Conn.Current is { } cur)
                     {
-                        <div class="aiwms-server-info" title="@cur.ToDataSource() / @cur.Database">
-                            <span class="aiwms-server-dot">●</span>
-                            <span class="aiwms-server-text">@cur.ToDataSource()</span>
+                        <div class="aiwms-server-status" title="@cur.ToDataSource() / @cur.Database">
+                            <span class="aiwms-status-dot"></span>
+                            <span class="aiwms-server-text">@cur.ToDataSource() &nbsp;/ @cur.Database</span>
                         </div>
-                        <div class="aiwms-server-db">db: @cur.Database</div>
                     }
                 </Authorized>
             </AuthorizeView>
         </div>
+
         <NavMenu />
     </aside>
 
     <main class="aiwms-main">
+        <div class="aiwms-topbar">
+            <span class="aiwms-topbar-title">AIWMS</span>
+            <span class="aiwms-topbar-sep">/</span>
+            <span class="aiwms-topbar-sub">Warehouse Management System</span>
+            <div class="aiwms-topbar-spacer"></div>
+            <AuthorizeView>
+                <Authorized>
+                    @{
+                        var tbRaw = context.User.Identity?.Name ?? "";
+                        var tbName = tbRaw.Contains('\\') ? tbRaw[(tbRaw.LastIndexOf('\\') + 1)..] : tbRaw;
+                    }
+                    <div class="aiwms-topbar-user">
+                        <span class="aiwms-topbar-dot"></span>
+                        @tbName
+                    </div>
+                </Authorized>
+            </AuthorizeView>
+            <ThemePicker />
+        </div>
+
         <div class="aiwms-content">
             @Body
         </div>
@@ -51,20 +90,20 @@
 </div>
 
 @code {
-    private readonly MudTheme _theme = new()
+    private readonly MudTheme _mudTheme = new()
     {
         PaletteLight = new PaletteLight
         {
-            Primary       = "#2d6bcf",
+            Primary       = "#2563eb",
             Secondary     = "#64748b",
-            Background    = "#f0f2f5",
+            Background    = "#f1f5f9",
             Surface       = "#ffffff",
             TextPrimary   = "#0f172a",
             TextSecondary = "#475569",
-            LinesDefault  = "#e0e0e0",
-            Success       = "#28a745",
-            Error         = "#dc3545",
-            Warning       = "#f0c246",
+            LinesDefault  = "#e2e8f0",
+            Success       = "#16a34a",
+            Error         = "#dc2626",
+            Warning       = "#d97706",
         }
     };
 }

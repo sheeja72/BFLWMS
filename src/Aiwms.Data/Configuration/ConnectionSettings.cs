@@ -21,6 +21,27 @@ public class ConnectionSettings
     public bool Encrypt      { get; set; } = false;
     public int  ConnectTimeoutSec { get; set; } = 15;
 
+    // Optional second SQL Server for the JAFZA Robo system (receives a copy of PhotoCheckingResult).
+    // Leave blank to skip the Robo insert.
+    public string? RoboServer   { get; set; }
+    public string? RoboUsername { get; set; }
+    public string? RoboPassword { get; set; }
+    public bool HasRoboServer => !string.IsNullOrWhiteSpace(RoboServer) && !string.IsNullOrWhiteSpace(RoboUsername);
+
+    public string BuildRobo() => new SqlConnectionStringBuilder
+    {
+        DataSource = RoboServer!,
+        InitialCatalog = "bfldata",
+        UserID = RoboUsername!,
+        Password = RoboPassword ?? "",
+        TrustServerCertificate = TrustServerCertificate,
+        Encrypt = Encrypt,
+        ConnectTimeout = ConnectTimeoutSec,
+        ApplicationName = "AIWMS",
+        Pooling = true,
+        MaxPoolSize = 50,
+    }.ConnectionString;
+
     public string ToDataSource()
     {
         if (!string.IsNullOrWhiteSpace(Instance))
@@ -55,6 +76,9 @@ public interface IConnectionConfig
     ConnectionSettings? Current { get; }
     string GetAiwmsConnectionString();
     string GetConnectionString(string database);
+    bool HasRoboServer { get; }
+    bool IsRoboFallback { get; }   // true = Robo == primary (no separate server configured)
+    string GetRoboConnectionString();
     Task SaveAsync(ConnectionSettings settings, CancellationToken ct = default);
     Task<bool> TestAsync(ConnectionSettings settings, CancellationToken ct = default);
 }
@@ -84,6 +108,17 @@ public class FileConnectionConfig : IConnectionConfig
 
     public string GetConnectionString(string database) =>
         (_cache ?? throw new InvalidOperationException("Connection not configured. Visit /setup.")).Build(database);
+
+    // True whenever the primary is configured — we always have *some* Robo endpoint (real or fallback).
+    public bool HasRoboServer => IsConfigured;
+
+    // True = no separate Robo server configured; the primary server is used as the Robo target.
+    public bool IsRoboFallback => !(_cache?.HasRoboServer ?? false);
+
+    public string GetRoboConnectionString() =>
+        (_cache?.HasRoboServer == true)
+            ? _cache.BuildRobo()
+            : GetConnectionString("bfldata");  // fallback: same server, bfldata db
 
     public async Task SaveAsync(ConnectionSettings settings, CancellationToken ct = default)
     {

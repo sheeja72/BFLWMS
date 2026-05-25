@@ -81,13 +81,6 @@ public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryC
             new { c = contno }, cancellationToken: ct));
         if (received != 1) return new(false, $"Container {contno} receipt is not done.");
 
-        var open = await c.ExecuteScalarAsync<string?>(new CommandDefinition(
-            "SELECT TOP 1 closed FROM usa.dbo.OpenUSACont WITH (NOLOCK) WHERE contno = @c",
-            new { c = contno }, cancellationToken: ct));
-        if (open is null) return new(false, $"Container {contno} is not open in usa.dbo.OpenUSACont.");
-        if (string.Equals(open, "Y", StringComparison.OrdinalIgnoreCase))
-            return new(false, $"Container {contno} is closed in usa.dbo.OpenUSACont.");
-
         return new(true, null);
     }
 
