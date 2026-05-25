@@ -3,16 +3,18 @@
 #
 # Format: <path-pattern> <github-username-or-team>
 # More specific patterns below override more general ones.
-
-# Default reviewer for everything
-*                                       @sheeja72 @rijubfl
+#
+# Policy (Option B): no wildcard. Most PRs (UI, pages, services, CSS)
+# can be self-merged after CI passes. Only the paths listed here —
+# database schema, auth/startup, and CI/deploy workflows — require an
+# approving review from the other team member.
 
 # SQL schema needs an extra eye since it hits shared on-prem DBs
 /db/                                    @sheeja72 @rijubfl
 
-# Auth + Program.cs changes need careful review
+# Auth + Program.cs changes need careful review — can break login for everyone
 /src/Aiwms.Web/Auth/                    @sheeja72 @rijubfl
 /src/Aiwms.Web/Program.cs               @sheeja72 @rijubfl
 
-# CI / GitHub config
-/.github/                               @sheeja72 @rijubfl
+# CI / deploy workflows — controls what ships to production
+/.github/workflows/                     @sheeja72 @rijubfl
