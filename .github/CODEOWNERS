@@ -5,14 +5,14 @@
 # More specific patterns below override more general ones.
 
 # Default reviewer for everything
-*                                       @sheeja72
+*                                       @sheeja72 @rijubfl
 
 # SQL schema needs an extra eye since it hits shared on-prem DBs
-/db/                                    @sheeja72
+/db/                                    @sheeja72 @rijubfl
 
 # Auth + Program.cs changes need careful review
-/src/Aiwms.Web/Auth/                    @sheeja72
-/src/Aiwms.Web/Program.cs               @sheeja72
+/src/Aiwms.Web/Auth/                    @sheeja72 @rijubfl
+/src/Aiwms.Web/Program.cs               @sheeja72 @rijubfl
 
 # CI / GitHub config
-/.github/                               @sheeja72
+/.github/                               @sheeja72 @rijubfl
