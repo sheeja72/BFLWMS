@@ -53,3 +53,13 @@ PublishProfiles/
 *.nupkg
 *.snupkg
 .nuget/
+ 
+# Claude Code local config / worktrees
+.claude/settings.local.json
+.claude/worktrees/
+ 
+# Language server caches
+*.lscache
+ 
+# Stray binary
+/BFLWMS
