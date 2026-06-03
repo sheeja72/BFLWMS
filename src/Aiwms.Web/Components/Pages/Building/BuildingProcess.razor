@@ -54,16 +54,23 @@
         <div class="aiwms-input-grid">
             <div class="aiwms-input-row">
                 <label class="aiwms-input-lbl">Cont. No <span class="req">*</span></label>
-                <input @ref="_contRef" @bind="_contInput" @bind:event="oninput" @onkeydown="OnContKey"
-                       class="aiwms-input @(_contOk ? "ok" : "")"
-                       placeholder="e.g. AEINT6078" autocomplete="off" disabled="@_busy" />
+                <div style="display:flex;gap:8px;align-items:center">
+                    <input @ref="_contRef" @bind="_contInput" @bind:event="oninput" @onkeydown="OnContKey"
+                           class="aiwms-input @(_contOk ? "ok" : "")"
+                           placeholder="e.g. AEINT6078" autocomplete="off" disabled="@_busy"
+                           style="flex:1;margin:0" />
+                    <button class="aiwms-btn aiwms-btn-primary" @onclick="RunProcess"
+                            disabled="@(string.IsNullOrWhiteSpace(_contInput) || _busy || _processed)"
+                            style="white-space:nowrap;padding:10px 28px;font-size:15px;font-weight:700;min-width:160px">Process</button>
+                    <button class="aiwms-btn aiwms-btn-secondary" @onclick="ResetAll" disabled="@_busy"
+                            style="white-space:nowrap;padding:10px 28px;font-size:15px;font-weight:700;min-width:160px">Reset</button>
+                </div>
             </div>
         </div>
 
         <div class="aiwms-input-actions">
-            <button class="aiwms-btn aiwms-btn-primary"   @onclick="RunProcess"        disabled="@(string.IsNullOrWhiteSpace(_contInput) || _busy || _processed)">Process</button>
-            <button class="aiwms-btn aiwms-btn-secondary" @onclick="ResetAll"          disabled="@_busy">Reset</button>
-            <button class="aiwms-btn aiwms-btn-secondary" @onclick="PushToRobo" disabled="@(!_processed || _busy || _roboBusy)">
+            <button class="aiwms-btn aiwms-btn-secondary" @onclick="PushToRobo" disabled="@(!_processed || _busy || _roboBusy)"
+                    style="padding:10px 28px;font-size:15px;font-weight:700">
                 @if (_roboBusy) { <span>Pushing…</span> } else { <span>Open Container - Robo</span> }
             </button>
         </div>
@@ -89,9 +96,26 @@
     </div>
 
     <!-- ── PROGRESS / SUMMARY (right column, full height) ── -->
-    <div class="aiwms-section aiwms-item-frame" style="grid-column:2;grid-row:1/-1;display:flex;flex-direction:column;overflow:hidden">
-        <div class="aiwms-card-header">Results</div>
+    <div class="aiwms-section aiwms-item-frame" style="grid-column:2;grid-row:1/-1;display:flex;flex-direction:column;overflow:hidden;padding:0">
+        <div style="display:flex;border-bottom:2px solid var(--border);background:var(--bg)">
+            <button @onclick='() => SwitchResultsTab("results")'
+                    style="padding:10px 20px;font-size:13px;font-weight:600;border:none;cursor:pointer;background:transparent;
+                           color:@(_resultsTab=="results" ? "var(--primary)" : "var(--text-muted)");
+                           border-bottom:@(_resultsTab=="results" ? "2px solid var(--primary)" : "2px solid transparent");
+                           margin-bottom:-2px">
+                Results
+            </button>
+            <button @onclick='() => SwitchResultsTab("chute")'
+                    style="padding:10px 20px;font-size:13px;font-weight:600;border:none;cursor:pointer;background:transparent;
+                           color:@(_resultsTab=="chute" ? "var(--primary)" : "var(--text-muted)");
+                           border-bottom:@(_resultsTab=="chute" ? "2px solid var(--primary)" : "2px solid transparent");
+                           margin-bottom:-2px">
+                Chute Location
+            </button>
+        </div>
 
+        @if (_resultsTab == "results")
+        {
         @if (_processing)
         {
             <div style="padding:14px 16px 10px;border-bottom:1px solid var(--border)">
@@ -142,61 +166,181 @@
                         @foreach (var row in _liveRows.OrderBy(r => r.Itemcode).ThenBy(r => r.Result))
                         {
                             <tr>
-                                <td style="font-family:Consolas,monospace;font-size:11px">@row.Itemcode</td>
+                                <td>@row.Itemcode</td>
                                 <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="@row.Itemname">@row.Itemname</td>
                                 <td>@row.Bc</td>
-                                <td><b>@row.Result</b></td>
-                                <td style="font-family:Consolas,monospace;font-size:11px">@(row.LpmDt?.ToString("dd/MM/yyyy") ?? "")</td>
-                                <td style="text-align:right;font-weight:600">@row.Qty</td>
+                                <td>@row.Result</td>
+                                <td>@(row.LpmDt?.ToString("dd/MM/yyyy") ?? "")</td>
+                                <td style="text-align:right">@row.Qty</td>
                             </tr>
                         }
                     </tbody>
                 </table>
             </div>
+        }
+        }
+        else if (_resultsTab == "chute")
+        {
+            @if (_chuteLoading)
+            {
+                <div style="text-align:center;padding:24px;color:var(--text-muted)">Loading…</div>
+            }
+            else if (_chuteErr is not null)
+            {
+                <div style="color:var(--danger);font-size:13px;padding:12px 16px">@_chuteErr</div>
+            }
+            else if (_chuteShopRows.Count == 0)
+            {
+                <div style="color:var(--text-muted);font-size:13px;padding:12px 16px">No chute locations found.</div>
+            }
+            else
+            {
+                <div style="flex:1;overflow-y:auto;padding:4px 0">
+                    <table class="aiwms-table aiwms-table-dense">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th style="min-width:90px">Shop ID</th>
+                                <th>Shop Name</th>
+                                <th>Chutes</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @{ int chuteRowNo2 = 0; }
+                            @foreach (var row in _chuteShopRows)
+                            {
+                                chuteRowNo2++;
+                                <tr>
+                                    <td>@chuteRowNo2</td>
+                                    <td>@row.RoboShopId</td>
+                                    <td style="white-space:nowrap">@row.ShopName</td>
+                                    <td>@row.Chutes</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
         }
     </div>
 
-    <!-- ── CHUTE SUMMARY ── -->
-    <div class="aiwms-section" style="display:flex;flex-direction:column;overflow:hidden">
-        <div class="aiwms-card-header">Chute Location Summary</div>
-        @{ var activeChute = ActiveChuteRows.ToList(); }
-        @if (!activeChute.Any())
+    <!-- ── SUMMARY / CHUTE LOCATION TABS ── -->
+    <div class="aiwms-section" style="display:flex;flex-direction:column;overflow:hidden;padding:0">
+        <!-- Tab headers -->
+        <div style="display:flex;border-bottom:2px solid var(--border);background:var(--bg)">
+            <button @onclick='() => SwitchTab("summary")'
+                    style="padding:10px 20px;font-size:13px;font-weight:600;border:none;cursor:pointer;background:transparent;
+                           color:@(_rightTab=="summary" ? "var(--primary)" : "var(--text-muted)");
+                           border-bottom:@(_rightTab=="summary" ? "2px solid var(--primary)" : "2px solid transparent");
+                           margin-bottom:-2px">
+                Summary
+            </button>
+            <button @onclick='() => SwitchTab("lpm")'
+                    style="padding:10px 20px;font-size:13px;font-weight:600;border:none;cursor:pointer;background:transparent;
+                           color:@(_rightTab=="lpm" ? "var(--primary)" : "var(--text-muted)");
+                           border-bottom:@(_rightTab=="lpm" ? "2px solid var(--primary)" : "2px solid transparent");
+                           margin-bottom:-2px">
+                LPM Date
+            </button>
+        </div>
+
+        <!-- Summary tab -->
+        @if (_rightTab == "summary")
         {
-            <div style="color:var(--text-muted);font-size:13px;padding:8px 4px">Process a container to see result summary.</div>
-        }
-        else
-        {
-            <div style="flex:1;overflow-y:auto;padding:4px 0">
-                <table class="aiwms-table aiwms-table-dense">
-                    <thead>
-                        <tr>
-                            <th>Result</th>
-                            <th>LPM Date</th>
-                            <th>Chute Location</th>
-                            <th style="text-align:right">Qty</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        @foreach (var row in activeChute)
-                        {
+            var activeChute = ActiveChuteRows.ToList();
+            if (!activeChute.Any())
+            {
+                <div style="color:var(--text-muted);font-size:13px;padding:12px 16px">Process a container to see result summary.</div>
+            }
+            else
+            {
+                <div style="flex:1;overflow-y:auto;padding:4px 0">
+                    <table class="aiwms-table aiwms-table-dense">
+                        <thead>
                             <tr>
-                                <td><b>@row.Result</b></td>
-                                <td style="font-family:Consolas,monospace;font-size:11px">@row.LpmDt</td>
-                                <td style="font-family:Consolas,monospace;font-size:11px">@row.ChuteLocation</td>
-                                <td style="text-align:right;font-weight:600">@row.Qty</td>
+                                <th>Result</th>
+                                <th>LPM Date</th>
+                                <th>Chute Location</th>
+                                <th style="text-align:right">Qty</th>
                             </tr>
-                        }
-                    </tbody>
-                </table>
-            </div>
+                        </thead>
+                        <tbody>
+                            @foreach (var row in activeChute)
+                            {
+                                <tr>
+                                    <td>@row.Result</td>
+                                    <td>@row.LpmDt</td>
+                                    <td>@row.ChuteLocation</td>
+                                    <td style="text-align:right">@row.Qty</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        }
+
+        <!-- LPM Date tab -->
+        @if (_rightTab == "lpm")
+        {
+            @if (_lpmDateLoading)
+            {
+                <div style="text-align:center;padding:24px;color:var(--text-muted)">Loading…</div>
+            }
+            else if (_lpmDateErr is not null)
+            {
+                <div style="color:var(--danger);font-size:13px;padding:12px 16px">@_lpmDateErr</div>
+            }
+            else if (_lpmDateRows.Count == 0)
+            {
+                <div style="color:var(--text-muted);font-size:13px;padding:12px 16px">No LPM data found.</div>
+            }
+            else
+            {
+                <div style="flex:1;overflow-y:auto;padding:4px 0">
+                    <table class="aiwms-table aiwms-table-dense">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>ORA PO No</th>
+                                <th>LPM</th>
+                                <th style="text-align:right">LPM Qty</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @{ int lpmRowNo = 0; }
+                            @foreach (var row in _lpmDateRows)
+                            {
+                                lpmRowNo++;
+                                <tr>
+                                    <td>@lpmRowNo</td>
+                                    <td>@row.OraPONo</td>
+                                    <td>@row.Lpm</td>
+                                    <td style="text-align:right">@row.LpmQty</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
         }
     </div>
 
 </div><!-- grid -->
 </div><!-- page flex wrapper -->
 
+
 @code {
     private bool _busy, _processing, _processed, _roboBusy;
+    private bool _chuteLoading;
+    private string? _chuteErr;
+    private string _rightTab = "summary";
+    private string _resultsTab = "results";
+    private List<LpmDateRow> _lpmDateRows = [];
+    private bool _lpmDateLoading;
+    private string? _lpmDateErr;
+    private List<ChuteLocationRow> _chuteRows = [];
+    private List<ChuteLocationShopRow> _chuteShopRows = [];
     private string? _globalErr, _globalInfo;
     private Exception? _lastException;
     private string? _exContext;
@@ -209,7 +353,6 @@
 
     private ContProcessValidation? _validation;
     private ContProcessOutcome? _outcome;
-    private List<ChuteLocationRow> _chuteRows = new();
 
     private int _progDone, _progTotal;
     private string _progItem = "";
@@ -387,6 +530,74 @@
         finally { _roboBusy = false; }
     }
 
+    private async Task SwitchResultsTab(string tab)
+    {
+        _resultsTab = tab;
+        if (tab == "chute" && _chuteShopRows.Count == 0 && _chuteErr is null && !_chuteLoading)
+            await LoadChuteShopRowsAsync();
+    }
+
+    private async Task SwitchTab(string tab)
+    {
+        _rightTab = tab;
+        if (tab == "lpm" && _lpmDateRows.Count == 0 && _lpmDateErr is null && !_lpmDateLoading)
+            await LoadLpmDateRowsAsync();
+    }
+
+    private async Task LoadLpmDateRowsAsync()
+    {
+        if (string.IsNullOrEmpty(_contno)) return;
+        _lpmDateLoading = true;
+        _lpmDateRows = [];
+        _lpmDateErr = null;
+        StateHasChanged();
+        try
+        {
+            _lpmDateRows = await Proc.GetLpmDateSummaryAsync(_contno);
+        }
+        catch (Exception ex)
+        {
+            _lpmDateErr = $"{ex.GetType().Name}: {ex.Message}";
+        }
+        finally
+        {
+            _lpmDateLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task LoadChuteShopRowsAsync()
+    {
+        if (string.IsNullOrEmpty(_contno)) return;
+        _chuteLoading = true;
+        _chuteShopRows = [];
+        _chuteErr = null;
+        StateHasChanged();
+        try
+        {
+            var (hasData, rows) = await Proc.GetChuteLocationsAsync(_contno);
+            if (!hasData)
+                _chuteErr = "Container not open yet for robo";
+            else
+                _chuteShopRows = rows;
+        }
+        catch (Exception ex)
+        {
+            _chuteErr = $"{ex.GetType().Name}: {ex.Message}";
+        }
+        finally
+        {
+            _chuteLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task ShowChuteLocation()
+    {
+        _rightTab = "chute";
+        await LoadChuteShopRowsAsync();
+    }
+
     private async Task ResetAll()
     {
         _refreshTimer?.Dispose(); _refreshTimer = null;
@@ -396,6 +607,10 @@
         _progDone = 0; _progTotal = 0; _progItem = "";
         _sw.Reset(); _elapsed = TimeSpan.Zero;
         _liveRows.Clear(); _liveIdx.Clear(); _chuteRows.Clear(); _chuteLive.Clear();
+        _chuteShopRows = []; _chuteErr = null;
+        _lpmDateRows = []; _lpmDateErr = null;
+        _rightTab = "summary";
+        _resultsTab = "results";
         ClearTransient();
         await TryFocus(_contRef);
     }

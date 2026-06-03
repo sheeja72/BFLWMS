@@ -45,7 +45,8 @@
         </div>
         <div class="aiwms-form-row">
             <label>SQL Password <span style="color:#dc3545">*</span></label>
-            <input type="password" @bind="_settings.Password" autocomplete="new-password" />
+            <input type="password" @bind="_settings.Password" autocomplete="new-password"
+                   placeholder="@(Conn.Current?.Password is { Length: > 0 } ? "Leave blank to keep saved password" : "")" />
         </div>
         <div class="aiwms-form-row">
             <label>Trust Server Cert</label>
@@ -110,6 +111,10 @@
         _busy = true; _msg = null;
         try
         {
+            // If password left blank, keep the previously saved password
+            if (string.IsNullOrEmpty(_settings.Password) && Conn.Current?.Password is { Length: > 0 } existing)
+                _settings.Password = existing;
+
             await Conn.TestAsync(_settings, default);
             await Conn.SaveAsync(_settings);
             Snack.Add("Connection saved. Reloading...", Severity.Success);

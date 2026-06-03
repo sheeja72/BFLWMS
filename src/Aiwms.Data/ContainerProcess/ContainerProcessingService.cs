@@ -1,4 +1,6 @@
-﻿using Aiwms.Core;
+﻿using System.Net.Http.Headers;
+using System.Text;
+using Aiwms.Core;
 using Aiwms.Data.Configuration;
 using Dapper;
 using Microsoft.Data.SqlClient;
@@ -8,12 +10,17 @@ namespace Aiwms.Data.ContainerProcess;
 /// <summary>
 /// Implements the legacy VB ContainerProcess logic.
 /// For each item Ã— orgqty in the container it runs the 3-tier allocation:
-///   Online (ToysInitialAllocationDetail) â†’ Export (PowerDrops / Brands / Ramadan) â†’ Shop fallback.
+///   Online (ToysInitialAllocationDetail) â†' Export (PowerDrops / Brands / Ramadan) â†' Shop fallback.
 /// Results are written to ONLINE.dbo.PhotoCheckingResult (+ optional Robo server).
 /// </summary>
 public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser currentUser)
 {
-    // â”€â”€ connection helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    private static readonly HttpClient _roboHttp = new();
+    private const string RoboApiBase = "https://bflapigee-dev.bflgroup.ae/bfl-iq-api";
+    private const string RoboApiToken =
+        "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIxMSIsImp0aSI6IjJmMzZiODM5MjAxZDAwZjhjNWViNzc0YTMxOWJjZDA3ZjMwODFiMmIzYWU0ZWYzYmQ3NzUzYTQzMWU0OGU3ODQxMTRjYjRhYmIxMDFjYmE4IiwiaWF0IjoxNzY5MjM5OTUzLjcyMzQ2NiwibmJmIjoxNzY5MjM5OTUzLjcyMzQ2NywiZXhwIjoxODMyMzExOTUzLjcxOTEwOSwic3ViIjoiMTQzIiwic2NvcGVzIjpbXX0.cg_hwNSyi3zOXvixJPRK_FQObQLks4-fH1YVtepp0YpZfnNhtstosTSwH3mWJP45JMmSfGzCnj1MiSmOi7zKXRtYHgYjdo0Bfzs-AIYa7yxjEfmQrLvKoRTiRT07AzTQRcS_b6AB-fCkuzojnSvwScB_-d9hKkkhey234YHLLGBJpNDMTtrsUIZiQEo7OSEEWZ4FpfxrNlyJIJMMT9gg3OvFfEklR8oqMiTZOgsOSsOIbBYPb0J1n6H7qyuGB5reSIj9uzDNXMjTmQtQJR-THVOJga7LSajP48ncHJfMimNrfoUDf6FnIX7WyeeFd--D4aZ44P7geKZ0Yqp5K2888PcB7FpBgSo1_VKu4X5S7-NNDVmv8Y6NA5WMj0l-EKhEWzAQxoJEENHU6C9DJqrMUC5SJDkTN8_5X7YvUxUbMOIpT2Vx8MXLCYwLzobvx8q8iZfwTLM7Pz7jHuJyA1qSA4H-pan37T9JrgGnsMz0fthFOOKv_8hJ2hoRbkHK13tf98pSFlbH19u4-6D5zR83hgbNQZNf_AsdL2SWwYibo85yziSl_tPWdQOU4Ipk_QCybKGu27QIaDKyY0xAWII8cKktZwtQa8FSyyo5kdsDNrfsfDzYK00iLxPXeLs8Tvi6vCiZ6bplBQexcOTGTmV95zYD4yb_nrS31m88x2TIn0M";
+
+    // â"€â"€ connection helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     private SqlConnection Open() =>
         Open(null);
@@ -26,7 +33,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         return c;
     }
 
-    // â”€â”€ 1. Validate items (check groupcode / BuildingCategory completeness) â”€â”€
+    // â"€â"€ 1. Validate items (check groupcode / BuildingCategory completeness) â"€â"€
 
     public async Task<ContProcessValidation> ValidateItemsAsync(string contno, CancellationToken ct = default)
     {
@@ -41,34 +48,38 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
 
         if (missing.Count > 0)
             return new ContProcessValidation(false,
-                $"{missing.Count} item(s) missing GroupCode/BuildingCategory â€” check tempdata.dbo.containerprocess_missing.",
+                $"{missing.Count} item(s) missing GroupCode/BuildingCategory  -  check tempdata.dbo.containerprocess_missing.",
                 missing, null);
 
         return new ContProcessValidation(true, null, new List<string>(), items);
     }
 
-    // â”€â”€ Pre-process checks (mirrors VB btnProcess_Click pre-flight) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ Pre-process checks (mirrors VB btnProcess_Click pre-flight) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     public async Task<ContProcessPrecheck> ValidateAndPrepareAsync(string contno, CancellationToken ct = default)
     {
         await using var c = Open();
 
-        // 1. Already fully processed? â€” load existing data instead of blocking
+        // 1. Already fully processed?
         int existing = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
             "SELECT COUNT(1) FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK) WHERE ContNo=@c",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct)) ?? 0;
         if (existing > 0)
             return new ContProcessPrecheck(false, null, IsAlreadyProcessed: true);
 
-        // 2. Already started (any record in PhotoCheckingResultStart blocks reprocessing)
-        bool alreadyStarted = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT TOP 1 1 FROM ONLINE.dbo.PhotoCheckingResultStart WITH (NOLOCK) WHERE ContNo=@c",
-            new { c = contno }, commandTimeout: 300, cancellationToken: ct)) == 1;
-        if (alreadyStarted)
-            return new ContProcessPrecheck(false,
-                $"Container {contno} has already been started or processed. It cannot be processed again.");
+        // 2. Already started — distinguish fully finished from mid-flight
+        var startRow = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
+            "SELECT Finish FROM ONLINE.dbo.PhotoCheckingResultStart WITH (NOLOCK) WHERE ContNo=@c",
+            new { c = contno }, commandTimeout: 300, cancellationToken: ct));
+        if (startRow != null)
+        {
+            string startMsg = (string?)startRow.Finish == "Y"
+                ? $"Container {contno} has already completed processing. Please check with IT."
+                : $"Container {contno} has started processing but not completed. Please check with IT.";
+            return new ContProcessPrecheck(false, startMsg);
+        }
 
-        // 3. Prepare allocation tables via stored procs (can take several minutes on large containers)
+        // 3. Prepare allocation tables via stored procs
         await c.ExecuteAsync(new CommandDefinition(
             "EXEC Online.dbo.Stp_ProductionDept_Samples @ContNo=@c",
             new { c = contno }, commandTimeout: 600, cancellationToken: ct));
@@ -76,7 +87,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             "EXEC Online.dbo.Stp_ExportAllocation_Brands @ContNo=@c",
             new { c = contno }, commandTimeout: 600, cancellationToken: ct));
 
-        // 4. Auto-detect Ramadan container
+// 5. Auto-detect Ramadan container
         bool isRamadan = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
             @"SELECT TOP 1 1 FROM usa.dbo.Reserve_Groups WITH (NOLOCK)
               WHERE PalletType_result = 'RAMADAN'
@@ -84,7 +95,38 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                 AND trndate >= GETDATE() - 180",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct)) == 1;
 
-        // 6. Container type â€” only USA supported; TCM requires separate flow
+        // 5b. Ramadan container validation
+        if (isRamadan)
+        {
+            string? nonRamadanGroups = await c.ExecuteScalarAsync<string?>(new CommandDefinition(
+                @"SELECT ISNULL(STRING_AGG(groupCode, ', '),'')
+                  FROM usa.dbo.USAPriority WITH (NOLOCK)
+                  WHERE groupCode IN (
+                      SELECT DISTINCT GroupCode FROM usa.dbo.USAOrgfile WITH (NOLOCK)
+                      WHERE ContNo = @c
+                        AND ContNo IN (SELECT ContNo FROM usa.dbo.ContRamadanDept)
+                  )
+                  AND Department NOT LIKE '%Ramadan%'",
+                new { c = contno }, commandTimeout: 300, cancellationToken: ct));
+            if (!string.IsNullOrEmpty(nonRamadanGroups))
+                return new ContProcessPrecheck(false,
+                    $"RAMADAN container has groups with non-Ramadan department. Please contact IT. Groups: {nonRamadanGroups}");
+
+            string? nonRamadanItems = await c.ExecuteScalarAsync<string?>(new CommandDefinition(
+                @"SELECT ISNULL(STRING_AGG(Itemcode, ', '),'')
+                  FROM usa.dbo.USAOrgfile WITH (NOLOCK)
+                  WHERE ContNo = @c
+                    AND GroupCode IN (
+                        SELECT GroupCode FROM usa.dbo.USAPriority WITH (NOLOCK) WHERE Department LIKE '%Ramadan%'
+                    )
+                    AND Itemcode NOT IN (SELECT Itemcode FROM usa.dbo.RAMADANGroups WITH (NOLOCK))",
+                new { c = contno }, commandTimeout: 300, cancellationToken: ct));
+            if (!string.IsNullOrEmpty(nonRamadanItems))
+                return new ContProcessPrecheck(false,
+                    $"RAMADAN container has items outside Ramadan groups. Items: {nonRamadanItems}");
+        }
+
+        // 6. Container type  -  only USA supported; TCM requires separate flow
         bool isTcm = contno.StartsWith("TCM", StringComparison.OrdinalIgnoreCase);
         if (isTcm)
             return new ContProcessPrecheck(false,
@@ -92,7 +134,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
 
         string contType = isRamadan ? "USA-R" : "USA";
 
-        // 7. LPM qty must equal ORG qty (only when LPM rows exist)
+        // 7. 3-way qty validation: LPM = ORG = HODATA Order (only when LPM rows exist)
         bool hasLpm = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
             "SELECT TOP 1 1 FROM usa.dbo.usaorgfile_LPM WITH (NOLOCK) WHERE contno=@c",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct)) == 1;
@@ -101,17 +143,19 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         {
             var qty = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
                 @"SELECT
-                      LpmQty = (SELECT ISNULL(SUM(OrgQty),0) FROM usa.dbo.usaorgfile_LPM WITH (NOLOCK) WHERE ContNo=@c),
-                      OrgQty = (SELECT ISNULL(SUM(OrgQty),0) FROM usa.dbo.USAOrgFile   WITH (NOLOCK) WHERE ContNo=@c)",
+                      LpmQty   = (SELECT ISNULL(SUM(OrgQty),0) FROM usa.dbo.usaorgfile_LPM WITH (NOLOCK) WHERE ContNo=@c),
+                      OrgQty   = (SELECT ISNULL(SUM(OrgQty),0) FROM usa.dbo.USAOrgFile     WITH (NOLOCK) WHERE ContNo=@c),
+                      OrderQty = (SELECT ISNULL(SUM(qty),0)    FROM HODATA.dbo.vUSAOrder   WITH (NOLOCK) WHERE refno=@c)",
                 new { c = contno }, commandTimeout: 300, cancellationToken: ct));
 
             if (qty != null)
             {
-                int lpmQty = (int)(qty.LpmQty ?? 0);
-                int orgQty = (int)(qty.OrgQty ?? 0);
-                if (lpmQty != orgQty)
+                int lpmQty   = (int)(qty.LpmQty   ?? 0);
+                int orgQty   = (int)(qty.OrgQty   ?? 0);
+                int orderQty = (int)(qty.OrderQty ?? 0);
+                if (lpmQty != orgQty || orgQty != orderQty)
                     return new ContProcessPrecheck(false,
-                        $"Qty mismatch: LPM has {lpmQty} unit(s), ORG file has {orgQty} unit(s). Resolve before processing.");
+                        $"Qty mismatch — LPM: {lpmQty}, ORG: {orgQty}, Order: {orderQty}. All three must match before processing.");
             }
         }
 
@@ -123,7 +167,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             return new ContProcessPrecheck(false,
                 $"No online allocation found for {contno}. Complete the allocation step before processing.");
 
-        // 9. Mark as started â€” plain INSERT only (blocked above if row already exists)
+        // 9. Mark as started
         await c.ExecuteAsync(new CommandDefinition(
             "INSERT INTO ONLINE.dbo.PhotoCheckingResultStart (ContNo, finish, trndate, time1, username) VALUES (@c, 'N', @d, @t, @u)",
             new { c = contno, d = DateTime.Now.Date, t = DateTime.Now.ToString("HH:mm:ss"), u = currentUser.Name }, commandTimeout: 300, cancellationToken: ct));
@@ -145,7 +189,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         return await EnrichItemsAsync(c, items, ct);
     }
 
-    // â”€â”€ 2. Run full container process â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ 2. Run full container process â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     public async Task<ContProcessOutcome> ProcessAsync(
         string contno,
@@ -155,7 +199,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         IProgress<ContProcessProgress>? progress = null,
         CancellationToken ct = default)
     {
-        // â”€â”€ Timing instrumentation â€” prints a breakdown to the server console â”€â”€
+        // â"€â"€ Timing instrumentation  -  prints a breakdown to the server console â"€â"€
         var swTotal = System.Diagnostics.Stopwatch.StartNew();
         var timings = new System.Collections.Generic.List<(string Label, long Ms)>();
         var swStep  = System.Diagnostics.Stopwatch.StartNew();
@@ -179,7 +223,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         int done = 0;
         var results = new List<ContProcessResultRow>(totalQty);
 
-        // â”€â”€ Pre-load static lookups (1 query each, covers all items) â”€â”€â”€â”€â”€â”€â”€â”€
+        // â"€â"€ Pre-load static lookups (1 query each, covers all items) â"€â"€â"€â"€â"€â"€â"€â"€
         var ceilings  = await LoadCeilingsAsync(c, items.Select(x => x.Division).Distinct().ToList(), ct);
         var locStock  = await LoadLocStockAsync(c, items.Select(x => x.Upc).Distinct().ToList(), ct);
         var allocInit = await LoadAllocInitialAsync(c, contno, items.Select(x => x.Itemcode).Distinct().ToList(), ct);
@@ -187,7 +231,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
 
         var shopMinsCache = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
 
-        // Pre-load PowerDrop groups â€” 1 query for all items instead of 1 per item
+        // Pre-load PowerDrop groups  -  1 query for all items instead of 1 per item
         var pdGroups = new HashSet<string>((await c.QueryAsync<string>(new CommandDefinition(
             "SELECT DISTINCT GroupCode FROM USA.dbo.PowerDrops WITH (NOLOCK) WHERE ContNo=@c",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct))), StringComparer.OrdinalIgnoreCase);
@@ -208,13 +252,60 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
 
         // Pre-load UPC barcodes (realCode + itemType + origin) for all UPCs in one query
         var upcBarcodeMap = await LoadUpcBarcodesAsync(c, items.Select(x => x.Upc).Distinct().ToList(), ct);
-        // Pre-load excludeexport_Item for the whole container â€” replaces per-item SELECT
+        // Pre-load excludeexport_Item for the whole container  -  replaces per-item SELECT
         var excludeItemCached = new HashSet<string>((await c.QueryAsync<string>(new CommandDefinition(
             "SELECT UPC FROM usa.dbo.excludeexport_Item WITH (NOLOCK) WHERE ContNo=@c",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct))), StringComparer.OrdinalIgnoreCase);
-        // GroupCode-level Brands context cache â€” ~14 queries run once per unique GC, not per item
+        // GroupCode-level Brands context cache  -  ~14 queries run once per unique GC, not per item
         var brandsGroupCache = new Dictionary<string, BrandsGroupCtx?>(StringComparer.OrdinalIgnoreCase);
         Tick("PreLoadUpcAndExcludeCache");
+
+        // Build full list of real itemcodes for the container
+        var allRealCodes = items
+            .Select(x => upcBarcodeMap.TryGetValue(x.Upc, out var uv) && !string.IsNullOrEmpty(uv.RealCode)
+                ? uv.RealCode : x.Itemcode)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        // Create #USAStock temp table — loaded once, all reads/writes hit this during processing,
+        // then flushed back to the real table in a single MERGE at the end.
+        await c.ExecuteAsync(new CommandDefinition(@"
+            CREATE TABLE #USAStock (
+                ItemCode      NVARCHAR(50) NOT NULL,
+                Shop          NVARCHAR(50) NOT NULL,
+                Quantity      INT NOT NULL DEFAULT 0,
+                QtyToSend     INT NOT NULL DEFAULT 0,
+                QtyReqd       INT NOT NULL DEFAULT 0,
+                QtyReqdDirty  BIT NOT NULL DEFAULT 0,
+                PRIMARY KEY (ItemCode, Shop)
+            )", commandTimeout: 60, cancellationToken: ct));
+
+        if (allRealCodes.Count > 0)
+        {
+            // Stage item codes via SqlBulkCopy — avoids 2100-parameter IN-list limit
+            await c.ExecuteAsync(new CommandDefinition(
+                "CREATE TABLE #ItemCodes (ItemCode NVARCHAR(50) NOT NULL PRIMARY KEY)",
+                commandTimeout: 60, cancellationToken: ct));
+
+            var dt = new System.Data.DataTable();
+            dt.Columns.Add("ItemCode", typeof(string));
+            foreach (var code in allRealCodes) dt.Rows.Add(code);
+
+            using (var bcp = new SqlBulkCopy(c))
+            {
+                bcp.DestinationTableName = "#ItemCodes";
+                bcp.BulkCopyTimeout = 60;
+                await bcp.WriteToServerAsync(dt, ct);
+            }
+
+            await c.ExecuteAsync(new CommandDefinition(
+                @"INSERT INTO #USAStock(ItemCode,Shop,Quantity,QtyToSend,QtyReqd)
+                  SELECT s.ItemCode,s.Shop,ISNULL(s.Quantity,0),ISNULL(s.QtyToSend,0),ISNULL(s.QtyReqd,0)
+                  FROM usa.dbo.USAStock s WITH (NOLOCK)
+                  JOIN #ItemCodes ic ON s.ItemCode=ic.ItemCode",
+                commandTimeout: 300, cancellationToken: ct));
+        }
+        Tick("PreLoadUSAStock");
 
         // Per-item accumulators for the timing breakdown
         long msExcl = 0, msBuildShopMins = 0, msPdCtx = 0, msBrandsCtx = 0, msRamadanCtx = 0;
@@ -236,7 +327,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             }
 
             swStep.Restart();
-            // In-memory exclusion lookup (pre-loaded above â€” was 3 DB queries per item)
+            // In-memory exclusion lookup (pre-loaded above  -  was 3 DB queries per item)
             bool excOnline = false, excShop = false;
             if (itemExcMap.ByUpc.TryGetValue(item.Upc, out var ueX))      { excOnline |= ueX.Online; excShop |= ueX.Shop; }
             if (itemExcMap.ByGc.TryGetValue(item.GroupCode, out var geX)) { excOnline |= geX.Online; excShop |= geX.Shop; }
@@ -246,13 +337,13 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             bool skipOnline = contExcOnline || excOnline;
             bool skipShop   = contExcShop   || excShop;
 
-            // Per-item online state â€” read once, track in memory
+            // Per-item online state  -  read once, track in memory
             int ceiling = ceilings.GetValueOrDefault(item.Division, 0);
             int locQty  = locStock.GetValueOrDefault(item.Upc, 0);
             var ai = allocInit.GetValueOrDefault(item.Itemcode) ?? new AllocState(0, 0, 0, 0);
             int sampDone = 0, onlineDone = 0;
 
-            // Per-item export contexts â€” prepared once, used per unit
+            // Per-item export contexts  -  prepared once, used per unit
             swStep.Restart();
             if (!shopMinsCache.ContainsKey(item.GroupCode))
                 shopMinsCache[item.GroupCode] = await BuildShopMinsAsync(c, item.GroupCode, ct);
@@ -281,7 +372,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                 : null;
             msRamadanCtx += swStep.ElapsedMilliseconds;
 
-            // Snapshot before while loop â€” deltas used for batched DB flushes after the loop
+            // Snapshot before while loop  -  deltas used for batched DB flushes after the loop
             var allocChkSnap    = brandsCtx != null  ? new Dictionary<string, int>(brandsCtx.AllocChk,   StringComparer.OrdinalIgnoreCase) : null;
             var qtyToSendSnap   = brandsCtx != null  ? new Dictionary<string, int>(brandsCtx.QtyToSend,  StringComparer.OrdinalIgnoreCase) : null;
             var ramadanChkSnap  = ramadanCtx != null ? new Dictionary<string, int>(ramadanCtx.AllocChk,  StringComparer.OrdinalIgnoreCase) : null;
@@ -295,7 +386,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                 ct.ThrowIfCancellationRequested();
                 string result = "SHOP";
 
-                // Tier 1 â€” Online (pure in-memory; DB writes batched after while loop)
+                // Tier 1  -  Online (pure in-memory; DB writes batched after while loop)
                 if (!skipOnline)
                 {
                     int sampRemaining   = ai.SampTotal   - ai.SampChk   - sampDone;
@@ -312,7 +403,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                     }
                 }
 
-                // Tier 2 â€” Export
+                // Tier 2  -  Export
                 {
                     string? exp = null;
                     if (isPdGroup && pdCtx != null)
@@ -331,7 +422,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                     }
                 }
 
-                // Tier 3 â€” Shop fallback
+                // Tier 3  -  Shop fallback
                 if (!skipShop)
                 {
                     result = isPdGroup                                             ? "SHOP-POWERDROPS"
@@ -354,7 +445,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             }
             msWhileLoop += swStep.ElapsedMilliseconds;
 
-            // â”€â”€ Flush Online tier (was 2N per-unit writes â†’ 2 per item) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // â"€â"€ Flush Online tier (was 2N per-unit writes â†' 2 per item) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
             swStep.Restart();
             if (sampDone > 0)
                 await c.ExecuteAsync(new CommandDefinition(
@@ -366,31 +457,44 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                     new { n = onlineDone, c = contno, i = item.Itemcode }, commandTimeout: 300, cancellationToken: ct));
             msFlushOnline += swStep.ElapsedMilliseconds;
 
-            // â”€â”€ Flush Brands tier (was 4N per-unit writes â†’ 4Ã—K where K = shops touched) â”€
+            // â"€â"€ Flush Brands tier (was 4N per-unit writes â†' 4Ã—K where K = shops touched) â"€
             swStep.Restart();
             if (brandsCtx != null && allocChkSnap != null && qtyToSendSnap != null)
                 await FlushBrandsWritesAsync(c, contno, item.GroupCode, brandsCtx, allocChkSnap, qtyToSendSnap, ct);
             msFlushBrands += swStep.ElapsedMilliseconds;
 
-            // â”€â”€ Flush PowerDrop tier (was 2N per-unit writes â†’ 2Ã—K where K = shops touched) â”€
+            // â"€â"€ Flush PowerDrop tier (was 2N per-unit writes â†' 2Ã—K where K = shops touched) â"€
             swStep.Restart();
             if (pdCtx != null && pdBalanceSnap != null)
                 await FlushPdWritesAsync(c, contno, item.GroupCode, pdCtx, pdBalanceSnap, ct);
             msFlushPd += swStep.ElapsedMilliseconds;
 
-            // â”€â”€ Flush Ramadan tier â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+            // â"€â"€ Flush Ramadan tier â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
             swStep.Restart();
             if (ramadanCtx != null && ramadanChkSnap != null)
                 await FlushRamadanWritesAsync(c, contno, item.Itemcode, ramadanCtx, ramadanChkSnap, ct);
             msFlushRamadan += swStep.ElapsedMilliseconds;
         }
 
+        // Single MERGE from #USAStock back to the real table — one network round-trip for the whole container
+        swStep.Restart();
+        await c.ExecuteAsync(new CommandDefinition(
+            @"MERGE usa.dbo.USAStock AS t
+              USING #USAStock AS s ON t.ItemCode=s.ItemCode AND t.Shop=s.Shop
+              WHEN MATCHED THEN UPDATE SET
+                  t.QtyToSend = s.QtyToSend,
+                  t.QtyReqd   = CASE WHEN s.QtyReqdDirty=1 THEN s.QtyReqd ELSE t.QtyReqd END
+              WHEN NOT MATCHED BY TARGET AND (s.QtyToSend>0 OR s.QtyReqdDirty=1)
+                  THEN INSERT VALUES(s.ItemCode,'',0,s.Shop,0,s.QtyToSend,0,s.QtyReqd);",
+            commandTimeout: 300, cancellationToken: ct));
+        Tick("FlushUSAStock");
+
         swStep.Restart();
         await ApplyBuildingSettingsAsync(c, results, ct);
         await EnrichExportResultsAsync(c, results, ct);
         Tick("ApplySettings+Enrich");
 
-        // Bulk insert â€” one SqlBulkCopy operation instead of N individual INSERTs
+        // Bulk insert  -  one SqlBulkCopy operation instead of N individual INSERTs
         await BulkInsertPhotoCheckingResultAsync(c, results, isRobo: false, ct);
         Tick("BulkInsert_Main");
 
@@ -407,7 +511,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             "UPDATE online.dbo.PhotoCheckingResultStart SET finish='Y' WHERE contno=@c",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct));
 
-        // Manual checking â€” rebuild ExportAllocation_Itemcodes
+        // Manual checking  -  rebuild ExportAllocation_Itemcodes
         if (manualChecking)
         {
             await c.ExecuteAsync(new CommandDefinition(
@@ -423,7 +527,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                 new { c = contno }, commandTimeout: 300, cancellationToken: ct));
         }
 
-        // â”€â”€ Print timing breakdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // â"€â"€ Print timing breakdown â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
         swTotal.Stop();
         timings.Add(("GetItemExclusions[all items]", msExcl));
         timings.Add(("BuildShopMins[all items]",     msBuildShopMins));
@@ -451,7 +555,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         return new ContProcessOutcome(true, null, items.Count, results.Count, summary);
     }
 
-    // â”€â”€ loaders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ loaders â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     private async Task<IEnumerable<ContProcessItem>> LoadFromLpmAsync(
         SqlConnection c, string contno, CancellationToken ct)
@@ -502,7 +606,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             r.LPMDt as DateTime?, (string?)r.ORAPONo, (string?)r.Style));
     }
 
-    // â”€â”€ enrichment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ enrichment â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     private async Task<List<ContProcessItem>> EnrichItemsAsync(
         SqlConnection c, List<ContProcessItem> items, CancellationToken ct)
@@ -565,7 +669,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         }).ToList();
     }
 
-    // â”€â”€ exclusion checks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ exclusion checks â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     private async Task<(bool excOnline, bool excShop)> GetContainerExclusionsAsync(
         SqlConnection c, string contno, CancellationToken ct)
@@ -678,7 +782,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             "SELECT TOP 1 1 FROM usa.dbo.USAPriority WITH (NOLOCK) WHERE Department LIKE '%ramadan%' AND GroupCode=@g",
             new { g = groupCode }, commandTimeout: 300, cancellationToken: ct)) == 1;
 
-    // â”€â”€ Pre-load helpers (bulk queries run once before the item loop) â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ Pre-load helpers (bulk queries run once before the item loop) â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     private record AllocState(int SampTotal, int SampChk, int OnlineTotal, int OnlineChk);
 
@@ -728,30 +832,46 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
     {
         var dict = new Dictionary<string, (string, string, string?)>(StringComparer.OrdinalIgnoreCase);
         if (upcs.Count == 0) return dict;
+
+        // Use a temp table + SqlBulkCopy to avoid Dapper expanding IN @u into thousands of parameters
+        await c.ExecuteAsync(new CommandDefinition(
+            "CREATE TABLE #UpcList (UPC NVARCHAR(50) NOT NULL PRIMARY KEY)",
+            commandTimeout: 60, cancellationToken: ct));
+
+        var dt = new System.Data.DataTable();
+        dt.Columns.Add("UPC", typeof(string));
+        foreach (var u in upcs) dt.Rows.Add(u);
+        using (var bcp = new SqlBulkCopy(c))
+        {
+            bcp.DestinationTableName = "#UpcList";
+            bcp.BulkCopyTimeout = 60;
+            await bcp.WriteToServerAsync(dt, ct);
+        }
+
         var rows = await c.QueryAsync<dynamic>(new CommandDefinition(
-            @"SELECT upc, ItemCode, ISNULL(ItemType,'') AS ItemType, CountryOrigin
+            @"SELECT b.upc, b.ItemCode, ISNULL(b.ItemType,'') AS ItemType, b.CountryOrigin
               FROM (
                   SELECT upc, ItemCode, ItemType, CountryOrigin,
                          ROW_NUMBER() OVER (PARTITION BY upc ORDER BY TrnDate DESC) AS rn
                   FROM usa.dbo.UPCBarCodes WITH (NOLOCK)
-                  WHERE upc IN @u
-              ) x WHERE rn = 1",
-            new { u = upcs }, commandTimeout: 300, cancellationToken: ct));
+                  WHERE upc IN (SELECT UPC FROM #UpcList)
+              ) b WHERE rn = 1",
+            commandTimeout: 300, cancellationToken: ct));
         foreach (var r in rows)
             dict[(string)r.upc] = ((string)(r.ItemCode ?? ""), (string)(r.ItemType ?? ""), (string?)r.CountryOrigin);
         return dict;
     }
 
-    // â”€â”€ Export allocation â€” PowerDrops (split into per-item prep + per-unit alloc) â”€â”€
+    // â"€â"€ Export allocation  -  PowerDrops (split into per-item prep + per-unit alloc) â"€â"€
 
     private record ExportPdContext(
         string RealCode,
         Dictionary<string, int> ShopMins,
         HashSet<string> Excluded,
-        Dictionary<string, int> PdBalance,     // shop â†’ remaining alloc balance; mutated in-memory per unit
-        Dictionary<string, int> StockCurrent,  // shop â†’ qty+qtyToSend; mutated in-memory per unit
-        Dictionary<string, int> StockReqd,     // shop â†’ qtyReqd
-        Dictionary<string, int> PdQtyToSend);  // shop â†’ qtyToSend snapshot for flush delta
+        Dictionary<string, int> PdBalance,     // shop â†' remaining alloc balance; mutated in-memory per unit
+        Dictionary<string, int> StockCurrent,  // shop â†' qty+qtyToSend; mutated in-memory per unit
+        Dictionary<string, int> StockReqd,     // shop â†' qtyReqd
+        Dictionary<string, int> PdQtyToSend);  // shop â†' qtyToSend snapshot for flush delta
 
     private async Task<ExportPdContext?> PrepareExportContextAsync(
         SqlConnection c, string contno, ContProcessItem item,
@@ -764,7 +884,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             new { c = contno, g = item.GroupCode }, commandTimeout: 300, cancellationToken: ct)) ?? 0;
         if (balance <= 0) return null;
 
-        // RealCode from pre-loaded map â€” no DB hit
+        // RealCode from pre-loaded map  -  no DB hit
         string realCode = item.Itemcode;
         if (upcBarcodeMap.TryGetValue(item.Upc, out var uv) && !string.IsNullOrEmpty(uv.RealCode))
             realCode = uv.RealCode;
@@ -795,19 +915,27 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         foreach (var sh in pdShops)
             pdBalance[(string)sh.ShopName] = (int)(sh.Balance ?? 0);
 
-        // USAstock upsert â€” MERGE once per shop instead of SELECT+INSERT/UPDATE
-        foreach (var sn in pdBalance.Keys)
+        // Set QtyReqd in #USAStock (local temp table — no HOLDLOCK on huge real table)
+        if (pdBalance.Count > 0)
         {
-            int min = shopMins.TryGetValue(sn, out var m) ? m : 0;
-            await c.ExecuteAsync(new CommandDefinition(
-                @"MERGE usa.dbo.USAstock WITH (HOLDLOCK) AS t
-                  USING (SELECT @i AS Itemcode, @s AS Shop) AS src ON t.Itemcode=src.Itemcode AND t.Shop=src.Shop
-                  WHEN MATCHED THEN UPDATE SET QtyReqd=@m
-                  WHEN NOT MATCHED THEN INSERT VALUES(@i,'',0,@s,0,0,0,@m);",
-                new { i = realCode, s = sn, m = min }, commandTimeout: 300, cancellationToken: ct));
+            var pdP = new DynamicParameters();
+            pdP.Add("i", realCode);
+            var sbPd = new StringBuilder("MERGE #USAStock AS t USING (VALUES ");
+            int ji = 0;
+            foreach (var sn in pdBalance.Keys)
+            {
+                if (ji > 0) sbPd.Append(',');
+                int min = shopMins.TryGetValue(sn, out var m) ? m : 0;
+                sbPd.Append($"(@i,@pds{ji},@pdm{ji})");
+                pdP.Add($"pds{ji}", sn);
+                pdP.Add($"pdm{ji}", min);
+                ji++;
+            }
+            sbPd.Append(") AS src(ItemCode,Shop,QtyReqd) ON t.ItemCode=src.ItemCode AND t.Shop=src.Shop WHEN MATCHED THEN UPDATE SET QtyReqd=src.QtyReqd,QtyReqdDirty=1 WHEN NOT MATCHED THEN INSERT(ItemCode,Shop,QtyReqd,QtyReqdDirty) VALUES(src.ItemCode,src.Shop,src.QtyReqd,1);");
+            await c.ExecuteAsync(new CommandDefinition(sbPd.ToString(), pdP, commandTimeout: 60, cancellationToken: ct));
         }
 
-        // Load USAstock into memory â€” current + reqd per shop
+        // Load USAstock from temp table  -  no hit on real table
         var stockCurrent = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var stockReqd    = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var pdQtyToSend  = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -815,15 +943,15 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         {
             var stockRows = await c.QueryAsync<dynamic>(new CommandDefinition(
                 @"SELECT s.Shop,
-                         ISNULL(s.quantity,0)+ISNULL(s.QtyToSend,0) AS Current,
+                         ISNULL(s.Quantity,0)+ISNULL(s.QtyToSend,0) AS Current,
                          ISNULL(s.QtyReqd,0)   AS Reqd,
                          ISNULL(s.QtyToSend,0) AS Qts
-                  FROM usa.dbo.USAstock s WITH (NOLOCK)
-                  WHERE s.Itemcode=@i
+                  FROM #USAStock s
+                  WHERE s.ItemCode=@i
                     AND s.Shop IN (
                         SELECT ShopName FROM BFLDATA.dbo.DataSettings WITH (NOLOCK)
                         WHERE ExportActive='Y' AND Production='Y' AND FCCode<>'AED' AND FCCode<>'ROB' AND MaxQtyField LIKE '%P2%')",
-                new { i = realCode }, commandTimeout: 300, cancellationToken: ct));
+                new { i = realCode }, commandTimeout: 60, cancellationToken: ct));
             foreach (var r in stockRows)
             {
                 string sn = (string)r.Shop;
@@ -839,7 +967,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
     private Task<string?> AllocatePowerDropUnitAsync(
         SqlConnection c, string contno, string groupCode, ExportPdContext ctx, CancellationToken ct)
     {
-        // Fully in-memory â€” no DB reads or writes; writes are batched via FlushPdWritesAsync
+        // Fully in-memory  -  no DB reads or writes; writes are batched via FlushPdWritesAsync
         if (ctx.PdBalance.Values.Sum() <= 0) return Task.FromResult<string?>(null);
 
         foreach (var sn in ctx.StockCurrent.Keys.OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
@@ -877,15 +1005,15 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             if (allocated <= 0) continue;
 
             await c.ExecuteAsync(new CommandDefinition(
-                "UPDATE TOP(1) usa.dbo.USAstock SET QtyToSend=ISNULL(QtyToSend,0)+@n WHERE itemcode=@i AND shop=@s",
-                new { n = allocated, i = ctx.RealCode, s = shop }, commandTimeout: 300, cancellationToken: ct));
+                "UPDATE #USAStock SET QtyToSend=QtyToSend+@n WHERE ItemCode=@i AND Shop=@s",
+                new { n = allocated, i = ctx.RealCode, s = shop }, commandTimeout: 60, cancellationToken: ct));
             await c.ExecuteAsync(new CommandDefinition(
                 "UPDATE USA.dbo.PowerDrops SET AllocationChkQty=ISNULL(AllocationChkQty,0)+@n WHERE UPPER(ContNo)=UPPER(@c) AND GroupCode=@g AND ShopName=@s AND AllocationChkQty<AllocationReqQty",
                 new { n = allocated, c = contno, g = groupCode, s = shop }, commandTimeout: 300, cancellationToken: ct));
         }
     }
 
-    // Builds shopName â†’ minQty from USAGroupSKUMaxqty + DataSettings P2 columns
+    // Builds shopName â†' minQty from USAGroupSKUMaxqty + DataSettings P2 columns
     private async Task<Dictionary<string, int>> BuildShopMinsAsync(
         SqlConnection c, string groupCode, CancellationToken ct)
     {
@@ -910,10 +1038,10 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                     var val = ((IDictionary<string, object>)groupRow)[field];
                     dict[shopName] = val == null ? 0 : Convert.ToInt32(val);
                 }
-                catch { /* column not found â€” skip */ }
+                catch { /* column not found  -  skip */ }
             }
         }
-        catch { /* table missing on this server â€” return empty */ }
+        catch { /* table missing on this server  -  return empty */ }
         return dict;
     }
 
@@ -950,9 +1078,9 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         return set;
     }
 
-    // â”€â”€ Export allocation â€” Brands (split: per-item prep + per-unit alloc) â”€â”€â”€â”€â”€â”€
+    // â"€â"€ Export allocation  -  Brands (split: per-item prep + per-unit alloc) â"€â"€â"€â"€â"€â"€
 
-    // Group-level context â€” computed once per GroupCode, shared across all items in that group.
+    // Group-level context  -  computed once per GroupCode, shared across all items in that group.
     // AllocChk and DeptCap are mutable and accumulate correctly across sequential items.
     private record BrandsGroupCtx(
         string Dept, string Div, string? FixedShop,
@@ -988,11 +1116,11 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         if (upcBarcodeMap.TryGetValue(item.Upc, out var upcInfo))
         { realCode = string.IsNullOrEmpty(upcInfo.RealCode) ? item.Upc : upcInfo.RealCode; itemType = upcInfo.ItemType; }
 
-        // Group-level context â€” cached per GroupCode, runs ~14 queries only once per unique GC
+        // Group-level context  -  cached per GroupCode, runs ~14 queries only once per unique GC
         var grp = await PrepareOrGetBrandsGroupCtxAsync(c, contno, item.GroupCode, itemType, brandsGroupCache, nonProdShopsGlobal, ct);
         if (grp == null) return null;
 
-        // Purchased container â€” skip item if stp_FindExportSalesPrice_New returns a message
+        // Purchased container  -  skip item if stp_FindExportSalesPrice_New returns a message
         if (purCnt > 0)
         {
             using var cmd = new Microsoft.Data.SqlClient.SqlCommand("BFLData.dbo.stp_FindExportSalesPrice_New", c)
@@ -1004,11 +1132,11 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             if (!string.IsNullOrWhiteSpace(msgParam.Value?.ToString())) return null;
         }
 
-        // Copy group base min shops â€” item-specific zeros applied below
+        // Copy group base min shops  -  item-specific zeros applied below
         bool excludeItem = false;
         var minShops = new Dictionary<string, int>(grp.BaseMinShops, StringComparer.OrdinalIgnoreCase);
 
-        // Zero MinShops â€” keyword exclusions (item-name specific)
+        // Zero MinShops  -  keyword exclusions (item-name specific)
         foreach (var sn in await c.QueryAsync<string>(new CommandDefinition(
             @"SELECT DISTINCT a.ShopName FROM usa.dbo.ExcludeExport_Description a WITH (NOLOCK)
               JOIN usa.dbo.USAPriority b WITH (NOLOCK) ON a.Department=b.Department AND b.GroupCode=@g
@@ -1016,7 +1144,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
               WHERE a.KeyWord<>'' AND CHARINDEX(UPPER(a.KeyWord),UPPER(@n))>0",
             new { g = item.GroupCode, c = contno, n = item.Itemname }, commandTimeout: 300, cancellationToken: ct))) minShops[sn] = 0;
 
-        // Zero MinShops â€” excludeexport (in-memory cache replaces per-item SELECT)
+        // Zero MinShops  -  excludeexport (in-memory cache replaces per-item SELECT)
         if (!excludeItemCached.Contains(item.Upc))
         {
             var excShops = (await c.QueryAsync<string>(new CommandDefinition(
@@ -1046,7 +1174,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             }
         }
 
-        // Zero MinShops â€” country of origin exclusions (origin from pre-loaded map)
+        // Zero MinShops  -  country of origin exclusions (origin from pre-loaded map)
         string? origin = upcBarcodeMap.TryGetValue(item.Upc, out var uo) ? uo.Origin : null;
         if (!string.IsNullOrEmpty(origin))
             foreach (var sn in await c.QueryAsync<string>(new CommandDefinition(
@@ -1063,27 +1191,49 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             new { c = contno, i = realCode }, commandTimeout: 300, cancellationToken: ct)))
             itemAllocReq[r.Shop] = r.Req;
 
-        // Load USAStock into memory â€” read-only, no upfront MERGE/write on the huge table
+        // Load USAStock into memory  -  read-only, no upfront MERGE/write on the huge table
         var stockQty  = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var qtyToSend = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var qtyReqd   = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in await c.QueryAsync<(string Shop, int Qty, int Qts)>(new CommandDefinition(
             @"SELECT b.Shop, b.Quantity, b.QtyToSend
               FROM ONLINE.dbo.ExportAllocation_Brands a WITH (NOLOCK)
-              JOIN usa.dbo.USAStock b WITH (NOLOCK) ON a.ShopName=b.Shop AND b.ItemCode=@i
+              JOIN #USAStock b ON a.ShopName=b.Shop AND b.ItemCode=@i
               WHERE a.ContNo=@c AND a.GroupCode=@g",
             new { c = contno, g = item.GroupCode, i = realCode }, commandTimeout: 300, cancellationToken: ct)))
         { stockQty[r.Shop] = r.Qty; qtyToSend[r.Shop] = r.Qts; }
 
-        // QtyReqd computed entirely in memory â€” max(group minShop, per-item Allocation_ReqQty).
-        // No MERGE write to USAStock needed upfront; eliminates HOLDLOCK on huge table.
+        // QtyReqd: max(group minShop, per-item Allocation_ReqQty).
+        // Write to #USAStock for shops still needing allocation — mirrors VB INSERT/UPDATE QtyReqd.
+        var reqdRows = new List<(string Shop, int Reqd)>();
         foreach (var sn in grp.AllocReq.Keys)
         {
             int minQ = Math.Max(minShops.GetValueOrDefault(sn, 0), itemAllocReq.GetValueOrDefault(sn, 0));
             if (minQ > 0) qtyReqd[sn] = Math.Max(qtyReqd.GetValueOrDefault(sn, 0), minQ);
+            if (grp.AllocReq[sn] > 0
+                && grp.AllocReq[sn] > grp.AllocChk.GetValueOrDefault(sn, 0)
+                && qtyReqd.GetValueOrDefault(sn, 0) > 0)
+                reqdRows.Add((sn, qtyReqd[sn]));
+        }
+        if (reqdRows.Count > 0)
+        {
+            var sbReqd = new StringBuilder("MERGE #USAStock AS t USING (VALUES ");
+            var rp = new DynamicParameters();
+            rp.Add("i", realCode);
+            for (int j = 0; j < reqdRows.Count; j++)
+            {
+                if (j > 0) sbReqd.Append(',');
+                sbReqd.Append($"(@i,@rs{j},@rq{j})");
+                rp.Add($"rs{j}", reqdRows[j].Shop);
+                rp.Add($"rq{j}", reqdRows[j].Reqd);
+            }
+            sbReqd.Append(") AS src(ItemCode,Shop,QtyReqd) ON t.ItemCode=src.ItemCode AND t.Shop=src.Shop " +
+                "WHEN MATCHED THEN UPDATE SET QtyReqd=src.QtyReqd,QtyReqdDirty=1 " +
+                "WHEN NOT MATCHED THEN INSERT(ItemCode,Shop,QtyReqd,QtyReqdDirty) VALUES(src.ItemCode,src.Shop,src.QtyReqd,1);");
+            await c.ExecuteAsync(new CommandDefinition(sbReqd.ToString(), rp, commandTimeout: 60, cancellationToken: ct));
         }
 
-        // FixedShop â€” nullified if this item is excluded
+        // FixedShop  -  nullified if this item is excluded
         string? fixedShop = excludeItem ? null : grp.FixedShop;
 
         return new BrandsCtx(realCode, itemType, grp.Dept, grp.Div, fixedShop,
@@ -1091,7 +1241,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             stockQty, qtyToSend, qtyReqd, itemAllocReq, foreignShopsGlobal);
     }
 
-    // Group-level Brands context â€” runs ~14 queries once per unique GroupCode, cached for all items.
+    // Group-level Brands context  -  runs ~14 queries once per unique GroupCode, cached for all items.
     private async Task<BrandsGroupCtx?> PrepareOrGetBrandsGroupCtxAsync(
         SqlConnection c, string contno, string groupCode, string itemType,
         Dictionary<string, BrandsGroupCtx?> cache,
@@ -1100,7 +1250,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
     {
         if (cache.TryGetValue(groupCode, out var cached)) return cached;
 
-        // Quick exit â€” no balance
+        // Quick exit  -  no balance
         int totalBal = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
             "SELECT SUM(AllocationReqQty-AllocationChkQty) FROM ONLINE.dbo.ExportAllocation_Brands WITH (NOLOCK) WHERE ContNo=@c AND GroupCode=@g",
             new { c = contno, g = groupCode }, commandTimeout: 300, cancellationToken: ct)) ?? 0;
@@ -1113,7 +1263,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         if (prio == default || string.IsNullOrEmpty(prio.Dept) || string.IsNullOrEmpty(prio.Div))
         { cache[groupCode] = null; return null; }
 
-        // AllocReq + AllocChk â€” mutable dicts shared across all items in this GroupCode
+        // AllocReq + AllocChk  -  mutable dicts shared across all items in this GroupCode
         var allocRows = await c.QueryAsync<(string Sn, int Req, int Chk)>(new CommandDefinition(
             "SELECT ShopName, AllocationReqQty, ISNULL(AllocationChkQty,0) FROM ONLINE.dbo.ExportAllocation_Brands WITH (NOLOCK) WHERE ContNo=@c AND GroupCode=@g AND AllocationReqQty>0",
             new { c = contno, g = groupCode }, commandTimeout: 300, cancellationToken: ct));
@@ -1122,7 +1272,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         foreach (var (sn, req, chk) in allocRows) { allocReq[sn] = req; allocChk[sn] = chk; }
         if (allocReq.Count == 0) { cache[groupCode] = null; return null; }
 
-        // DeptCap â€” 3 queries using BFL_Division/BFL_Department scalar UDFs; run once per GC
+        // DeptCap  -  3 queries using BFL_Division/BFL_Department scalar UDFs; run once per GC
         string balExpr = itemType == "W"
             ? "SUM(MaxQtyW-(CurrStockW+TrfQtyW))"
             : "(SUM(MaxQty+MaxQtyH)-SUM(CurrStock+CurrStockH+TrfQty+TrfQtyH))";
@@ -1153,9 +1303,9 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                GROUP BY a.ShopName", new { c = contno, g = groupCode }, commandTimeout: 300, cancellationToken: ct)))
             if (deptCap.ContainsKey(row.Sn) && row.Bal < deptCap[row.Sn]) deptCap[row.Sn] = row.Bal;
 
-        // Shops with no DeptStock match have no department capacity constraint â€” leave uncapped.
+        // Shops with no DeptStock match have no department capacity constraint  -  leave uncapped.
 
-        // BaseMinShops â€” DataSettings + USAGroupSKUMaxqty (2 queries once per GC)
+        // BaseMinShops  -  DataSettings + USAGroupSKUMaxqty (2 queries once per GC)
         var baseMinShops = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         {
             var dsShops = (await c.QueryAsync<(string Sn, string Field)>(new CommandDefinition(
@@ -1174,7 +1324,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             }
         }
 
-        // Zero baseMinShops â€” stopped / inactive dept rows (2 queries once per GC)
+        // Zero baseMinShops  -  stopped / inactive dept rows (2 queries once per GC)
         string stoppedExpr = itemType == "W"
             ? "(((ISNULL(CurrStockW,0)+ISNULL(TrfQtyW,0)>MaxQtyW) AND StopDel='Y') OR MaxQtyW=0)"
             : "((((ISNULL(CurrStock,0)+ISNULL(TrfQty,0)+ISNULL(CurrStockH,0)+ISNULL(TrfQtyH,0))>MaxQty+MaxQtyH) AND StopDel='Y') OR MaxQty+MaxQtyH=0)";
@@ -1189,13 +1339,13 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             $"SELECT ShopName FROM BFLDATA.dbo.DeptStock WITH (NOLOCK) WHERE Department=@d AND {inactiveExpr}",
             new { d = prio.Dept }, commandTimeout: 300, cancellationToken: ct))) baseMinShops[sn] = 0;
 
-        // Zero baseMinShops â€” nonProd shops + inactive USAMaxQty
+        // Zero baseMinShops  -  nonProd shops + inactive USAMaxQty
         foreach (var sn in nonProdShopsGlobal) baseMinShops[sn] = 0;
         foreach (var sn in await c.QueryAsync<string>(new CommandDefinition(
             "SELECT ShopName FROM usa.dbo.usamaxqty WITH (NOLOCK) WHERE GroupCode=@g AND (ISNULL(Inactive,'')='Y' OR MaxQty=0)",
             new { g = groupCode }, commandTimeout: 300, cancellationToken: ct))) baseMinShops[sn] = 0;
 
-        // Zero baseMinShops+deptCap â€” inactive departments, multi-brand overflow
+        // Zero baseMinShops+deptCap  -  inactive departments, multi-brand overflow
         foreach (var sn in await c.QueryAsync<string>(new CommandDefinition(
             @"SELECT a.ShopName FROM BFLDATA.dbo.DeptStock a WITH (NOLOCK)
               JOIN ONLINE.dbo.ExportAllocation_Brands b WITH (NOLOCK) ON a.ShopName=b.ShopName
@@ -1213,7 +1363,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             new { c = contno, g = groupCode }, commandTimeout: 300, cancellationToken: ct)))
         { baseMinShops[sn] = 0; deptCap[sn] = 0; }
 
-        // Fixed shop override (once per GC â€” excludeItem adjustment is applied per-item)
+        // Fixed shop override (once per GC  -  excludeItem adjustment is applied per-item)
         string? fixedShop = null;
         try
         {
@@ -1238,7 +1388,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
     private Task<string?> AllocateBrandsUnitAsync(
         SqlConnection c, string contno, string groupCode, BrandsCtx ctx, CancellationToken ct)
     {
-        // Fully in-memory â€” no DB reads or writes; writes are batched via FlushBrandsWritesAsync
+        // Fully in-memory  -  no DB reads or writes; writes are batched via FlushBrandsWritesAsync
         string? shopSend = ctx.FixedShop;
 
         if (string.IsNullOrEmpty(shopSend))
@@ -1265,7 +1415,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                         bool shopF = minQ > qty + qts || reqd > qty + qts;
                         return shopF && reqd >= qts;
                     }
-                    return true; // no minimum â€” allow allocation while AllocReq balance remains
+                    return true; // no minimum  -  allow allocation while AllocReq balance remains
                 })
                 .OrderBy(sn => ctx.AllocReq[sn] > 0
                     ? ctx.AllocChk.GetValueOrDefault(sn, 0) * 1.0 / ctx.AllocReq[sn]
@@ -1290,36 +1440,75 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         Dictionary<string, int> qtyToSendSnap,
         CancellationToken ct)
     {
-        foreach (var shop in ctx.AllocChk.Keys)
-        {
-            int allocDelta = ctx.AllocChk.GetValueOrDefault(shop, 0) - allocChkSnap.GetValueOrDefault(shop, 0);
-            int qtsDelta   = ctx.QtyToSend.GetValueOrDefault(shop, 0) - qtyToSendSnap.GetValueOrDefault(shop, 0);
-            if (allocDelta <= 0) continue;
+        // Compute deltas for every shop in one pass.
+        var rows = ctx.AllocChk.Keys
+            .Select(shop => (
+                shop,
+                allocDelta: ctx.AllocChk.GetValueOrDefault(shop, 0) - allocChkSnap.GetValueOrDefault(shop, 0),
+                qtsDelta:   ctx.QtyToSend.GetValueOrDefault(shop, 0) - qtyToSendSnap.GetValueOrDefault(shop, 0)))
+            .Where(r => r.allocDelta > 0)
+            .ToList();
 
+        if (rows.Count == 0) return;
+
+        var p = new DynamicParameters();
+        p.Add("c", contno);
+        p.Add("g", groupCode);
+        p.Add("i", ctx.RealCode);
+
+        // --- ExportAllocation_Brands: one UPDATE with CASE per shop ---
+        var sbBrands = new StringBuilder(
+            "UPDATE ONLINE.dbo.ExportAllocation_Brands SET AllocationChkQty=AllocationChkQty+CASE ShopName ");
+        for (int j = 0; j < rows.Count; j++)
+        {
+            sbBrands.Append($"WHEN @bs{j} THEN @ba{j} ");
+            p.Add($"bs{j}", rows[j].shop);
+            p.Add($"ba{j}", rows[j].allocDelta);
+        }
+        sbBrands.Append("ELSE 0 END WHERE ContNo=@c AND GroupCode=@g AND ShopName IN (");
+        sbBrands.Append(string.Join(',', rows.Select((_, j) => $"@bs{j}")));
+        sbBrands.Append(')');
+        await c.ExecuteAsync(new CommandDefinition(sbBrands.ToString(), p, commandTimeout: 300, cancellationToken: ct));
+
+        // --- #USAStock: single MERGE into temp table (flushed to real table at end of ProcessAsync) ---
+        var sbStock = new StringBuilder("MERGE #USAStock AS t USING (VALUES ");
+        for (int j = 0; j < rows.Count; j++)
+        {
+            if (j > 0) sbStock.Append(',');
+            sbStock.Append($"(@i,@us{j},@uq{j})");
+            p.Add($"us{j}", rows[j].shop);
+            p.Add($"uq{j}", rows[j].qtsDelta);
+        }
+        sbStock.Append(") AS src(ItemCode,Shop,Delta) ON t.ItemCode=src.ItemCode AND t.Shop=src.Shop WHEN MATCHED THEN UPDATE SET QtyToSend=QtyToSend+src.Delta WHEN NOT MATCHED THEN INSERT(ItemCode,Shop,QtyToSend) VALUES(src.ItemCode,src.Shop,src.Delta);");
+        await c.ExecuteAsync(new CommandDefinition(sbStock.ToString(), p, commandTimeout: 300, cancellationToken: ct));
+
+        // --- ExportAllocation_Itemcodes: one UPDATE with CASE per shop ---
+        var sbItemcodes = new StringBuilder(
+            "UPDATE ONLINE.dbo.ExportAllocation_Itemcodes SET Allocation_CheckedQty=Allocation_CheckedQty+CASE ShopName ");
+        for (int j = 0; j < rows.Count; j++)
+            sbItemcodes.Append($"WHEN @bs{j} THEN @ba{j} ");
+        sbItemcodes.Append("ELSE 0 END WHERE ContNo=@c AND ItemCode=@i AND ShopName IN (");
+        sbItemcodes.Append(string.Join(',', rows.Select((_, j) => $"@bs{j}")));
+        sbItemcodes.Append(')');
+        await c.ExecuteAsync(new CommandDefinition(sbItemcodes.ToString(), p, commandTimeout: 300, cancellationToken: ct));
+
+        // --- DeptStock: one UPDATE per unique (Div,Dept) group for foreign shops only ---
+        var foreignRows = rows.Where(r => ctx.ForeignShops.Contains(r.shop)).ToList();
+        if (foreignRows.Count > 0)
+        {
+            string trfCol = ctx.ItemType == "W" ? "TrfQtyW=TrfQtyW+@n" : "TrfQty=TrfQty+@n";
+            int totalDelta = foreignRows.Sum(r => r.allocDelta);
             await c.ExecuteAsync(new CommandDefinition(
-                "UPDATE ONLINE.dbo.ExportAllocation_Brands SET AllocationChkQty=AllocationChkQty+@n WHERE ShopName=@s AND ContNo=@c AND GroupCode=@g",
-                new { n = allocDelta, s = shop, c = contno, g = groupCode }, commandTimeout: 300, cancellationToken: ct));
-            await c.ExecuteAsync(new CommandDefinition(
-                @"MERGE usa.dbo.USAStock AS t
-                  USING (SELECT @i AS ItemCode, @s AS Shop) AS src ON t.ItemCode=src.ItemCode AND t.Shop=src.Shop
-                  WHEN MATCHED THEN UPDATE SET QtyToSend=ISNULL(QtyToSend,0)+@n
-                  WHEN NOT MATCHED THEN INSERT VALUES(@i,'',0,@s,0,@n,0,0);",
-                new { n = qtsDelta, i = ctx.RealCode, s = shop }, commandTimeout: 300, cancellationToken: ct));
-            await c.ExecuteAsync(new CommandDefinition(
-                "UPDATE ONLINE.dbo.ExportAllocation_Itemcodes SET Allocation_CheckedQty=Allocation_CheckedQty+@n WHERE ShopName=@s AND ContNo=@c AND ItemCode=@i",
-                new { n = allocDelta, s = shop, c = contno, i = ctx.RealCode }, commandTimeout: 300, cancellationToken: ct));
-            if (ctx.ForeignShops.Contains(shop))
-            {
-                string trfCol = ctx.ItemType == "W" ? "TrfQtyW=TrfQtyW+@n" : "TrfQty=TrfQty+@n";
-                await c.ExecuteAsync(new CommandDefinition(
-                    $"UPDATE BFLDATA.dbo.DeptStock SET {trfCol} WHERE ShopName=@s AND Division=@div AND Department=@dept",
-                    new { n = allocDelta, s = shop, div = ctx.Div, dept = ctx.Dept }, commandTimeout: 300, cancellationToken: ct));
-            }
+                $"UPDATE BFLDATA.dbo.DeptStock SET {trfCol} WHERE Division=@div AND Department=@dept AND ShopName IN ({string.Join(',', foreignRows.Select((_, j) => $"@fs{j}"))})",
+                foreignRows.Select((r, j) => new { j, r.shop })
+                    .Aggregate(new DynamicParameters(new { n = totalDelta, div = ctx.Div, dept = ctx.Dept }),
+                        (dp, x) => { dp.Add($"fs{x.j}", x.shop); return dp; }),
+                commandTimeout: 300, cancellationToken: ct));
         }
     }
 
 
-    // â”€â”€ Export allocation â€” Ramadan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ Export allocation  -  Ramadan â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     private record RamadanCtx(
         Dictionary<string, int> AllocReq,   // Allocation_ReqQty per shop from ExportAllocation_Itemcodes
@@ -1342,7 +1531,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         return new RamadanCtx(allocReq, allocChk);
     }
 
-    // Fully in-memory â€” picks the shop with the most remaining requirement (lowest checked/req ratio).
+    // Fully in-memory  -  picks the shop with the most remaining requirement (lowest checked/req ratio).
     private static string? AllocateRamadanUnit(RamadanCtx ctx)
     {
         var shop = ctx.AllocReq.Keys
@@ -1373,7 +1562,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         }
     }
 
-    // â”€â”€ Post-process â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ Post-process â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     private static readonly HashSet<string> ShopTypes = new(StringComparer.OrdinalIgnoreCase)
         { "SHOP", "Photo Buffer", "SAMPLES Qty", "SHOP-POWERDROPS", "SHOP-RM" };
@@ -1407,7 +1596,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         }
     }
 
-    // â”€â”€ getMark() port â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ getMark() port â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     private static string GetMark()
     {
@@ -1422,7 +1611,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         return string.IsNullOrEmpty(letter) ? "" : letter + (today.Year % 10);
     }
 
-    // â”€â”€ getShopRefNo() port â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ getShopRefNo() port â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     private async Task<string> GetShopRefNoAsync(
         SqlConnection c, string shop, string shopLetter, CancellationToken ct)
@@ -1447,7 +1636,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         return trfNo;
     }
 
-    // â”€â”€ Enrich export results (company / shopcode / refno / mark / price / barcode) â”€â”€
+    // â"€â"€ Enrich export results (company / shopcode / refno / mark / price / barcode) â"€â"€
 
     private async Task EnrichExportResultsAsync(
         SqlConnection c, List<ContProcessResultRow> results, CancellationToken ct)
@@ -1481,7 +1670,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         }
 
         // Per-itemcode sales price (per shop's dataname database)
-        // Build lookup: (bareShop, itemcode) â†’ price
+        // Build lookup: (bareShop, itemcode) â†' price
         var priceCache = new Dictionary<(string Shop, string Itemcode), double>(
             EqualityComparer<(string, string)>.Default);
 
@@ -1496,7 +1685,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                 foreach (var (ic, price) in prices)
                     priceCache[(shop, ic)] = price;
             }
-            catch { /* table may not exist on every DB â€” skip */ }
+            catch { /* table may not exist on every DB  -  skip */ }
         }
 
         // Apply enrichment to each result row
@@ -1525,7 +1714,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         }
     }
 
-    // â”€â”€ BULK INSERT into PhotoCheckingResult (SqlBulkCopy â€” one round-trip) â”€â”€â”€
+    // â"€â"€ BULK INSERT into PhotoCheckingResult (SqlBulkCopy  -  one round-trip) â"€â"€â"€
 
     private async Task BulkInsertPhotoCheckingResultAsync(
         SqlConnection c, List<ContProcessResultRow> results, bool isRobo, CancellationToken ct)
@@ -1582,7 +1771,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                 0, "N", "N", r.Contno,
                 r.BuildingCategory ?? "",
                 r.LpmDt.HasValue ? (object)r.LpmDt.Value : DBNull.Value,
-                isRobo ? (r.OraPoNo ?? "") : "",
+                r.OraPoNo ?? "",
                 r.Style ?? "", "");
         }
 
@@ -1600,7 +1789,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         await bulk.WriteToServerAsync(dt, ct);
     }
 
-    // â”€â”€ Push container to Robo server â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // â"€â"€ Push container to Robo server â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
     public async Task<(bool Ok, string? Error, int RowCount)> PushContainerToRoboAsync(
         string contno, CancellationToken ct = default)
@@ -1660,7 +1849,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         if (existing == 0)
             await BulkInsertPhotoCheckingResultAsync(robo, rows, isRobo: true, ct);
 
-        // ShopinShop â€” Season S, non-Photo Buffer
+        // ShopinShop  -  Season S, non-Photo Buffer
         await robo.ExecuteAsync(new CommandDefinition(@"
             INSERT INTO BFLDATA.dbo.ShopinShop
             SELECT DISTINCT
@@ -1673,7 +1862,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                   NOT IN (SELECT SubShop FROM BFLDATA.dbo.ShopinShop WHERE Season = 'S')",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct));
 
-        // ShopinShop â€” Season S, Photo Buffer
+        // ShopinShop  -  Season S, Photo Buffer
         await robo.ExecuteAsync(new CommandDefinition(@"
             INSERT INTO BFLDATA.dbo.ShopinShop
             SELECT DISTINCT
@@ -1686,7 +1875,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                   NOT IN (SELECT SubShop FROM BFLDATA.dbo.ShopinShop WHERE Season = 'S')",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct));
 
-        // ShopinShop â€” Season W, non-Photo Buffer
+        // ShopinShop  -  Season W, non-Photo Buffer
         await robo.ExecuteAsync(new CommandDefinition(@"
             INSERT INTO BFLDATA.dbo.ShopinShop
             SELECT DISTINCT
@@ -1699,7 +1888,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                   NOT IN (SELECT SubShop FROM BFLDATA.dbo.ShopinShop WHERE Season = 'W')",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct));
 
-        // ShopinShop â€” Season W, Photo Buffer
+        // ShopinShop  -  Season W, Photo Buffer
         await robo.ExecuteAsync(new CommandDefinition(@"
             INSERT INTO BFLDATA.dbo.ShopinShop
             SELECT DISTINCT
@@ -1712,7 +1901,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
                   NOT IN (SELECT SubShop FROM BFLDATA.dbo.ShopinShop WHERE Season = 'W')",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct));
 
-        // DataSettings â€” add any new SubShops that don't exist yet
+        // DataSettings  -  add any new SubShops that don't exist yet
         await robo.ExecuteAsync(new CommandDefinition(@"
             INSERT INTO BFLDATA.dbo.DataSettings
             SELECT SubShop, '', '', 'ROB', 1, 0, '', '', '', '', '', 'Y', 'Y', '', '', 'Y', '', 'J', 'N', '', 'Y'
@@ -1720,13 +1909,33 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
             WHERE SubShop NOT IN (SELECT ShopName FROM BFLDATA.dbo.DataSettings)",
             commandTimeout: 300, cancellationToken: ct));
 
+        // Open each container in IQ Hybrid, then trigger master data sync
+        var roboContNos = (await robo.QueryAsync<string>(new CommandDefinition(
+            "SELECT DISTINCT ContNo FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK) WHERE TcmContNo=@c OR ContNo=@c",
+            new { c = contno }, commandTimeout: 60, cancellationToken: ct))).ToList();
+
+        _roboHttp.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", RoboApiToken);
+
+        foreach (var cn in roboContNos)
+        {
+            var body = new StringContent($"{{\"container_number\":\"{cn}\"}}", Encoding.UTF8, "application/json");
+            var resp = await _roboHttp.PostAsync($"{RoboApiBase}/containers/open", body, ct);
+            if (!resp.IsSuccessStatusCode)
+                return (false, $"Open Container API failed for {cn}: HTTP {(int)resp.StatusCode}", 0);
+        }
+
+        var syncResp = await _roboHttp.PostAsync($"{RoboApiBase}/master/sync",
+            new StringContent("", Encoding.UTF8, "application/json"), ct);
+        if (!syncResp.IsSuccessStatusCode)
+            return (false, $"Master Sync API failed: HTTP {(int)syncResp.StatusCode}", 0);
+
         string? note = existing > 0
-            ? $"Container {contno} already existed in Robo ({existing} row(s)) â€” PhotoCheckingResult skipped, ShopinShop/DataSettings updated."
+            ? $"Container {contno} already existed in Robo ({existing} row(s)) - PhotoCheckingResult skipped, ShopinShop/DataSettings updated."
             : null;
         return (true, note, rows.Count);
     }
 
-    // â”€â”€ Per-item rows for already-processed containers â”€â”€
+    // â"€â"€ Per-item rows for already-processed containers â"€â"€
 
     public async Task<List<(string Itemcode, string Itemname, string? Bc, string Result, DateTime? LpmDt, int Qty)>>
         GetExistingItemRowsAsync(string contno, CancellationToken ct = default)
@@ -1749,7 +1958,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         )).ToList();
     }
 
-    // â”€â”€ Outcome summary for already-processed containers â”€â”€
+    // â"€â"€ Outcome summary for already-processed containers â"€â"€
 
     public async Task<ContProcessOutcome> GetExistingOutcomeAsync(string contno, CancellationToken ct = default)
     {
@@ -1769,7 +1978,7 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
         return new ContProcessOutcome(true, null, totalSku, totalQty, summary);
     }
 
-    // â”€â”€ Chute location summary (read from PhotoCheckingResult after process) â”€â”€
+    // â"€â"€ Chute location summary (read from PhotoCheckingResult after process) â"€â"€
 
     public async Task<List<ChuteLocationRow>> GetChuteLocationSummaryAsync(string contno, CancellationToken ct = default)
     {
@@ -1793,5 +2002,74 @@ public class ContainerProcessingService(IConnectionConfig conn, ICurrentUser cur
               ORDER BY 1",
             new { c = contno }, commandTimeout: 300, cancellationToken: ct));
         return rows.ToList();
+    }
+
+    // ── Chute Location ──────────────────────────────────────────────────
+
+    public async Task<List<LpmDateRow>> GetLpmDateSummaryAsync(string contno, CancellationToken ct = default)
+    {
+        await using var c = Open();
+        var rows = await c.QueryAsync<LpmDateRow>(new CommandDefinition(
+            @"SELECT OraPONo, LPM, LpmQty = CAST(SUM(OrgQty) AS INT)
+              FROM USA.dbo.usaorgfile_LPM WITH (NOLOCK)
+              WHERE Contno = @c
+              GROUP BY OraPONo, LPM
+              ORDER BY LPM, OraPONo",
+            new { c = contno }, commandTimeout: 60, cancellationToken: ct));
+        return rows.ToList();
+    }
+
+    public async Task<(bool HasData, List<ChuteLocationShopRow> Rows)> GetChuteLocationsAsync(
+        string contno, CancellationToken ct = default)
+    {
+        var roboCs = new SqlConnectionStringBuilder
+        {
+            DataSource             = "10.23.8.251",
+            UserID                 = "AIAPI",
+            Password               = "T9#vQ2!mLp7@Xs4",
+            TrustServerCertificate = true,
+            Encrypt                = false,
+            ConnectTimeout         = 30,
+            ApplicationName        = "AIWMS",
+        }.ConnectionString;
+
+        await using var robo = new SqlConnection(roboCs);
+        await robo.OpenAsync(ct);
+
+        int pcrCount = await robo.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT COUNT(1) FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK) WHERE ContNo = @c OR TcmContNo = @c",
+            new { c = contno }, commandTimeout: 60, cancellationToken: ct));
+
+        if (pcrCount == 0)
+            return (false, []);
+
+        var rows = await robo.QueryAsync<ChuteLocationShopRow>(new CommandDefinition(
+            @"WITH SubShops AS (
+                  SELECT DISTINCT result + '-' + BuildingCategory + '-S-' + CAST(LPMDt AS varchar) AS ShopName
+                  FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK)
+                  WHERE ContNo = @c AND Result <> 'Photo Buffer'
+                  UNION
+                  SELECT DISTINCT ResultType + '-S-' + CAST(LPMDt AS varchar)
+                  FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK)
+                  WHERE ContNo = @c AND Result = 'Photo Buffer'
+                  UNION
+                  SELECT DISTINCT result + '-' + BuildingCategory + '-W-' + CAST(LPMDt AS varchar)
+                  FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK)
+                  WHERE ContNo = @c AND Result <> 'Photo Buffer'
+                  UNION
+                  SELECT DISTINCT ResultType + '-W-' + CAST(LPMDt AS varchar)
+                  FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK)
+                  WHERE ContNo = @c
+              )
+              SELECT ds.RoboShopId, ds.ShopName,
+                     Chutes = STRING_AGG(CAST(cc.ChuteId AS varchar), ', ') WITHIN GROUP (ORDER BY cc.ChuteId)
+              FROM SubShops ss
+              JOIN BFLDATA.dbo.DataSettings ds WITH (NOLOCK) ON ds.ShopName = ss.ShopName
+              LEFT JOIN ROBOTICS.dbo.ChuteConfiguration cc WITH (NOLOCK) ON cc.ShopId = ds.RoboShopId
+              GROUP BY ds.RoboShopId, ds.ShopName
+              ORDER BY ds.ShopName",
+            new { c = contno }, commandTimeout: 120, cancellationToken: ct));
+
+        return (true, rows.ToList());
     }
 }

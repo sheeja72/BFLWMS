@@ -11,7 +11,7 @@ namespace Aiwms.Data.Configuration;
 /// </summary>
 public class ConnectionSettings
 {
-    public string Server     { get; set; } = "192.168.10.72";  // default per user
+    public string Server     { get; set; } = "192.168.5.51";
     public string? Instance  { get; set; }                      // optional, e.g. "LOGBACKUP"
     public int? Port         { get; set; }                      // optional
     public string Database   { get; set; } = "AIWMS";
@@ -93,9 +93,17 @@ public class FileConnectionConfig : IConnectionConfig
     public FileConnectionConfig(IDataProtectionProvider dp, IHostEnvironment env)
     {
         _protector = dp.CreateProtector(ProtectorPurpose);
-        var dir = Path.Combine(env.ContentRootPath, "App_Data");
+        var dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "AIWMS");
         Directory.CreateDirectory(dir);
         _file = Path.Combine(dir, "connection.protected");
+
+        // Migrate from old publish-folder location if it exists and new file doesn't
+        var oldFile = Path.Combine(env.ContentRootPath, "App_Data", "connection.protected");
+        if (!File.Exists(_file) && File.Exists(oldFile))
+            File.Copy(oldFile, _file);
+
         _cache = TryLoad();
     }
 

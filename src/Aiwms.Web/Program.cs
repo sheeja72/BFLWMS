@@ -53,9 +53,14 @@ public class Program
         builder.Services.AddMemoryCache();
         builder.Services.AddHttpContextAccessor();
 
+        var appDataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "AIWMS");
+        Directory.CreateDirectory(appDataDir);
+
         builder.Services.AddDataProtection()
             .SetApplicationName("Aiwms")
-            .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "keys")));
+            .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(appDataDir, "keys")));
 
         builder.Services.AddSingleton<IConnectionConfig, FileConnectionConfig>();
 

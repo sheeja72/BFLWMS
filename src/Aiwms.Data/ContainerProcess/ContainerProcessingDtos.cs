@@ -54,4 +54,8 @@ public record ContProcessProgress(int Done, int Total, string CurrentItemcode, s
 
 public record ChuteLocationRow(string Result, string LpmDt, string ChuteLocation, int Qty);
 
+public record ChuteLocationShopRow(int? RoboShopId, string ShopName, string? Chutes);
+
+public record LpmDateRow(string? OraPONo, string? Lpm, int LpmQty);
+
 public record ContProcessPrecheck(bool Ok, string? Error, bool IsRamadanCont = false, string ContType = "USA", bool IsAlreadyProcessed = false);

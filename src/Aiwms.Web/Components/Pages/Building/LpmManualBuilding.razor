@@ -74,17 +74,16 @@ else
         <div class="aiwms-card-header">Inputs</div>
         <div class="aiwms-input-grid">
             <div class="aiwms-input-row">
-                <label class="aiwms-input-lbl">Cont. No <span class="req">*</span></label>
-                <input @ref="_contRef" @bind="_contInput" @bind:event="oninput" @onkeydown="OnContKey"
-                       class="aiwms-input @(_contOk ? "ok" : "")"
-                       placeholder="AEINT6078" autocomplete="off" disabled="@_busy" />
-            </div>
-            <div class="aiwms-input-row">
                 <label class="aiwms-input-lbl">Logistics Box # <span class="req">*</span></label>
                 <input @ref="_boxRef" @bind="_boxInput" @bind:event="oninput" @onkeydown="OnBoxKey"
                        class="aiwms-input @(_boxOk ? "ok" : "")"
                        placeholder="AEINT6078-406330/001/010" autocomplete="off"
-                       disabled="@(!_contOk || _busy)" />
+                       disabled="@_busy" />
+            </div>
+            <div class="aiwms-input-row">
+                <label class="aiwms-input-lbl">Cont. No</label>
+                <input class="aiwms-input @(_contOk ? "ok" : "")"
+                       value="@_contno" disabled />
             </div>
             <div class="aiwms-input-row">
                 <label class="aiwms-input-lbl">PO No</label>
@@ -258,7 +257,7 @@ else
     private string? _exContext, _exDbOp, _exDbSql;
     private bool _showStack;
 
-    private ElementReference _contRef, _boxRef, _itemRef, _rowEditRef;
+    private ElementReference _boxRef, _itemRef, _rowEditRef;
 
     private string _contInput = "", _contno = "";
     private bool _contOk;
@@ -285,7 +284,7 @@ else
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (firstRender && !string.IsNullOrEmpty(Me.Warehouse))
-            await TryFocus(_contRef);
+            await TryFocus(_boxRef);
     }
 
     private async Task OnContKey(KeyboardEventArgs e) { if (e.Key == "Enter") await ValidateContainer(); }
@@ -318,8 +317,33 @@ else
         ClearTransient(); _busy = true;
         try
         {
-            if (!_contOk) { _globalErr = "Validate container first."; return; }
             var input = (_boxInput ?? "").Trim();
+            if (string.IsNullOrEmpty(input)) { _globalErr = "Scan a logistics box number."; return; }
+
+            // Auto-extract container + PO from box number (e.g. AEINT6078-406330/001/010)
+            var dashIdx0 = input.IndexOf('-');
+            if (dashIdx0 > 0)
+            {
+                var afterDash = input[(dashIdx0 + 1)..];
+                var slashIdx = afterDash.IndexOf('/');
+                var poFromBox = (slashIdx > 0 ? afterDash[..slashIdx] : afterDash).Trim();
+                if (!string.IsNullOrEmpty(poFromBox))
+                    _poNumber = poFromBox;
+            }
+
+            if (!_contOk)
+            {
+                var dashIdx = input.IndexOf('-');
+                var contCandidate = (dashIdx > 0 ? input[..dashIdx] : input).ToUpperInvariant();
+                var cv = await Build.ValidateContainerAsync(contCandidate);
+                if (!cv.Ok) { _globalErr = cv.Error; await Beep(); return; }
+                var pm = await Build.EnsurePhotoQtyMatchAsync(contCandidate);
+                if (!pm.Ok) { _globalErr = pm.Error; await Beep(); return; }
+                _contno = contCandidate; _contInput = contCandidate; _photoMatch = pm; _contOk = true;
+                await RefreshOpenBoxes();
+                await Audit.LogAsync("Building.Container", _contno, 'X', $"Building/{_contno}", new { event_ = "validate" });
+            }
+
             var v = await Build.ValidateBoxAsync(_contno, input);
             if (!v.Ok) { _globalErr = v.Error; await Beep(); return; }
             _boxLabel = input; _poNumber = v.PoAvailable ? v.PoNumber : null; _boxOk = true;
@@ -471,7 +495,7 @@ else
         _rowEdit = null;
         _openBoxes.Clear();
         ClearTransient();
-        await TryFocus(_contRef);
+        await TryFocus(_boxRef);
     }
 
     private async Task RefreshOpenBoxes()
