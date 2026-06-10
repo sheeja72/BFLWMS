@@ -1,0 +1,218 @@
+@page "/building/allocation"
+@rendermode RenderMode.InteractiveServer
+@attribute [Authorize(Roles = Aiwms.Core.Roles.AnyWarehouse)]
+@using Aiwms.Data.ContainerProcess
+@inject ContainerProcessingService Proc
+
+<PageTitle>AIWMS — Building Process Allocation</PageTitle>
+
+<div style="display:flex;flex-direction:column;height:calc(100vh - 100px);overflow:hidden">
+
+    <div class="aiwms-page-header" style="flex-shrink:0">
+        <h2>Building Process Allocation</h2>
+        <p>Upload per-item allocation requirements and view allocation summary.</p>
+    </div>
+
+    @if (!string.IsNullOrEmpty(_error))   { <div class="aiwms-alert error" style="margin-bottom:8px;flex-shrink:0">@_error</div>   }
+    @if (!string.IsNullOrEmpty(_success)) { <div class="aiwms-alert info"  style="margin-bottom:8px;flex-shrink:0">@_success</div> }
+
+    <!-- Upload box -->
+    <div class="aiwms-section" style="margin-bottom:16px;flex-shrink:0">
+        <div class="aiwms-card-header">Upload Allocation Excel</div>
+        <div style="padding:12px 16px 16px">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
+                Columns: <b>Contno, Itemcode, EX2QATAR, EX2KUWAIT, EX2KSA, EX2BAHRAIN, BFLP2MYS</b>
+                — container number is read from the Excel.
+            </div>
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+                <InputFile OnChange="OnFileSelected" accept=".xlsx,.xls"
+                           style="font-size:13px" disabled="@_busy" />
+                @if (_previewRows.Count > 0)
+                {
+                    <div style="display:flex;gap:8px;margin-left:auto">
+                        <button class="aiwms-btn aiwms-btn-primary" @onclick="LoadAll"
+                                disabled="@_busy"
+                                style="padding:8px 24px;font-size:14px;font-weight:700">Save</button>
+                        <button class="aiwms-btn aiwms-btn-secondary" @onclick="ClearUpload"
+                                disabled="@_busy" style="padding:8px 12px;font-size:12px">Clear</button>
+                    </div>
+                }
+            </div>
+            @if (_previewRows.Count > 0)
+            {
+                <div style="margin-top:6px;font-size:12px;color:var(--text-muted)">
+                    @_previewRows.Count row(s) from container <b>@_contno</b> ready to import.
+                </div>
+            }
+        </div>
+    </div>
+
+    <!-- Preview table -->
+    @if (_previewRows.Count > 0)
+    {
+        <div class="aiwms-section" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+            <div class="aiwms-card-header" style="flex-shrink:0">Excel Preview (@_previewRows.Count rows)</div>
+            <div style="flex:1;min-height:0;overflow:auto">
+                <table class="aiwms-table aiwms-table-dense" style="table-layout:fixed;width:100%">
+                    <colgroup>
+                        <col style="width:40px"/>
+                        <col style="width:110px"/>
+                        <col style="width:140px"/>
+                        <col style="width:90px"/>
+                        <col style="width:90px"/>
+                        <col style="width:90px"/>
+                        <col style="width:100px"/>
+                        <col style="width:90px"/>
+                    </colgroup>
+                    <thead>
+                        <tr>
+                            <th>#</th><th>Contno</th><th>Itemcode</th>
+                            <th style="text-align:right">EX2KSA</th>
+                            <th style="text-align:right">EX2QATAR</th>
+                            <th style="text-align:right">EX2KUWAIT</th>
+                            <th style="text-align:right">EX2BAHRAIN</th>
+                            <th style="text-align:right">BFLP2MYS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @{ int pn = 0; }
+                        @foreach (var r in _previewRows.Take(50))
+                        {
+                            pn++;
+                            <tr>
+                                <td>@pn</td>
+                                <td>@r.Contno</td>
+                                <td>@r.Itemcode</td>
+                                <td style="text-align:right">@(r.EX2KSA    > 0 ? r.EX2KSA.ToString()    : "-")</td>
+                                <td style="text-align:right">@(r.EX2QATAR  > 0 ? r.EX2QATAR.ToString()  : "-")</td>
+                                <td style="text-align:right">@(r.EX2KUWAIT > 0 ? r.EX2KUWAIT.ToString() : "-")</td>
+                                <td style="text-align:right">@(r.EX2BAHRAIN> 0 ? r.EX2BAHRAIN.ToString(): "-")</td>
+                                <td style="text-align:right">@(r.BFLP2MYS  > 0 ? r.BFLP2MYS.ToString()  : "-")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            @if (_previewRows.Count > 50)
+            {
+                <div style="font-size:12px;color:var(--text-muted);padding:6px 16px;flex-shrink:0">
+                    Showing first 50 of @_previewRows.Count rows.
+                </div>
+            }
+        </div>
+    }
+
+    <!-- Allocation Summary -->
+    @if (_busy)
+    {
+        <div style="text-align:center;padding:32px;color:var(--text-muted);flex-shrink:0">Loading…</div>
+    }
+    else if (_rows.Count > 0)
+    {
+        <div class="aiwms-section" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden">
+            <div style="padding:10px 16px 8px;display:flex;gap:24px;flex-wrap:wrap;border-bottom:1px solid var(--border);flex-shrink:0">
+                <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Container</span><div style="font-weight:700;font-family:Consolas,monospace">@_contno</div></div>
+                <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Results</span><div style="font-weight:700">@_rows.Count</div></div>
+                <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Total Required</span><div style="font-weight:700">@_rows.Sum(r => r.Required)</div></div>
+                <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Total Allocated</span><div style="font-weight:700">@_rows.Sum(r => r.Allocated)</div></div>
+            </div>
+            <div style="flex:1;min-height:0;overflow-y:auto;padding:4px 0">
+                <table class="aiwms-table aiwms-table-dense" style="width:100%">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Result</th>
+                            <th style="text-align:right">Required</th>
+                            <th style="text-align:right">Allocated</th>
+                            <th style="text-align:right">Allocation %</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @{ int rowNo = 0; }
+                        @foreach (var r in _rows)
+                        {
+                            rowNo++;
+                            <tr>
+                                <td>@rowNo</td>
+                                <td>@r.Result</td>
+                                <td style="text-align:right">@r.Required</td>
+                                <td style="text-align:right">@r.Allocated</td>
+                                <td style="text-align:right">@(r.AllocationPct.ToString("0.0"))%</td>
+                            </tr>
+                        }
+                    </tbody>
+                    <tfoot>
+                        @{
+                            var totalRequired  = _rows.Sum(r => r.Required);
+                            var totalAllocated = _rows.Sum(r => r.Allocated);
+                            var totalPct       = totalRequired > 0 ? totalAllocated * 100.0 / totalRequired : 0;
+                        }
+                        <tr style="font-weight:700;border-top:2px solid var(--border);background:var(--surface-alt,#f8fafc)">
+                            <td colspan="2" style="font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-muted)">Total</td>
+                            <td style="text-align:right">@totalRequired</td>
+                            <td style="text-align:right">@totalAllocated</td>
+                            <td style="text-align:right">@(totalPct.ToString("0.0"))%</td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+        </div>
+    }
+
+</div>
+
+@code {
+    private string _contno = "";
+    private bool _busy;
+    private string? _error, _success;
+    private List<AllocationSummaryRow> _rows = [];
+    private List<AllocationExcelRow> _previewRows = [];
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        _error = null; _success = null; _previewRows = []; _rows = []; _contno = "";
+        try
+        {
+            using var ms = new MemoryStream();
+            await e.File.OpenReadStream(maxAllowedSize: 10 * 1024 * 1024).CopyToAsync(ms);
+            ms.Position = 0;
+            _previewRows = Proc.ParseAllocationExcel(ms);
+            if (_previewRows.Count == 0)
+            {
+                _error = "No data rows found in the Excel file.";
+                return;
+            }
+            // Extract container from first row
+            _contno = _previewRows.FirstOrDefault(r => !string.IsNullOrEmpty(r.Contno))?.Contno?.ToUpperInvariant() ?? "";
+            if (string.IsNullOrEmpty(_contno))
+                _error = "Warning: No container number found in Excel Contno column.";
+        }
+        catch (Exception ex) { _error = $"Failed to read Excel: {ex.Message}"; }
+    }
+
+    private async Task LoadAll()
+    {
+        if (string.IsNullOrEmpty(_contno)) { _error = "No container number found in the Excel file."; return; }
+        _error = null; _success = null; _busy = true; _rows = [];
+        try
+        {
+            var result = await Proc.ImportAllocationExcelAsync(_contno, _previewRows);
+            if (result.Errors.Count > 0 && result.RowsImported == 0)
+            {
+                _error = result.Errors[0];
+                return;
+            }
+            _success = $"Imported {result.RowsImported} record(s) from {result.RowsRead} row(s) for container {_contno}.";
+            if (result.Errors.Count > 0) _error = string.Join("; ", result.Errors.Take(5));
+            _previewRows = [];
+
+            _rows = await Proc.GetAllocationSummaryAsync(_contno);
+            if (_rows.Count == 0 && string.IsNullOrEmpty(_success))
+                _error = $"No allocation data found for container {_contno}.";
+        }
+        catch (Exception ex) { _error = $"{ex.GetType().Name}: {ex.Message}"; }
+        finally { _busy = false; }
+    }
+
+    private void ClearUpload() { _previewRows = []; _error = null; _success = null; _contno = ""; _rows = []; }
+}

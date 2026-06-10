@@ -39,10 +39,8 @@ public static class DbOpContext
 /// </summary>
 public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryCache cache)
 {
-    // Cached once per app lifetime: is lpm.dbo.PhotoCheckingResultLPM.IdNO an IDENTITY column?
-    // Determines the INSERT shape used by InsertNewPcrAsync. Reset on app restart
-    // — so after running migrate_pcr_idno_identity.sql, restart the app to pick it up.
-    private static bool? _idnoIsIdentity;
+    // Cached identity column name for ONLINE.dbo.PhotoCheckingResult (resolved once per app lifetime).
+    private static string? _pcrIdentityCol;
 
     private SqlConnection Open(string? db = null)
     {
@@ -51,16 +49,13 @@ public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryC
         return c;
     }
 
-    private async Task<bool> IsIdNoIdentityAsync(SqlConnection c, SqlTransaction? tx, CancellationToken ct)
+    private async Task<string> GetPcrIdentityColAsync(SqlConnection c, CancellationToken ct)
     {
-        if (_idnoIsIdentity is bool b) return b;
-        var v = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            @"SELECT CAST(is_identity AS INT)
-              FROM sys.columns
-              WHERE object_id = OBJECT_ID('lpm.dbo.PhotoCheckingResultLPM') AND name = 'IdNO'",
-            transaction: tx, cancellationToken: ct)) ?? 0;
-        _idnoIsIdentity = (v == 1);
-        return _idnoIsIdentity.Value;
+        if (_pcrIdentityCol is not null) return _pcrIdentityCol;
+        _pcrIdentityCol = await c.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT TOP 1 name FROM sys.identity_columns WHERE object_id = OBJECT_ID('ONLINE.dbo.PhotoCheckingResult')",
+            cancellationToken: ct)) ?? "SrNo";
+        return _pcrIdentityCol;
     }
 
     // ==================== 1. Container validation ====================
@@ -71,11 +66,6 @@ public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryC
         if (contno.Length > 50) return new(false, "Container number too long (max 50).");
 
         await using var c = Open();
-        var built = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT TOP 1 1 FROM bfldata.dbo.buildingcompletion WITH (NOLOCK) WHERE Contno = @c",
-            new { c = contno }, cancellationToken: ct));
-        if (built == 1) return new(false, $"Container {contno} building is already completed.");
-
         var received = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
             "SELECT TOP 1 1 FROM bfldata.dbo.contreceipt WITH (NOLOCK) WHERE refno = @c",
             new { c = contno }, cancellationToken: ct));
@@ -128,28 +118,24 @@ public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryC
             new { c = contno }, cancellationToken: ct));
         if (existing.Matched) return new(true, null, existing.PhotoQty, existing.OrgQty, true);
 
-        var atLeastOne = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT TOP 1 1 FROM lpm.dbo.PhotoCheckingResultLPM WITH (NOLOCK) WHERE Contno = @c",
-            new { c = contno }, cancellationToken: ct));
-        if (atLeastOne != 1) return new(false, $"No PhotoCheckingResultLPM rows for container {contno}.", 0, 0, false);
-
         var photo = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT ISNULL(SUM(qty),0) FROM lpm.dbo.PhotoCheckingResultLPM WITH (NOLOCK) WHERE Contno = @c",
+            "SELECT ISNULL(SUM(Qty),0) FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK) WHERE ContNo = @c",
             new { c = contno }, cancellationToken: ct)) ?? 0;
+
+        if (photo == 0) return new(false, $"No PhotoCheckingResult rows for container {contno}.", 0, 0, false);
+
         var org = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
             "SELECT ISNULL(SUM(orgqty),0) FROM usa.dbo.USAOrgFile WITH (NOLOCK) WHERE contno = @c",
             new { c = contno }, cancellationToken: ct)) ?? 0;
-        var matched = photo == org;
 
         await c.ExecuteAsync(new CommandDefinition(
             @"MERGE dbo.AiwmsContainerPhotoCheck AS t
               USING (SELECT @c AS Contno) s ON t.Contno = s.Contno
-              WHEN MATCHED THEN UPDATE SET PhotoQty=@p, OrgQty=@o, Matched=@m, CheckedTS=SYSDATETIME(), CheckedBy=@u
+              WHEN MATCHED THEN UPDATE SET PhotoQty=@p, OrgQty=@o, Matched=1, CheckedTS=SYSDATETIME(), CheckedBy=@u
               WHEN NOT MATCHED THEN INSERT (Contno, PhotoQty, OrgQty, Matched, CheckedTS, CheckedBy)
-                VALUES (@c, @p, @o, @m, SYSDATETIME(), @u);",
-            new { c = contno, p = photo, o = org, m = matched, u = user.Name }, cancellationToken: ct));
+                VALUES (@c, @p, @o, 1, SYSDATETIME(), @u);",
+            new { c = contno, p = photo, o = org, u = user.Name }, cancellationToken: ct));
 
-        if (!matched) return new(false, $"Container Allocated Qty : {photo}, Container Manifest Qty : {org}, does not match, Cannot Proceed.", photo, org, false);
         return new(true, null, photo, org, false);
     }
 
@@ -219,108 +205,96 @@ public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryC
         await using var c = Open();
         await using var tx = (SqlTransaction)await c.BeginTransactionAsync(IsolationLevel.Serializable, ct);
 
+        var idCol = await GetPcrIdentityColAsync(c, ct);
+
         var t1Sql = poNumber is null
-            ? @"SELECT TOP 1 IdNO, Result, LPMDT, OraPoNO, ResultType
-                FROM lpm.dbo.PhotoCheckingResultLPM WITH (UPDLOCK, ROWLOCK)
-                WHERE Contno = @c AND Itemcode = @i AND ISNULL(QtyIssue,0) = 0
-                ORDER BY Contno, OraPoNO, LPMDT"
-            : @"SELECT TOP 1 IdNO, Result, LPMDT, OraPoNO, ResultType
-                FROM lpm.dbo.PhotoCheckingResultLPM WITH (UPDLOCK, ROWLOCK)
-                WHERE Contno = @c AND Itemcode = @i AND OraPoNO = @p AND ISNULL(QtyIssue,0) = 0
-                ORDER BY Contno, OraPoNO, LPMDT";
+            ? $@"SELECT TOP 1 [{idCol}] AS IdNO, Result, LPMDt, ORAPONo, ResultType
+                FROM ONLINE.dbo.PhotoCheckingResult WITH (UPDLOCK, ROWLOCK)
+                WHERE ContNo = @c AND Itemcode = @i AND ISNULL(QtyIssue,0) = 0
+                ORDER BY ContNo, ORAPONo, LPMDt"
+            : $@"SELECT TOP 1 [{idCol}] AS IdNO, Result, LPMDt, ORAPONo, ResultType
+                FROM ONLINE.dbo.PhotoCheckingResult WITH (UPDLOCK, ROWLOCK)
+                WHERE ContNo = @c AND Itemcode = @i AND ORAPONo = @p AND ISNULL(QtyIssue,0) = 0
+                ORDER BY ContNo, ORAPONo, LPMDt";
         var t1 = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
             t1Sql, new { c = contno, i = itemCode, p = poNumber }, transaction: tx, cancellationToken: ct));
 
         if (t1 is not null)
         {
             await c.ExecuteAsync(new CommandDefinition(
-                "UPDATE lpm.dbo.PhotoCheckingResultLPM SET QtyIssue = ISNULL(QtyIssue,0) + 1 WHERE IdNO = @id",
+                $"UPDATE ONLINE.dbo.PhotoCheckingResult SET QtyIssue = ISNULL(QtyIssue,0) + 1 WHERE [{idCol}] = @id",
                 new { id = (long)t1.IdNO }, transaction: tx, cancellationToken: ct));
             await tx.CommitAsync(ct);
-            return new AllocationResult(true, (string)t1.Result, (DateTime?)t1.LPMDT, (string?)t1.OraPoNO,
+            return new AllocationResult(true, (string)t1.Result, (DateTime?)t1.LPMDt, (string?)t1.ORAPONo,
                 (string?)t1.ResultType, AllocationTier.Tier1_ExactPoQty0, (long)t1.IdNO, 'U');
         }
 
         var t2Sql = poNumber is null
-            ? @"SELECT TOP 1 LPMDT, OraPoNO, ResultType FROM lpm.dbo.PhotoCheckingResultLPM WITH (NOLOCK)
-                WHERE Contno = @c AND Itemcode = @i ORDER BY LPMDT"
-            : @"SELECT TOP 1 LPMDT, OraPoNO, ResultType FROM lpm.dbo.PhotoCheckingResultLPM WITH (NOLOCK)
-                WHERE Contno = @c AND Itemcode = @i AND OraPoNO = @p ORDER BY LPMDT";
+            ? @"SELECT TOP 1 LPMDt, ORAPONo, ResultType FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK)
+                WHERE ContNo = @c AND Itemcode = @i ORDER BY LPMDt"
+            : @"SELECT TOP 1 LPMDt, ORAPONo, ResultType FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK)
+                WHERE ContNo = @c AND Itemcode = @i AND ORAPONo = @p ORDER BY LPMDt";
         var t2 = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
             t2Sql, new { c = contno, i = itemCode, p = poNumber }, transaction: tx, cancellationToken: ct));
 
         if (t2 is not null)
         {
-            var newId = await InsertNewPcrAsync(c, tx, contno, itemCode, (string?)t2.OraPoNO ?? poNumber,
-                (DateTime?)t2.LPMDT ?? DateTime.Now.Date, "SHOP", (string?)t2.ResultType, ct);
+            var newId = await InsertNewPcrAsync(c, tx, idCol, contno, itemCode, (string?)t2.ORAPONo ?? poNumber,
+                (DateTime?)t2.LPMDt ?? DateTime.Now.Date, "SHOP", (string?)t2.ResultType, ct);
             await tx.CommitAsync(ct);
-            return new AllocationResult(true, "SHOP", (DateTime?)t2.LPMDT, (string?)t2.OraPoNO,
+            return new AllocationResult(true, "SHOP", (DateTime?)t2.LPMDt, (string?)t2.ORAPONo,
                 (string?)t2.ResultType, AllocationTier.Tier2_ExactNoQty, newId, 'I');
         }
 
         if (!string.IsNullOrEmpty(style))
         {
-            var t3sql = @"SELECT TOP 1 LPMDT, OraPoNO, ResultType, Result FROM lpm.dbo.PhotoCheckingResultLPM WITH (NOLOCK)
-                  WHERE Contno = @c AND Style = @s AND (@p IS NULL OR OraPoNO = @p)
-                  ORDER BY LPMDT";
-            DbOpContext.Set("PCR Tier-3 (style fallback) on lpm.dbo.PhotoCheckingResultLPM", t3sql);
+            var t3sql = @"SELECT TOP 1 LPMDt, ORAPONo, ResultType, Result FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK)
+                  WHERE ContNo = @c AND Style = @s AND (@p IS NULL OR ORAPONo = @p)
+                  ORDER BY LPMDt";
+            DbOpContext.Set("PCR Tier-3 (style fallback) on ONLINE.dbo.PhotoCheckingResult", t3sql);
             var t3 = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
                 t3sql,
                 new { c = contno, s = style, p = poNumber }, transaction: tx, cancellationToken: ct));
             if (t3 is not null)
             {
-                var newId = await InsertNewPcrAsync(c, tx, contno, itemCode, (string?)t3.OraPoNO ?? poNumber,
-                    (DateTime?)t3.LPMDT ?? DateTime.Now.Date, (string)t3.Result ?? "SHOP", (string?)t3.ResultType, ct);
+                var newId = await InsertNewPcrAsync(c, tx, idCol, contno, itemCode, (string?)t3.ORAPONo ?? poNumber,
+                    (DateTime?)t3.LPMDt ?? DateTime.Now.Date, (string)t3.Result ?? "SHOP", (string?)t3.ResultType, ct);
                 await tx.CommitAsync(ct);
-                return new AllocationResult(true, (string?)t3.Result ?? "SHOP", (DateTime?)t3.LPMDT,
-                    (string?)t3.OraPoNO, (string?)t3.ResultType, AllocationTier.Tier3_StyleMatch, newId, 'I');
+                return new AllocationResult(true, (string?)t3.Result ?? "SHOP", (DateTime?)t3.LPMDt,
+                    (string?)t3.ORAPONo, (string?)t3.ResultType, AllocationTier.Tier3_StyleMatch, newId, 'I');
             }
         }
 
         var earliest = await c.QueryFirstOrDefaultAsync<(DateTime? Dt, string? Po, string? Pt)>(new CommandDefinition(
-            @"SELECT TOP 1 LPMDT AS Dt, OraPoNO AS Po, ResultType AS Pt
-              FROM lpm.dbo.PhotoCheckingResultLPM WITH (NOLOCK)
-              WHERE Contno = @c ORDER BY LPMDT",
+            @"SELECT TOP 1 LPMDt AS Dt, ORAPONo AS Po, ResultType AS Pt
+              FROM ONLINE.dbo.PhotoCheckingResult WITH (NOLOCK)
+              WHERE ContNo = @c ORDER BY LPMDt",
             new { c = contno }, transaction: tx, cancellationToken: ct));
         var dt = earliest.Dt ?? DateTime.Now.Date;
         var po = earliest.Po ?? poNumber;
         var pt = earliest.Pt;
-        var id4 = await InsertNewPcrAsync(c, tx, contno, itemCode, po, dt, "SHOP", pt, ct);
+        var id4 = await InsertNewPcrAsync(c, tx, idCol, contno, itemCode, po, dt, "SHOP", pt, ct);
         await tx.CommitAsync(ct);
         return new AllocationResult(true, "SHOP", dt, po, pt, AllocationTier.Tier4_NewItem, id4, 'I');
     }
 
-    private async Task<long> InsertNewPcrAsync(SqlConnection c, SqlTransaction tx,
+    private async Task<long> InsertNewPcrAsync(SqlConnection c, SqlTransaction tx, string idCol,
         string contno, string itemCode, string? po, DateTime lpmDt, string result, string? palletType, CancellationToken ct)
     {
-        var isIdentity = await IsIdNoIdentityAsync(c, tx, ct);
-        string sql;
-        if (isIdentity)
-        {
-            // After migrate_pcr_idno_identity.sql has been run — IDENTITY autogenerates IdNO.
-            sql = @"
-                INSERT INTO lpm.dbo.PhotoCheckingResultLPM
-                  (Contno, Itemcode, OraPoNO, LPMDT, Result, ResultType, QtyIssue)
-                VALUES (@c, @i, @p, @d, @r, @pt, 1);
-                SELECT CAST(SCOPE_IDENTITY() AS BIGINT);";
-        }
-        else
-        {
-            // Pre-migration fallback — compute next IdNO inside this SERIALIZABLE tx.
-            // UPDLOCK,HOLDLOCK prevents two concurrent sessions from picking the same id.
-            sql = @"
-                DECLARE @newId BIGINT;
-                SELECT @newId = ISNULL(MAX(IdNO),0) + 1
-                  FROM lpm.dbo.PhotoCheckingResultLPM WITH (UPDLOCK, HOLDLOCK);
-                INSERT INTO lpm.dbo.PhotoCheckingResultLPM
-                  (IdNO, Contno, Itemcode, OraPoNO, LPMDT, Result, ResultType, QtyIssue)
-                VALUES (@newId, @c, @i, @p, @d, @r, @pt, 1);
-                SELECT @newId;";
-        }
+        var sql = @"
+            INSERT INTO ONLINE.dbo.PhotoCheckingResult
+              (ContNo, Itemcode, ORAPONo, LPMDt, Result, FinalResult, ResultType, QtyIssue, Qty,
+               Date, Time, UPC, GroupCode, Season, Department, Division,
+               Company, ShopCode, Itemname, Barcode, SalesPrice, RefNo, Mark,
+               Uid, RStatus, Excess, TcmContno, BuildingCategory, Style, Remarks, PrintFlag, RfidFlag)
+            VALUES
+              (@c, @i, @p, @d, @r, @r, @pt, 1, 1,
+               CAST(GETDATE() AS DATE), CONVERT(VARCHAR(8), GETDATE(), 108), @i, '', '', '', '',
+               '', '', '', @i, 0, '', '',
+               0, 'N', 'N', @c, '', '', '', '', '');
+            SELECT CAST(SCOPE_IDENTITY() AS BIGINT);";
 
-        DbOpContext.Set(
-            $"PCR INSERT (IdNO {(isIdentity ? "IDENTITY" : "computed")}) on lpm.dbo.PhotoCheckingResultLPM",
-            sql);
+        DbOpContext.Set("PCR INSERT on ONLINE.dbo.PhotoCheckingResult", sql);
         var id = await c.ExecuteScalarAsync<long>(new CommandDefinition(
             sql,
             new { c = contno, i = itemCode, p = po, d = lpmDt, r = result, pt = palletType },
@@ -531,6 +505,7 @@ public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryC
             new { b = boxNo }, transaction: tx, cancellationToken: ct))).AsList();
 
         var reversed = 0;
+        var idCol = await GetPcrIdentityColAsync(c, ct);
         foreach (var s in scans)
         {
             if (s.PcrId is null) continue;
@@ -538,9 +513,9 @@ public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryC
             {
                 // Tier-1 increment — decrement by 1 (clamped at 0)
                 await c.ExecuteAsync(new CommandDefinition(
-                    @"UPDATE lpm.dbo.PhotoCheckingResultLPM
+                    $@"UPDATE ONLINE.dbo.PhotoCheckingResult
                          SET QtyIssue = CASE WHEN ISNULL(QtyIssue,0) > 0 THEN QtyIssue - 1 ELSE 0 END
-                       WHERE IdNO = @id",
+                       WHERE [{idCol}] = @id",
                     new { id = s.PcrId.Value }, transaction: tx, cancellationToken: ct));
                 reversed++;
             }
@@ -548,7 +523,7 @@ public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryC
             {
                 // Tier-2/3/4 insert — delete the row WE inserted
                 await c.ExecuteAsync(new CommandDefinition(
-                    "DELETE FROM lpm.dbo.PhotoCheckingResultLPM WHERE IdNO = @id",
+                    $"DELETE FROM ONLINE.dbo.PhotoCheckingResult WHERE [{idCol}] = @id",
                     new { id = s.PcrId.Value }, transaction: tx, cancellationToken: ct));
                 reversed++;
             }
@@ -760,20 +735,7 @@ public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryC
             }
         }
 
-        // 4) Update PCR.BoxNo for items in this box+container
-        var pcrSql = @"UPDATE lpm.dbo.PhotoCheckingResultLPM
-            SET BoxNo = @BoxNo
-            WHERE Contno = @Cont AND Itemcode = @Item AND (BoxNo IS NULL OR BoxNo = '')";
-        var pcrUpdated = 0;
-        foreach (var it in items)
-        {
-            DbOpContext.Set("UPDATE lpm.dbo.PhotoCheckingResultLPM SET BoxNo (checkout step 4)", pcrSql);
-            pcrUpdated += await c.ExecuteAsync(new CommandDefinition(pcrSql,
-                new { BoxNo = boxNo, Cont = contno, Item = (string)it.ItemCode },
-                transaction: tx, cancellationToken: ct));
-        }
-
-        // 5) Clear staging
+        // 4) Clear staging
         DbOpContext.Set("DELETE AIWMS staging (checkout step 5)", "DELETE AiwmsOpenBoxItem/Scan/Box");
         await c.ExecuteAsync(new CommandDefinition(
             @"DELETE FROM dbo.AiwmsOpenBoxScan  WHERE BoxNo = @b;
@@ -782,7 +744,7 @@ public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryC
             new { b = boxNo }, transaction: tx, cancellationToken: ct));
 
         await tx.CommitAsync(ct);
-        return new(true, null, pcrUpdated);
+        return new(true, null, photoRows);
     }
 
     // ==================== 9. Read open boxes (resume after reload) ====================

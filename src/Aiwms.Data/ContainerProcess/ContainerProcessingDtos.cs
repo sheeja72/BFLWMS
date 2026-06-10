@@ -59,3 +59,11 @@ public record ChuteLocationShopRow(int? RoboShopId, string ShopName, string? Chu
 public record LpmDateRow(string? OraPONo, string? Lpm, int LpmQty);
 
 public record ContProcessPrecheck(bool Ok, string? Error, bool IsRamadanCont = false, string ContType = "USA", bool IsAlreadyProcessed = false);
+
+public record BuildingReportRow(string Itemcode, string? Itemname, string? Bc, string Result, DateTime? LpmDt, string? OraPONo, int Qty);
+
+public record AllocationExcelRow(string Contno, string Itemcode, int EX2KSA, int EX2QATAR, int EX2KUWAIT, int EX2BAHRAIN, int BFLP2MYS);
+
+public record AllocationImportResult(int RowsRead, int RowsImported, List<string> Errors);
+
+public record AllocationSummaryRow(string Result, int Required, int Allocated, decimal AllocationPct);

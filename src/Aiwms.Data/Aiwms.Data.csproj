@@ -14,5 +14,6 @@
     <PackageReference Include="Microsoft.AspNetCore.DataProtection" Version="9.0.3" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="9.0.3" />
     <PackageReference Include="Microsoft.Extensions.Caching.Memory" Version="9.0.3" />
+    <PackageReference Include="MiniExcel" Version="*" />
   </ItemGroup>
 </Project>

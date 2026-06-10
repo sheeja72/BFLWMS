@@ -1,0 +1,108 @@
+@page "/building/report"
+@rendermode RenderMode.InteractiveServer
+@attribute [Authorize(Roles = Aiwms.Core.Roles.AnyWarehouse)]
+@using Aiwms.Data.ContainerProcess
+@inject ContainerProcessingService Proc
+
+<PageTitle>AIWMS — Building Process Report</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Building Process Report</h2>
+    <p>View allocation results for a processed container.</p>
+</div>
+
+@if (!string.IsNullOrEmpty(_error)) { <div class="aiwms-alert error">@_error</div> }
+
+<div class="aiwms-section" style="margin-bottom:16px">
+    <div class="aiwms-card-header">Container</div>
+    <div class="aiwms-input-grid">
+        <div class="aiwms-input-row">
+            <label class="aiwms-input-lbl">Cont. No <span class="req">*</span></label>
+            <div style="display:flex;gap:8px;align-items:center">
+                <input @ref="_contRef" @bind="_contInput" @bind:event="oninput" @onkeydown="OnContKey"
+                       class="aiwms-input" placeholder="e.g. AEINT6078"
+                       autocomplete="off" disabled="@_busy" style="flex:1;margin:0" />
+                <button class="aiwms-btn aiwms-btn-primary" @onclick="LoadReport" disabled="@(string.IsNullOrWhiteSpace(_contInput) || _busy)"
+                        style="white-space:nowrap;padding:10px 28px;font-size:15px;font-weight:700">Search</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@if (_busy)
+{
+    <div style="text-align:center;padding:32px;color:var(--text-muted)">Loading…</div>
+}
+else if (_rows.Count > 0)
+{
+    <div class="aiwms-section" style="overflow:hidden;display:flex;flex-direction:column">
+        <div style="padding:10px 16px 8px;display:flex;gap:24px;flex-wrap:wrap;border-bottom:1px solid var(--border)">
+            <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Container</span><div style="font-weight:700;font-family:Consolas,monospace">@_contno</div></div>
+            <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Total Rows</span><div style="font-weight:700">@_rows.Count</div></div>
+            <div><span style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Total Qty</span><div style="font-weight:700">@_rows.Sum(r => r.Qty)</div></div>
+        </div>
+        <div style="overflow-y:auto;padding:4px 0">
+            <table class="aiwms-table aiwms-table-dense">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Itemcode</th>
+                        <th>Description</th>
+                        <th>Bldg. Category</th>
+                        <th>Result</th>
+                        <th>LPM Date</th>
+                        <th>ORA PO No</th>
+                        <th style="text-align:right">Qty</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @{ int rowNo = 0; }
+                    @foreach (var r in _rows)
+                    {
+                        rowNo++;
+                        <tr>
+                            <td>@rowNo</td>
+                            <td>@r.Itemcode</td>
+                            <td>@r.Itemname</td>
+                            <td>@r.Bc</td>
+                            <td>@r.Result</td>
+                            <td>@(r.LpmDt?.ToString("dd/MM/yyyy") ?? "")</td>
+                            <td>@r.OraPONo</td>
+                            <td style="text-align:right">@r.Qty</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+}
+
+@code {
+    private ElementReference _contRef;
+    private string _contInput = "", _contno = "";
+    private bool _busy;
+    private string? _error;
+    private List<BuildingReportRow> _rows = [];
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender) try { await _contRef.FocusAsync(); } catch { }
+    }
+
+    private async Task OnContKey(KeyboardEventArgs e) { if (e.Key == "Enter") await LoadReport(); }
+
+    private async Task LoadReport()
+    {
+        var input = (_contInput ?? "").Trim().ToUpperInvariant();
+        if (string.IsNullOrEmpty(input)) return;
+        _error = null; _busy = true; _rows = [];
+        try
+        {
+            _contno = input;
+            _rows = await Proc.GetBuildingReportAsync(input);
+            if (_rows.Count == 0) _error = $"No results found for container {input}.";
+        }
+        catch (Exception ex) { _error = $"{ex.GetType().Name}: {ex.Message}"; }
+        finally { _busy = false; }
+    }
+}

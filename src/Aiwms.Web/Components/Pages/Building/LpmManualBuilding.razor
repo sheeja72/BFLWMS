@@ -81,13 +81,17 @@ else
                        disabled="@_busy" />
             </div>
             <div class="aiwms-input-row">
-                <label class="aiwms-input-lbl">Cont. No</label>
-                <input class="aiwms-input @(_contOk ? "ok" : "")"
-                       value="@_contno" disabled />
-            </div>
-            <div class="aiwms-input-row">
-                <label class="aiwms-input-lbl">PO No</label>
-                <input class="aiwms-input" value="@(_poNumber ?? (_boxOk ? "NA" : ""))" disabled />
+                <div style="display:flex;gap:12px">
+                    <div style="flex:1">
+                        <label class="aiwms-input-lbl">Cont. No</label>
+                        <input class="aiwms-input @(_contOk ? "ok" : "")"
+                               value="@_contno" disabled style="margin-top:4px" />
+                    </div>
+                    <div style="flex:1">
+                        <label class="aiwms-input-lbl">PO No</label>
+                        <input class="aiwms-input" value="@(_poNumber ?? (_boxOk ? "NA" : ""))" disabled style="margin-top:4px" />
+                    </div>
+                </div>
             </div>
             <div class="aiwms-input-row">
                 <label class="aiwms-input-lbl">Itemcode (UPC) <span class="req">*</span></label>
@@ -320,33 +324,34 @@ else
             var input = (_boxInput ?? "").Trim();
             if (string.IsNullOrEmpty(input)) { _globalErr = "Scan a logistics box number."; return; }
 
-            // Auto-extract container + PO from box number (e.g. AEINT6078-406330/001/010)
+            // Auto-extract container + PO from box number (e.g. AELOC6655-477331/040)
             var dashIdx0 = input.IndexOf('-');
             if (dashIdx0 > 0)
             {
+                var contExtracted = input[..dashIdx0].ToUpperInvariant();
                 var afterDash = input[(dashIdx0 + 1)..];
                 var slashIdx = afterDash.IndexOf('/');
                 var poFromBox = (slashIdx > 0 ? afterDash[..slashIdx] : afterDash).Trim();
-                if (!string.IsNullOrEmpty(poFromBox))
-                    _poNumber = poFromBox;
+
+                // Show extracted values immediately so fields are never blank
+                if (!_contOk) { _contno = contExtracted; _contInput = contExtracted; }
+                if (!string.IsNullOrEmpty(poFromBox)) _poNumber = poFromBox;
             }
 
             if (!_contOk)
             {
-                var dashIdx = input.IndexOf('-');
-                var contCandidate = (dashIdx > 0 ? input[..dashIdx] : input).ToUpperInvariant();
-                var cv = await Build.ValidateContainerAsync(contCandidate);
+                var cv = await Build.ValidateContainerAsync(_contno);
                 if (!cv.Ok) { _globalErr = cv.Error; await Beep(); return; }
-                var pm = await Build.EnsurePhotoQtyMatchAsync(contCandidate);
+                var pm = await Build.EnsurePhotoQtyMatchAsync(_contno);
                 if (!pm.Ok) { _globalErr = pm.Error; await Beep(); return; }
-                _contno = contCandidate; _contInput = contCandidate; _photoMatch = pm; _contOk = true;
+                _photoMatch = pm; _contOk = true;
                 await RefreshOpenBoxes();
                 await Audit.LogAsync("Building.Container", _contno, 'X', $"Building/{_contno}", new { event_ = "validate" });
             }
 
             var v = await Build.ValidateBoxAsync(_contno, input);
             if (!v.Ok) { _globalErr = v.Error; await Beep(); return; }
-            _boxLabel = input; _poNumber = v.PoAvailable ? v.PoNumber : null; _boxOk = true;
+            _boxLabel = input; _poNumber = v.PoAvailable ? v.PoNumber : _poNumber; _boxOk = true;
             await Audit.LogAsync("Building.Box", $"{_contno}/{_boxLabel}", 'X', $"Building/{_contno}/{_boxLabel}",
                 new { po = _poNumber, has_po = v.PoAvailable });
             await TryFocus(_itemRef);
