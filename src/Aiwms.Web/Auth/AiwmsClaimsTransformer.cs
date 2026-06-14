@@ -18,7 +18,10 @@ namespace Aiwms.Web.Auth;
 /// signed-in Entra user has no AiwmsUser row, we create one with the
 /// configured DefaultRole. Admin can then promote them.
 /// </summary>
-public class AiwmsClaimsTransformer(IDbContextFactory<AiwmsDbContext> dbFactory, IConfiguration cfg) : IClaimsTransformation
+public class AiwmsClaimsTransformer(
+    IDbContextFactory<AiwmsDbContext> dbFactory,
+    IConfiguration cfg,
+    ILogger<AiwmsClaimsTransformer> logger) : IClaimsTransformation
 {
     public const string ActiveClaim = "aiwms_active";
 
@@ -45,12 +48,16 @@ public class AiwmsClaimsTransformer(IDbContextFactory<AiwmsDbContext> dbFactory,
 
         try
         {
+            logger.LogInformation("ClaimsTransformer: resolving user '{Email}' (display '{Name}')", email, displayName);
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             await using var db = await dbFactory.CreateDbContextAsync(cts.Token);
 
             var user = await db.Users
                 .Include(u => u.UserRoles)
                 .FirstOrDefaultAsync(u => u.Username == email, cts.Token);
+            logger.LogInformation("ClaimsTransformer: DB lookup for '{Email}' returned {Found}, roles={Roles}",
+                email, user is null ? "NULL" : "FOUND",
+                user is null ? "n/a" : string.Join(",", user.UserRoles.Select(r => r.RoleCode)));
 
             // Auto-create on first login
             if (user is null)
@@ -77,10 +84,16 @@ public class AiwmsClaimsTransformer(IDbContextFactory<AiwmsDbContext> dbFactory,
                     .FirstAsync(u => u.Username == email, cts.Token);
             }
 
-            if (!user.IsActive) return principal;
+            if (!user.IsActive)
+            {
+                logger.LogWarning("ClaimsTransformer: user '{Email}' is INACTIVE — denying access", email);
+                return principal;
+            }
 
             if (!baseId.HasClaim(c => c.Type == ActiveClaim))
                 baseId.AddClaim(new Claim(ActiveClaim, "1"));
+            logger.LogInformation("ClaimsTransformer: user '{Email}' authorized with roles [{Roles}]",
+                email, string.Join(",", user.UserRoles.Select(r => r.RoleCode)));
 
             if (!baseId.HasClaim(c => c.Type == ClaimTypes.Name))
                 baseId.AddClaim(new Claim(ClaimTypes.Name, email));
@@ -91,10 +104,9 @@ public class AiwmsClaimsTransformer(IDbContextFactory<AiwmsDbContext> dbFactory,
                     baseId.AddClaim(new Claim(baseId.RoleClaimType, ur.RoleCode));
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Swallow — auth proceeds without the active claim, which fails the policy
-            // and surfaces as 403. Server-side log captures the actual exception.
+            logger.LogError(ex, "ClaimsTransformer: failed to resolve/seed user '{Email}'", email);
         }
 
         return principal;
