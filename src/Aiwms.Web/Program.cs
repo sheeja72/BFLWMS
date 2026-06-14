@@ -65,7 +65,8 @@ public class Program
             .AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
             .AddMicrosoftIdentityWebApp(builder.Configuration.GetSection("AzureAd"));
 
-        builder.Services.AddControllersWithViews()
+        builder.Services.AddControllersWithViews();
+        builder.Services.AddRazorPages()
             .AddMicrosoftIdentityUI();
 
         builder.Services.AddScoped<IClaimsTransformation, AiwmsClaimsTransformer>();
@@ -100,8 +101,9 @@ public class Program
         app.UseAuthentication();
         app.UseAuthorization();
 
-        // Microsoft.Identity.Web.UI controllers handle /MicrosoftIdentity/Account/SignIn|SignOut.
+        // Microsoft.Identity.Web.UI controllers + razor pages handle /MicrosoftIdentity/Account/*.
         app.MapControllers();
+        app.MapRazorPages();
 
         app.MapStaticAssets();
         app.MapRazorComponents<App>().AddInteractiveServerRenderMode();
