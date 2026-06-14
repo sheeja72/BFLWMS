@@ -27,9 +27,9 @@ public class OnPremConnectionResolver(IConfiguration cfg) : IOnPremConnectionRes
         ["UAE", "KSA", "Kuwait", "Bahrain", "Qatar", "Oman", "Egypt"];
 
     public string GetAiwmsAzureConnectionString() =>
-        cfg.GetConnectionString("AiwmsAzure")
+        cfg.GetConnectionString("WmsAzure")
         ?? throw new InvalidOperationException(
-            "ConnectionStrings:AiwmsAzure is not configured. Add it to appsettings.json or App Service configuration.");
+            "ConnectionStrings:WmsAzure is not configured. Add it to appsettings.json or App Service configuration.");
 
     public string GetCountryConnectionString(string country)
     {
