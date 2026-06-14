@@ -1,6 +1,4 @@
 @inherits LayoutComponentBase
-@using Aiwms.Data.Configuration
-@inject IConnectionConfig Conn
 
 <MudThemeProvider Theme="_theme" />
 <MudPopoverProvider />
@@ -23,14 +21,19 @@
                     }
                     <span class="aiwms-role-badge">@role</span>
                     <div class="aiwms-username">@context.User.Identity?.Name</div>
-                    @if (Conn.IsConfigured && Conn.Current is { } cur)
-                    {
-                        <div class="aiwms-server-info" title="@cur.ToDataSource() / @cur.Database">
-                            <span class="aiwms-server-dot">●</span>
-                            <span class="aiwms-server-text">@cur.ToDataSource()</span>
-                        </div>
-                        <div class="aiwms-server-db">db: @cur.Database</div>
+                    @{
+                        var country = context.User.FindFirst("country")?.Value;
                     }
+                    @if (!string.IsNullOrEmpty(country))
+                    {
+                        <div class="aiwms-server-info" title="Country: @country">
+                            <span class="aiwms-server-dot">●</span>
+                            <span class="aiwms-server-text">@country</span>
+                        </div>
+                    }
+                    <div class="aiwms-server-db">
+                        <a href="MicrosoftIdentity/Account/SignOut" style="color:inherit">Sign out</a>
+                    </div>
                 </Authorized>
             </AuthorizeView>
         </div>
