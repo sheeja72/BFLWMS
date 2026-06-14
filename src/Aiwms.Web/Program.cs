@@ -6,11 +6,12 @@ using Aiwms.Data.Lpm;
 using Aiwms.Web.Auth;
 using Aiwms.Web.Components;
 using Microsoft.AspNetCore.Authentication;
-using Microsoft.AspNetCore.Authentication.Negotiate;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
-using Microsoft.AspNetCore.Server.HttpSys;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Identity.Web;
+using Microsoft.Identity.Web.UI;
 using MudBlazor.Services;
 
 namespace Aiwms.Web;
@@ -21,19 +22,8 @@ public class Program
     {
         var builder = WebApplication.CreateBuilder(args);
 
-        // Use HTTP.sys (Windows built-in) instead of Kestrel — Negotiate auth + interactive
-        // Blazor + Kestrel hangs on prerender. HTTP.sys handles Windows Auth natively.
-        // Loopback prefix doesn't need an admin URL ACL; LAN-wide binding (http://+:5217)
-        // does need: netsh http add urlacl url=http://+:5217/ user=Everyone (run elevated).
-        builder.WebHost.UseHttpSys(o =>
-        {
-            // Force Windows auth on every request — including /_blazor SignalR upgrade.
-            // With AllowAnonymous=true, the WebSocket connected anonymously and the
-            // entire circuit had an anonymous AuthState even after page-level auth.
-            o.Authentication.Schemes = AuthenticationSchemes.Negotiate | AuthenticationSchemes.NTLM;
-            o.Authentication.AllowAnonymous = false;
-            o.UrlPrefixes.Add("http://localhost:5217");
-        });
+        // Kestrel (default) — Negotiate-on-HTTP.sys is gone. Entra OIDC works on
+        // Linux App Service and locally on any OS.
 
         builder.Services.AddRazorComponents()
             .AddInteractiveServerComponents(o => o.DetailedErrors = true);
@@ -50,30 +40,34 @@ public class Program
             .SetApplicationName("Aiwms")
             .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "keys")));
 
-        builder.Services.AddSingleton<IConnectionConfig, FileConnectionConfig>();
+        // Connection resolver replaces FileConnectionConfig / IConnectionConfig.
+        // Reads AiwmsAzure + per-country + OnPremBackupDB conn strings from
+        // IConfiguration (appsettings.json + App Service config + User Secrets).
+        builder.Services.AddSingleton<IOnPremConnectionResolver, OnPremConnectionResolver>();
 
         builder.Services.AddScoped<ICurrentUser, AuthStateCurrentUser>();
         builder.Services.AddSingleton<AuditSaveChangesInterceptor>();
         builder.Services.AddScoped<IActionLogger, ActionLogger>();
         builder.Services.AddScoped<BuildingService>();
 
+        // AIWMS DbContext — Azure SQL via AAD (Managed Identity in App Service,
+        // AAD Default locally via `az login`). NO password in code.
         builder.Services.AddDbContextFactory<AiwmsDbContext>((sp, o) =>
         {
-            var conn = sp.GetRequiredService<IConnectionConfig>();
-            if (conn.IsConfigured)
-            {
-                o.UseSqlServer(conn.GetAiwmsConnectionString());
-                // Interceptor is now Singleton + IServiceScopeFactory, so resolving it
-                // from the factory options no longer deadlocks the claims transformer.
-                o.AddInterceptors(sp.GetRequiredService<AuditSaveChangesInterceptor>());
-            }
-            else
-            {
-                o.UseSqlServer("Server=(localdb)\\unconfigured;Database=unconfigured;Integrated Security=true");
-            }
+            var resolver = sp.GetRequiredService<IOnPremConnectionResolver>();
+            o.UseSqlServer(resolver.GetAiwmsAzureConnectionString());
+            o.AddInterceptors(sp.GetRequiredService<AuditSaveChangesInterceptor>());
         }, ServiceLifetime.Scoped);
 
-        builder.Services.AddAuthentication(HttpSysDefaults.AuthenticationScheme);
+        // Entra OIDC — mirrors Barcode Generator's MSAL flow but using
+        // Microsoft.Identity.Web (the .NET equivalent of @azure/msal-node).
+        builder.Services
+            .AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
+            .AddMicrosoftIdentityWebApp(builder.Configuration.GetSection("AzureAd"));
+
+        builder.Services.AddControllersWithViews()
+            .AddMicrosoftIdentityUI();
+
         builder.Services.AddScoped<IClaimsTransformation, AiwmsClaimsTransformer>();
 
         builder.Services.AddAuthorization(options =>
@@ -81,6 +75,12 @@ public class Program
             options.AddPolicy(AuthPolicies.RequireActiveUser, p => p
                 .RequireAuthenticatedUser()
                 .RequireClaim(AiwmsClaimsTransformer.ActiveClaim, "1"));
+
+            // All endpoints require auth by default. AllowAnonymous on the
+            // OIDC sign-in/sign-out endpoints is set by Microsoft.Identity.Web.UI.
+            options.FallbackPolicy = new AuthorizationPolicyBuilder()
+                .RequireAuthenticatedUser()
+                .Build();
         });
         builder.Services.AddCascadingAuthenticationState();
 
@@ -94,10 +94,14 @@ public class Program
 
         app.UseHttpsRedirection();
         app.UseStaticFiles();
+        app.UseRouting();
         app.UseAntiforgery();
 
         app.UseAuthentication();
         app.UseAuthorization();
+
+        // Microsoft.Identity.Web.UI controllers handle /MicrosoftIdentity/Account/SignIn|SignOut.
+        app.MapControllers();
 
         app.MapStaticAssets();
         app.MapRazorComponents<App>().AddInteractiveServerRenderMode();

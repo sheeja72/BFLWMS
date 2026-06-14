@@ -37,16 +37,23 @@ public static class DbOpContext
 ///   - AiwmsOpenBox.ToteID UNIQUE — blocks two open boxes sharing a tote.
 ///   - PCR allocation uses SERIALIZABLE so two users can't both claim same qty=0 row.
 /// </summary>
-public class BuildingService(IConnectionConfig conn, ICurrentUser user, IMemoryCache cache)
+public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser user, IMemoryCache cache)
 {
     // Cached once per app lifetime: is lpm.dbo.PhotoCheckingResultLPM.IdNO an IDENTITY column?
     // Determines the INSERT shape used by InsertNewPcrAsync. Reset on app restart
     // — so after running migrate_pcr_idno_identity.sql, restart the app to pick it up.
     private static bool? _idnoIsIdentity;
 
-    private SqlConnection Open(string? db = null)
+    // Per-country on-prem connection. AIWMS staging tables, lpm.*, bfldata.*, usa.*,
+    // hodata.*, datareporting.* all live on this single per-country server today.
+    // Until 2d migrates writes to Azure WMS, BuildingService keeps using this.
+    private SqlConnection Open(string? _ = null)
     {
-        var c = new SqlConnection(db is null ? conn.GetAiwmsConnectionString() : conn.GetConnectionString(db));
+        var country = user.Country
+            ?? throw new InvalidOperationException(
+                "Current user has no Country assigned — cannot resolve on-prem connection. " +
+                "Admin must set AiwmsUser.Country before this user runs Manual Building.");
+        var c = new SqlConnection(resolver.GetCountryConnectionString(country));
         c.Open();
         return c;
     }

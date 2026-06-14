@@ -1,120 +1,55 @@
-using System.Text.Json;
-using Microsoft.AspNetCore.DataProtection;
-using Microsoft.Data.SqlClient;
-using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Configuration;
 
 namespace Aiwms.Data.Configuration;
 
 /// <summary>
-/// Plain shape of the connection settings the admin enters in the UI.
-/// Persisted as an encrypted JSON blob via ASP.NET Core Data Protection.
+/// Resolves connection strings the AIWMS app uses at runtime. Three kinds:
+///
+///   1. Azure SQL AIWMS — the app's own DB on bfl-wms-sql. Connected via
+///      Managed Identity (App Service) or AAD Default (local dev). NO password.
+///   2. Per-country on-prem MSSQL — one connection string per country, configured
+///      in Azure App Service > Configuration > Connection strings under the key
+///      "{Country}_DB_ConnectionString" (LPMSIM pattern).
+///   3. OnPremBackupDB — single UAE-only backup DB hosting contreceipt, upc_subclass,
+///      SubclassMaster. Key: "OnPremBackupDB_ConnectionString".
 /// </summary>
-public class ConnectionSettings
+public interface IOnPremConnectionResolver
 {
-    public string Server     { get; set; } = "192.168.10.72";  // default per user
-    public string? Instance  { get; set; }                      // optional, e.g. "LOGBACKUP"
-    public int? Port         { get; set; }                      // optional
-    public string Database   { get; set; } = "AIWMS";
-    public string Username   { get; set; } = "";
-    public string Password   { get; set; } = "";
-    public bool TrustServerCertificate { get; set; } = true;
-    public bool Encrypt      { get; set; } = false;
-    public int  ConnectTimeoutSec { get; set; } = 15;
-
-    public string ToDataSource()
-    {
-        if (!string.IsNullOrWhiteSpace(Instance))
-            return $@"{Server}\{Instance}";
-        if (Port is > 0)
-            return $"{Server},{Port}";
-        return Server;
-    }
-
-    public string Build(string? overrideDb = null) => new SqlConnectionStringBuilder
-    {
-        DataSource = ToDataSource(),
-        InitialCatalog = overrideDb ?? Database,
-        UserID = Username,
-        Password = Password,
-        TrustServerCertificate = TrustServerCertificate,
-        Encrypt = Encrypt,
-        ConnectTimeout = ConnectTimeoutSec,
-        ApplicationName = "AIWMS",
-        Pooling = true,
-        MaxPoolSize = 200,
-    }.ConnectionString;
+    string GetAiwmsAzureConnectionString();
+    string GetCountryConnectionString(string country);
+    string GetOnPremBackupConnectionString();
+    IReadOnlyList<string> GetConfiguredCountries();
 }
 
-/// <summary>
-/// Provides the active connection string. Until the admin configures a connection,
-/// IsConfigured = false and the app forces a redirect to /setup.
-/// </summary>
-public interface IConnectionConfig
+public class OnPremConnectionResolver(IConfiguration cfg) : IOnPremConnectionResolver
 {
-    bool IsConfigured { get; }
-    ConnectionSettings? Current { get; }
-    string GetAiwmsConnectionString();
-    string GetConnectionString(string database);
-    Task SaveAsync(ConnectionSettings settings, CancellationToken ct = default);
-    Task<bool> TestAsync(ConnectionSettings settings, CancellationToken ct = default);
-}
+    private static readonly string[] _knownCountries =
+        ["UAE", "KSA", "Kuwait", "Bahrain", "Qatar", "Oman", "Egypt"];
 
-public class FileConnectionConfig : IConnectionConfig
-{
-    private const string ProtectorPurpose = "Aiwms.ConnectionSettings.v1";
-    private readonly IDataProtector _protector;
-    private readonly string _file;
-    private ConnectionSettings? _cache;
+    public string GetAiwmsAzureConnectionString() =>
+        cfg.GetConnectionString("WmsAzure")
+        ?? throw new InvalidOperationException(
+            "ConnectionStrings:WmsAzure is not configured. Add it to appsettings.json or App Service configuration.");
 
-    public FileConnectionConfig(IDataProtectionProvider dp, IHostEnvironment env)
+    public string GetCountryConnectionString(string country)
     {
-        _protector = dp.CreateProtector(ProtectorPurpose);
-        var dir = Path.Combine(env.ContentRootPath, "App_Data");
-        Directory.CreateDirectory(dir);
-        _file = Path.Combine(dir, "connection.protected");
-        _cache = TryLoad();
+        if (string.IsNullOrWhiteSpace(country))
+            throw new ArgumentException("Country is required.", nameof(country));
+        var key = $"{country}_DB_ConnectionString";
+        var cs = cfg.GetConnectionString(key);
+        if (string.IsNullOrWhiteSpace(cs))
+            throw new InvalidOperationException(
+                $"ConnectionStrings:{key} is not configured for country '{country}'.");
+        return cs;
     }
 
-    public bool IsConfigured => _cache is not null && !string.IsNullOrEmpty(_cache.Server) && !string.IsNullOrEmpty(_cache.Username);
+    public string GetOnPremBackupConnectionString() =>
+        cfg.GetConnectionString("OnPremBackupDB_ConnectionString")
+        ?? throw new InvalidOperationException(
+            "ConnectionStrings:OnPremBackupDB_ConnectionString is not configured.");
 
-    public ConnectionSettings? Current => _cache;
-
-    public string GetAiwmsConnectionString() =>
-        (_cache ?? throw new InvalidOperationException("Connection not configured. Visit /setup.")).Build();
-
-    public string GetConnectionString(string database) =>
-        (_cache ?? throw new InvalidOperationException("Connection not configured. Visit /setup.")).Build(database);
-
-    public async Task SaveAsync(ConnectionSettings settings, CancellationToken ct = default)
-    {
-        var json = JsonSerializer.Serialize(settings);
-        var blob = _protector.Protect(json);
-        await File.WriteAllTextAsync(_file, blob, ct);
-        _cache = settings;
-    }
-
-    public async Task<bool> TestAsync(ConnectionSettings settings, CancellationToken ct = default)
-    {
-        await using var con = new SqlConnection(settings.Build("master"));
-        await con.OpenAsync(ct);
-        await using var cmd = con.CreateCommand();
-        cmd.CommandText = "SELECT 1";
-        var v = await cmd.ExecuteScalarAsync(ct);
-        return v is int i && i == 1;
-    }
-
-    private ConnectionSettings? TryLoad()
-    {
-        if (!File.Exists(_file)) return null;
-        try
-        {
-            var protectedBlob = File.ReadAllText(_file);
-            var json = _protector.Unprotect(protectedBlob);
-            return JsonSerializer.Deserialize<ConnectionSettings>(json);
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    public IReadOnlyList<string> GetConfiguredCountries() =>
+        _knownCountries
+            .Where(c => !string.IsNullOrWhiteSpace(cfg.GetConnectionString($"{c}_DB_ConnectionString")))
+            .ToList();
 }

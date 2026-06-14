@@ -20,7 +20,7 @@ public class AiwmsDbContext(DbContextOptions<AiwmsDbContext> options) : DbContex
     {
         mb.Entity<AiwmsUser>(e =>
         {
-            e.ToTable("AiwmsUser");
+            e.ToTable("WmsUser");
             e.HasKey(x => x.Username);
             e.Property(x => x.Username).HasMaxLength(100);
             e.Property(x => x.DisplayName).HasMaxLength(200);
@@ -35,7 +35,7 @@ public class AiwmsDbContext(DbContextOptions<AiwmsDbContext> options) : DbContex
 
         mb.Entity<AiwmsWHMaster>(e =>
         {
-            e.ToTable("AiwmsWHMaster");
+            e.ToTable("WmsWHMaster");
             e.HasKey(x => new { x.Country, x.Warehouse });
             e.Property(x => x.Country).HasMaxLength(20);
             e.Property(x => x.Warehouse).HasMaxLength(50);
@@ -45,7 +45,7 @@ public class AiwmsDbContext(DbContextOptions<AiwmsDbContext> options) : DbContex
 
         mb.Entity<AiwmsOpenBox>(e =>
         {
-            e.ToTable("AiwmsOpenBox");
+            e.ToTable("WmsOpenBox");
             e.HasKey(x => x.BoxNo);
             e.Property(x => x.BoxNo).HasColumnType("varchar(50)");
             e.Property(x => x.Contno).HasColumnType("varchar(50)");
@@ -64,7 +64,7 @@ public class AiwmsDbContext(DbContextOptions<AiwmsDbContext> options) : DbContex
 
         mb.Entity<AiwmsOpenBoxItem>(e =>
         {
-            e.ToTable("AiwmsOpenBoxItem");
+            e.ToTable("WmsOpenBoxItem");
             e.HasKey(x => x.Id);
             e.Property(x => x.BoxNo).HasColumnType("varchar(50)");
             e.Property(x => x.ItemCode).HasMaxLength(20);
@@ -79,7 +79,7 @@ public class AiwmsDbContext(DbContextOptions<AiwmsDbContext> options) : DbContex
 
         mb.Entity<AiwmsRole>(e =>
         {
-            e.ToTable("AiwmsRole");
+            e.ToTable("WmsRole");
             e.HasKey(x => x.RoleCode);
             e.Property(x => x.RoleCode).HasMaxLength(20);
             e.Property(x => x.RoleName).HasMaxLength(100);
@@ -88,7 +88,7 @@ public class AiwmsDbContext(DbContextOptions<AiwmsDbContext> options) : DbContex
 
         mb.Entity<AiwmsUserRole>(e =>
         {
-            e.ToTable("AiwmsUserRole");
+            e.ToTable("WmsUserRole");
             e.HasKey(x => new { x.Username, x.RoleCode });
             e.Property(x => x.Username).HasMaxLength(100);
             e.Property(x => x.RoleCode).HasMaxLength(20);
@@ -98,7 +98,7 @@ public class AiwmsDbContext(DbContextOptions<AiwmsDbContext> options) : DbContex
 
         mb.Entity<AiwmsAuditLog>(e =>
         {
-            e.ToTable("AiwmsAuditLog");
+            e.ToTable("WmsAuditLog");
             e.HasKey(x => x.Id);
             e.Property(x => x.EntityName).HasMaxLength(100);
             e.Property(x => x.EntityKey).HasMaxLength(200);
@@ -122,7 +122,7 @@ public class AiwmsDbContext(DbContextOptions<AiwmsDbContext> options) : DbContex
 
         mb.Entity<AiwmsBoxSequence>(e =>
         {
-            e.ToTable("AiwmsBoxSequence");
+            e.ToTable("WmsBoxSequence");
             e.HasKey(x => x.Contno);
             e.Property(x => x.Contno).HasColumnType("varchar(50)");
             e.Property(x => x.UpdatedTS).HasColumnType("datetime2(0)");
@@ -130,7 +130,7 @@ public class AiwmsDbContext(DbContextOptions<AiwmsDbContext> options) : DbContex
 
         mb.Entity<AiwmsContainerPhotoCheck>(e =>
         {
-            e.ToTable("AiwmsContainerPhotoCheck");
+            e.ToTable("WmsContainerPhotoCheck");
             e.HasKey(x => x.Contno);
             e.Property(x => x.Contno).HasColumnType("varchar(50)");
             e.Property(x => x.CheckedTS).HasColumnType("datetime2(0)");
