@@ -181,13 +181,14 @@ a:hover { text-decoration: underline; }
     gap: 8px;
 }
 .aiwms-brand-title::before {
-    content: '';
-    display: inline-block;
-    width: 22px;
-    height: 22px;
-    background: var(--bfl-yellow);
-    border-radius: var(--r-sm);
-    box-shadow: 0 2px 6px rgba(255,209,0,.45);
+    content: 'shopping_bag';
+    font-family: var(--font-icon);
+    font-size: 26px;
+    color: var(--bfl-yellow);
+    line-height: 1;
+    font-variation-settings: 'FILL' 1, 'wght' 500, 'GRAD' 0, 'opsz' 24;
+    text-shadow: 0 2px 4px rgba(255,209,0,.45);
+    font-feature-settings: 'liga';
 }
 .aiwms-brand-sub {
     font-family: var(--font-display);
