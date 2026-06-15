@@ -13,8 +13,8 @@
 /db/                                    @sheeja72 @rijubfl
 
 # Auth + Program.cs changes need careful review — can break login for everyone
-/src/Aiwms.Web/Auth/                    @sheeja72 @rijubfl
-/src/Aiwms.Web/Program.cs               @sheeja72 @rijubfl
+/src/Wms.Web/Auth/                    @sheeja72 @rijubfl
+/src/Wms.Web/Program.cs               @sheeja72 @rijubfl
 
 # CI / deploy workflows — controls what ships to production
 /.github/workflows/                     @sheeja72 @rijubfl

@@ -1,0 +1,17 @@
+@page "/"
+@attribute [Authorize(Policy = Wms.Core.AuthPolicies.RequireActiveUser)]
+
+<PageTitle>WMS — Home</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>WMS Home</h2>
+    <p>Pick a workflow from the left menu to get started.</p>
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-detail-grid">
+        <div class="field"><div class="lbl">Container Building</div><div class="val"><a href="building/manual">LPM Manual Building →</a></div></div>
+        <div class="field"><div class="lbl">Item Encoding</div><div class="val"><a href="encoding">Encode new items →</a></div></div>
+        <div class="field"><div class="lbl">Production to Stores</div><div class="val"><a href="production/lpm">LPM Production →</a></div></div>
+    </div>
+</div>
