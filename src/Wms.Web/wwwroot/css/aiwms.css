@@ -186,7 +186,7 @@ a:hover { text-decoration: underline; }
     width: 28px;
     height: 28px;
     background: url('/img/bfl-logo.png') center/contain no-repeat;
-    filter: drop-shadow(0 2px 4px rgba(255,209,0,.45));
+    mix-blend-mode: multiply;
 }
 .aiwms-brand-sub {
     font-family: var(--font-display);
