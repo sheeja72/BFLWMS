@@ -83,7 +83,7 @@
     --sidebar-bg:        var(--bfl-charcoal);    /* dark sidebar, yellow accents */
     --sidebar-hover:     var(--bfl-grey-800);
     --sidebar-active:    var(--bfl-black);
-    --sidebar-text:      var(--bfl-grey-300);
+    --sidebar-text:      var(--bfl-grey-200);
     --sidebar-text-active: var(--bfl-yellow);
     --primary:           var(--bfl-yellow);
     --primary-hover:     var(--bfl-yellow-hov);
@@ -242,7 +242,7 @@ a:hover { text-decoration: underline; }
 .aiwms-nav { flex: 1; padding: 12px 8px; overflow-y: auto; }
 .aiwms-nav-section {
     font-family: var(--font-display);
-    color: var(--bfl-grey-500);
+    color: var(--bfl-grey-300);
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 1.2px;
@@ -280,7 +280,7 @@ a:hover { text-decoration: underline; }
     font-family: var(--font-icon);
     font-size: 18px;
     line-height: 1;
-    color: var(--bfl-grey-400);
+    color: var(--bfl-grey-200);
     font-feature-settings: 'liga';
     font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 20;
 }
