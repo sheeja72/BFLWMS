@@ -51,7 +51,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         // Sources:
         //   usaorgfile_LPM   — ContNo, OraPONo, LPM, ItemCode, orgqty
         //   Contreceipt      — ReceiptDt (via TCMNo)
-        //   vUSAOrder        — OthersPath = Buyer (via refno = ContNo)
+        //   vUSAOrder        — OthersPath = Buyer (subquery; one value per container)
         //   vupc_subclass    — Division (via itemcode)
         var rows = await c.QueryAsync<PoDataRow>(new CommandDefinition(@"
             SELECT
@@ -59,12 +59,11 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 MAX(cr.ReceiptDt)                     AS ContReceiptDT,
                 u.OraPONo                             AS PONO,
                 u.LPM                                 AS LPM,
-                MAX(uo.OthersPath)                    AS Buyer,
+                (SELECT TOP 1 OthersPath FROM hodata.dbo.vUSAOrder WHERE refno = u.ContNo) AS Buyer,
                 MAX(sub.Division)                     AS Division,
                 CAST(ISNULL(SUM(u.orgqty), 0) AS INT) AS Qty
             FROM usa.dbo.usaorgfile_LPM u WITH (NOLOCK)
             LEFT JOIN bfldata.dbo.Contreceipt cr      WITH (NOLOCK) ON cr.TCMNo   = u.ContNo
-            LEFT JOIN hodata.dbo.vUSAOrder uo         WITH (NOLOCK) ON uo.refno   = u.ContNo
             LEFT JOIN datareporting.dbo.vupc_subclass sub WITH (NOLOCK) ON sub.itemcode = u.ItemCode
             WHERE u.ContNo = @contno
             GROUP BY u.ContNo, u.OraPONo, u.LPM
