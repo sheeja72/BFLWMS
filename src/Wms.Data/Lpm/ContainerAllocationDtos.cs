@@ -2,13 +2,15 @@ namespace Wms.Data.Lpm;
 
 /// <summary>One row in the "Load PO Data" grid on the Container Allocation page.</summary>
 public record PoDataRow(
-    string  Contno,
+    string    Contno,
     DateTime? ContReceiptDT,
-    string? PONO,
-    string? LPM,
-    string? Buyer,
-    string? Division,
-    int     Qty);
+    string?   PONO,
+    string?   LPM,
+    string?   Buyer,
+    string?   Division,
+    string?   Brand,
+    int       Qty,
+    string?   DestCountry);
 
 /// <summary>
 /// Outcome of the Phase-1 validation. Each check that ran produces a step

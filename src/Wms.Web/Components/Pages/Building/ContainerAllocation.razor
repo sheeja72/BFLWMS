@@ -60,7 +60,9 @@
                     <th>LPM</th>
                     <th>Buyer</th>
                     <th>Division</th>
-                    <th>Qty</th>
+                    <th>Brand</th>
+                    <th style="text-align:right">Qty</th>
+                    <th>Dest. Country</th>
                 </tr>
             </thead>
             <tbody>
@@ -73,10 +75,19 @@
                         <td>@r.LPM</td>
                         <td>@r.Buyer</td>
                         <td>@r.Division</td>
-                        <td>@r.Qty</td>
+                        <td>@r.Brand</td>
+                        <td style="text-align:right">@r.Qty</td>
+                        <td>@r.DestCountry</td>
                     </tr>
                 }
             </tbody>
+            <tfoot>
+                <tr style="background:var(--bfl-grey-50); font-weight:800">
+                    <td colspan="7" style="text-align:right">Total</td>
+                    <td style="text-align:right">@_poData.Sum(r => r.Qty)</td>
+                    <td></td>
+                </tr>
+            </tfoot>
         </table>
     </div>
 }
