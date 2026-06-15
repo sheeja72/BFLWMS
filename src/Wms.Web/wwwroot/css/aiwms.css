@@ -181,14 +181,12 @@ a:hover { text-decoration: underline; }
     gap: 8px;
 }
 .aiwms-brand-title::before {
-    content: 'shopping_bag';
-    font-family: var(--font-icon);
-    font-size: 26px;
-    color: var(--bfl-yellow);
-    line-height: 1;
-    font-variation-settings: 'FILL' 1, 'wght' 500, 'GRAD' 0, 'opsz' 24;
-    text-shadow: 0 2px 4px rgba(255,209,0,.45);
-    font-feature-settings: 'liga';
+    content: '';
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    background: url('/img/bfl-logo.png') center/contain no-repeat;
+    filter: drop-shadow(0 2px 4px rgba(255,209,0,.45));
 }
 .aiwms-brand-sub {
     font-family: var(--font-display);
