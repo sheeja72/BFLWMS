@@ -48,20 +48,24 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         // Buyer / LPM / Division / orgqty come from usa.dbo.usaorgfile_LPM.
         // Column names follow the existing on-prem schema — adjust if any
         // are slightly different (e.g. Vendor vs Buyer).
-        // usaorgfile_LPM does not carry Buyer or Division directly; Buyer pulled
-        // from Contreceipt.Supplier via TCMNo join. Division left null until we
-        // confirm its source table.
+        // Sources:
+        //   usaorgfile_LPM   — ContNo, OraPONo, LPM, ItemCode, orgqty
+        //   Contreceipt      — ReceiptDt (via TCMNo)
+        //   vUSAOrder        — OthersPath = Buyer (via refno = ContNo)
+        //   vupc_subclass    — Division (via itemcode)
         var rows = await c.QueryAsync<PoDataRow>(new CommandDefinition(@"
             SELECT
                 u.ContNo                              AS Contno,
                 MAX(cr.ReceiptDt)                     AS ContReceiptDT,
                 u.OraPONo                             AS PONO,
                 u.LPM                                 AS LPM,
-                MAX(cr.Supplier)                      AS Buyer,
-                CAST(NULL AS NVARCHAR(50))            AS Division,
+                MAX(uo.OthersPath)                    AS Buyer,
+                MAX(sub.Division)                     AS Division,
                 CAST(ISNULL(SUM(u.orgqty), 0) AS INT) AS Qty
             FROM usa.dbo.usaorgfile_LPM u WITH (NOLOCK)
-            LEFT JOIN bfldata.dbo.Contreceipt cr WITH (NOLOCK) ON cr.TCMNo = u.ContNo
+            LEFT JOIN bfldata.dbo.Contreceipt cr      WITH (NOLOCK) ON cr.TCMNo   = u.ContNo
+            LEFT JOIN hodata.dbo.vUSAOrder uo         WITH (NOLOCK) ON uo.refno   = u.ContNo
+            LEFT JOIN datareporting.dbo.vupc_subclass sub WITH (NOLOCK) ON sub.itemcode = u.ItemCode
             WHERE u.ContNo = @contno
             GROUP BY u.ContNo, u.OraPONo, u.LPM
             ORDER BY u.OraPONo, u.LPM",
