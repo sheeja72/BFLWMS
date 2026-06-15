@@ -1,4 +1,5 @@
 @inherits LayoutComponentBase
+@using System.Reflection
 
 <MudThemeProvider Theme="_theme" />
 <MudPopoverProvider />
@@ -38,6 +39,7 @@
             </AuthorizeView>
         </div>
         <NavMenu />
+        <div class="aiwms-sidebar-footer">v@_version</div>
     </aside>
 
     <main class="aiwms-main">
@@ -54,6 +56,12 @@
 </div>
 
 @code {
+    private static readonly string _version =
+        Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0]
+        ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
+        ?? "dev";
+
     private readonly MudTheme _theme = new()
     {
         PaletteLight = new PaletteLight
