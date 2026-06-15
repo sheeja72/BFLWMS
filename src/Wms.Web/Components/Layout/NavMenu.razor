@@ -1,54 +1,54 @@
 <nav class="aiwms-nav">
-    <a href="" class="aiwms-nav-link">
+    <NavLink class="aiwms-nav-link" ActiveClass="active" href="" Match="NavLinkMatch.All">
         <span class="aiwms-nav-icon">home</span>
         <span>Home</span>
-    </a>
+    </NavLink>
 
     <AuthorizeView Roles="Admin,WHAssociate,WHSupervisor,WHManager">
         <Authorized>
             <div class="aiwms-nav-section">Container Building</div>
-            <a href="building/manual" class="aiwms-nav-link">
+            <NavLink class="aiwms-nav-link" ActiveClass="active" href="building/manual">
                 <span class="aiwms-nav-icon">inventory_2</span>
                 <span>LPM Manual Building</span>
-            </a>
+            </NavLink>
             <AuthorizeView Roles="Admin,WHManager" Context="ctxAlloc">
                 <Authorized>
-                    <a href="building/container-allocation" class="aiwms-nav-link">
+                    <NavLink class="aiwms-nav-link" ActiveClass="active" href="building/container-allocation">
                         <span class="aiwms-nav-icon">assignment_turned_in</span>
                         <span>Container Allocation</span>
-                    </a>
+                    </NavLink>
                 </Authorized>
             </AuthorizeView>
 
             <div class="aiwms-nav-section">Item Encoding</div>
-            <a href="encoding" class="aiwms-nav-link">
+            <NavLink class="aiwms-nav-link" ActiveClass="active" href="encoding">
                 <span class="aiwms-nav-icon">sell</span>
                 <span>Item Encoding</span>
-            </a>
+            </NavLink>
 
             <div class="aiwms-nav-section">Production to Stores</div>
-            <a href="production/lpm" class="aiwms-nav-link">
+            <NavLink class="aiwms-nav-link" ActiveClass="active" href="production/lpm">
                 <span class="aiwms-nav-icon">local_shipping</span>
                 <span>LPM Production</span>
-            </a>
+            </NavLink>
         </Authorized>
     </AuthorizeView>
 
     <AuthorizeView Roles="Admin">
         <Authorized>
             <div class="aiwms-nav-section">Admin</div>
-            <a href="admin/users" class="aiwms-nav-link">
+            <NavLink class="aiwms-nav-link" ActiveClass="active" href="admin/users">
                 <span class="aiwms-nav-icon">group</span>
                 <span>Users &amp; Roles</span>
-            </a>
-            <a href="admin/wh-master" class="aiwms-nav-link">
+            </NavLink>
+            <NavLink class="aiwms-nav-link" ActiveClass="active" href="admin/wh-master">
                 <span class="aiwms-nav-icon">apartment</span>
                 <span>WH Master</span>
-            </a>
-            <a href="admin/audit" class="aiwms-nav-link">
+            </NavLink>
+            <NavLink class="aiwms-nav-link" ActiveClass="active" href="admin/audit">
                 <span class="aiwms-nav-icon">history</span>
                 <span>Audit Log</span>
-            </a>
+            </NavLink>
         </Authorized>
     </AuthorizeView>
 </nav>
