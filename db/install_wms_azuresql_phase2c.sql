@@ -193,11 +193,11 @@ CREATE TABLE dbo.WmsUPCBoxDet (
 );
 
 /* ============================================================================
-   8. WmsPhotochecking (replaces lpm.dbo.PhotocheckingLPM)
+   8. WMSContBuilding (replaces lpm.dbo.PhotocheckingLPM)
    Columns derived from BuildingService INSERT. One row per scan.
    ============================================================================ */
-IF OBJECT_ID('dbo.WmsPhotochecking','U') IS NULL
-CREATE TABLE dbo.WmsPhotochecking (
+IF OBJECT_ID('dbo.WMSContBuilding','U') IS NULL
+CREATE TABLE dbo.WMSContBuilding (
     Country          NVARCHAR(20)   NOT NULL,
     Sn               BIGINT IDENTITY(1,1) NOT NULL,
     ContNo           VARCHAR(50)    NOT NULL,
@@ -222,11 +222,11 @@ CREATE TABLE dbo.WmsPhotochecking (
     ToteID           NVARCHAR(50)   NULL,
     RoboStatus       CHAR(1)        NULL,
     BarCode          NVARCHAR(100)  NULL,
-    CONSTRAINT PK_WmsPhotochecking PRIMARY KEY (Country, Sn)
+    CONSTRAINT PK_WMSContBuilding PRIMARY KEY (Country, Sn)
 );
 
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WmsPhotochecking_CCont' AND object_id=OBJECT_ID('dbo.WmsPhotochecking'))
-    CREATE INDEX IX_WmsPhotochecking_CCont ON dbo.WmsPhotochecking (Country, ContNo);
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WMSContBuilding_CCont' AND object_id=OBJECT_ID('dbo.WMSContBuilding'))
+    CREATE INDEX IX_WMSContBuilding_CCont ON dbo.WMSContBuilding (Country, ContNo);
 
 PRINT 'Phase 2c install complete. 8 new tables created in WMS DB.';
 PRINT 'Next: Phase 2d refactors BuildingService to query these instead of on-prem.';

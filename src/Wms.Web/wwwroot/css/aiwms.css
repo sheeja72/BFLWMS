@@ -82,9 +82,9 @@
     --sidebar-width:     236px;
     --sidebar-bg:        var(--bfl-charcoal);    /* dark sidebar, yellow accents */
     --sidebar-hover:     var(--bfl-grey-800);
-    --sidebar-active:    var(--bfl-black);
+    --sidebar-active:    var(--bfl-yellow);
     --sidebar-text:      var(--bfl-grey-200);
-    --sidebar-text-active: var(--bfl-yellow);
+    --sidebar-text-active: var(--bfl-black);
     --primary:           var(--bfl-yellow);
     --primary-hover:     var(--bfl-yellow-hov);
     --primary-light:     var(--bfl-yellow-lite);
@@ -272,7 +272,8 @@ a:hover { text-decoration: underline; }
 .aiwms-nav-link.active {
     background: var(--sidebar-active);
     color: var(--sidebar-text-active);
-    border-left-color: var(--bfl-yellow);
+    border-left-color: var(--bfl-black);
+    font-weight: 800;
 }
 .aiwms-nav-icon {
     width: 22px;
@@ -286,7 +287,7 @@ a:hover { text-decoration: underline; }
 }
 .aiwms-nav-link:hover .aiwms-nav-icon { color: var(--bfl-white); }
 .aiwms-nav-link.active .aiwms-nav-icon {
-    color: var(--bfl-yellow);
+    color: var(--bfl-black);
     font-variation-settings: 'FILL' 1, 'wght' 500, 'GRAD' 0, 'opsz' 20;
 }
 
