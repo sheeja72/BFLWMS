@@ -1,0 +1,91 @@
+@inherits LayoutComponentBase
+@using System.Reflection
+
+<MudThemeProvider Theme="_theme" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<div class="aiwms-shell">
+    <aside class="aiwms-sidebar">
+        <div class="aiwms-brand">
+            <div class="aiwms-brand-title">WMS</div>
+            <div class="aiwms-brand-sub">Warehouse Management</div>
+            <AuthorizeView>
+                <Authorized>
+                    @{
+                        var role = context.User.IsInRole("Admin") ? "Admin"
+                                 : context.User.IsInRole("WHManager") ? "WH Manager"
+                                 : context.User.IsInRole("WHSupervisor") ? "WH Supervisor"
+                                 : context.User.IsInRole("WHAssociate") ? "WH Associate"
+                                 : "User";
+                    }
+                    <span class="aiwms-role-badge">@role</span>
+                    <div class="aiwms-username">@context.User.Identity?.Name</div>
+                    @{
+                        var country = context.User.FindFirst("country")?.Value;
+                    }
+                    @if (!string.IsNullOrEmpty(country))
+                    {
+                        <div class="aiwms-server-info" title="Country: @country">
+                            <span class="aiwms-server-dot">●</span>
+                            <span class="aiwms-server-text">@country</span>
+                        </div>
+                    }
+                    <div class="aiwms-server-db">
+                        <a href="MicrosoftIdentity/Account/SignOut" style="color:inherit">Sign out</a>
+                    </div>
+                </Authorized>
+            </AuthorizeView>
+        </div>
+        <NavMenu />
+        <div class="aiwms-sidebar-footer">v@_version</div>
+    </aside>
+
+    <main class="aiwms-main">
+        <div class="aiwms-content">
+            @Body
+        </div>
+    </main>
+</div>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">×</span>
+</div>
+
+@code {
+    private static readonly string _version =
+        Assembly.GetExecutingAssembly()
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion?.Split('+')[0]
+        ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
+        ?? "dev";
+
+    private readonly MudTheme _theme = new()
+    {
+        PaletteLight = new PaletteLight
+        {
+            Primary       = "#FFD100", // BFL yellow
+            Secondary     = "#1A1A1A", // BFL charcoal / black
+            Background    = "#F7F7F5", // BFL grey-100 page bg
+            Surface       = "#FFFFFF",
+            AppbarBackground = "#FFFFFF",
+            DrawerBackground = "#FFFFFF",
+            TextPrimary   = "#3D3D38", // BFL grey-700
+            TextSecondary = "#6B6B62", // BFL grey-600
+            LinesDefault  = "#EDEDE8", // BFL grey-200
+            Success       = "#0E9F6E",
+            Error         = "#D1435B",
+            Warning       = "#C98512",
+            Info          = "#2563EB",
+        },
+        Typography = new Typography
+        {
+            Default = new Default
+            {
+                FontFamily = new[] { "DM Sans", "Segoe UI", "Tahoma", "sans-serif" }
+            }
+        }
+    };
+}
