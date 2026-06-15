@@ -1,0 +1,182 @@
+@page "/building/container-allocation"
+@using Wms.Core
+@using Wms.Data.Lpm
+@attribute [Authorize(Roles = "Admin,WHManager")]
+@inject ContainerAllocationService Svc
+
+<PageTitle>WMS — Container Allocation</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Container Allocation</h2>
+    <p>Validate a container against the LPM source data, then run the allocation process.</p>
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">Inputs</div>
+    <div class="aiwms-form-row">
+        <label>Country *</label>
+        <select @bind="_country" @bind:after="OnCountryChangedAsync">
+            <option value="">-- Select --</option>
+            @foreach (var c in _countries)
+            {
+                <option value="@c">@c</option>
+            }
+        </select>
+    </div>
+    <div class="aiwms-form-row">
+        <label>Warehouse *</label>
+        <select @bind="_warehouse">
+            <option value="">-- Select --</option>
+            @foreach (var w in _warehouses)
+            {
+                <option value="@w">@w</option>
+            }
+        </select>
+    </div>
+    <div class="aiwms-form-row">
+        <label>Container No *</label>
+        <input @bind="_contno" placeholder="e.g. SALOC6802" />
+    </div>
+
+    <div style="display:flex; gap:12px; margin-top:12px;">
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="LoadPoDataAsync" disabled="@(_busy || !CanLoad)">
+            Load PO Data
+        </button>
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="ProcessAsync" disabled="@(_busy || !CanProcess)">
+            Process
+        </button>
+    </div>
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="aiwms-alert @(_messageIsError ? "error" : "info")" style="margin-top:12px">@_message</div>
+    }
+</div>
+
+@if (_poData.Count > 0)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header">PO Data — @_poData.Count rows</div>
+        <table class="aiwms-table">
+            <thead>
+                <tr>
+                    <th>Contno</th>
+                    <th>Receipt Dt</th>
+                    <th>PO No</th>
+                    <th>LPM</th>
+                    <th>Buyer</th>
+                    <th>Division</th>
+                    <th>Qty</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in _poData)
+                {
+                    <tr>
+                        <td>@r.Contno</td>
+                        <td>@r.ContReceiptDT?.ToString("yyyy-MM-dd")</td>
+                        <td>@r.PONO</td>
+                        <td>@r.LPM</td>
+                        <td>@r.Buyer</td>
+                        <td>@r.Division</td>
+                        <td>@r.Qty</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@if (_validation is not null)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header">
+            Validation — @(_validation.Ok ? "ALL PASSED" : "BLOCKED")
+        </div>
+        <table class="aiwms-table">
+            <thead><tr><th>Step</th><th>Status</th><th>Detail</th></tr></thead>
+            <tbody>
+                @foreach (var s in _validation.Steps)
+                {
+                    <tr>
+                        <td>@s.Label</td>
+                        <td>
+                            <span class="aiwms-pill @(s.Ok ? "tier1" : "tier4")">
+                                @(s.Ok ? "OK" : "FAIL")
+                            </span>
+                        </td>
+                        <td>@s.Detail</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+
+        @if (_validation.Ok)
+        {
+            <div class="aiwms-alert info" style="margin-top:12px">
+                All checks passed. Process logic (Phase 2) will go here.
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private List<string> _countries = new();
+    private List<string> _warehouses = new();
+    private List<PoDataRow> _poData = new();
+    private ContainerAllocationValidationResult? _validation;
+
+    private string _country = "";
+    private string _warehouse = "";
+    private string _contno = "";
+    private bool _busy;
+    private string _message = "";
+    private bool _messageIsError;
+
+    private bool CanLoad => !string.IsNullOrWhiteSpace(_contno);
+    private bool CanProcess => !string.IsNullOrWhiteSpace(_country)
+                            && !string.IsNullOrWhiteSpace(_warehouse)
+                            && !string.IsNullOrWhiteSpace(_contno);
+
+    protected override async Task OnInitializedAsync()
+    {
+        try { _countries = await Svc.GetCountriesAsync(); }
+        catch (Exception ex) { ShowError($"Failed to load countries: {ex.Message}"); }
+    }
+
+    private async Task OnCountryChangedAsync()
+    {
+        _warehouse = "";
+        _warehouses = new();
+        if (string.IsNullOrWhiteSpace(_country)) return;
+        try { _warehouses = await Svc.GetWarehousesAsync(_country); }
+        catch (Exception ex) { ShowError($"Failed to load warehouses: {ex.Message}"); }
+    }
+
+    private async Task LoadPoDataAsync()
+    {
+        _busy = true; _message = ""; _validation = null;
+        try
+        {
+            _poData = await Svc.LoadPoDataAsync(_contno);
+            if (_poData.Count == 0) ShowInfo("No rows found in usaorgfile_LPM for this container.");
+        }
+        catch (Exception ex) { ShowError($"Load failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private async Task ProcessAsync()
+    {
+        _busy = true; _message = "";
+        try
+        {
+            _validation = await Svc.ValidateAsync(_country, _contno);
+            if (!_validation.Ok) ShowError("Validation failed — see steps below.");
+        }
+        catch (Exception ex) { ShowError($"Process failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private void ShowError(string msg)   { _message = msg; _messageIsError = true; }
+    private void ShowInfo(string msg)    { _message = msg; _messageIsError = false; }
+}
