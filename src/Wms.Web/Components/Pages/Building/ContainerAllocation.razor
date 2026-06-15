@@ -31,7 +31,7 @@
         </div>
         <div>
             <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">CONTAINER NO *</label>
-            <input @bind="_contno" placeholder="e.g. SALOC6802" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-mono); font-size:13px; background:white;" />
+            <input @bind="_contno" placeholder="e.g. AEINT6255" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-mono); font-size:13px; background:white;" />
         </div>
         <button class="aiwms-btn aiwms-btn-secondary" @onclick="LoadPoDataAsync" disabled="@(_busy || !CanLoad)">
             Load PO Data
