@@ -51,20 +51,24 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         // Sources:
         //   usaorgfile_LPM   — ContNo, OraPONo, LPM, ItemCode, orgqty
         //   Contreceipt      — ReceiptDt (via TCMNo)
-        //   vUSAOrder        — OthersPath = Buyer (subquery; one value per container)
+        //   vUSAOrder        — OthersPath = Buyer, country = DestCountry (subqueries)
         //   vupc_subclass    — Division (via itemcode)
+        //   USAOrgFile       — vendor = Brand (via ContNo + itemcode)
         var rows = await c.QueryAsync<PoDataRow>(new CommandDefinition(@"
             SELECT
                 u.ContNo                              AS Contno,
                 MAX(cr.ReceiptDt)                     AS ContReceiptDT,
                 u.OraPONo                             AS PONO,
                 u.LPM                                 AS LPM,
-                (SELECT TOP 1 OthersPath FROM hodata.dbo.vUSAOrder WHERE refno = u.ContNo) AS Buyer,
+                (SELECT TOP 1 OthersPath FROM hodata.dbo.vUSAOrder WHERE refno = u.ContNo)  AS Buyer,
                 MAX(sub.Division)                     AS Division,
-                CAST(ISNULL(SUM(u.orgqty), 0) AS INT) AS Qty
+                MAX(org.vendor)                       AS Brand,
+                CAST(ISNULL(SUM(u.orgqty), 0) AS INT) AS Qty,
+                (SELECT TOP 1 country     FROM hodata.dbo.vUSAOrder WHERE refno = u.ContNo) AS DestCountry
             FROM usa.dbo.usaorgfile_LPM u WITH (NOLOCK)
-            LEFT JOIN bfldata.dbo.Contreceipt cr      WITH (NOLOCK) ON cr.TCMNo   = u.ContNo
-            LEFT JOIN datareporting.dbo.vupc_subclass sub WITH (NOLOCK) ON sub.itemcode = u.ItemCode
+            LEFT JOIN bfldata.dbo.Contreceipt cr           WITH (NOLOCK) ON cr.TCMNo    = u.ContNo
+            LEFT JOIN datareporting.dbo.vupc_subclass sub  WITH (NOLOCK) ON sub.itemcode = u.ItemCode
+            LEFT JOIN usa.dbo.USAOrgFile org               WITH (NOLOCK) ON org.ContNo  = u.ContNo AND org.itemcode = u.ItemCode
             WHERE u.ContNo = @contno
             GROUP BY u.ContNo, u.OraPONo, u.LPM
             ORDER BY u.OraPONo, u.LPM",
