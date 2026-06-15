@@ -243,7 +243,7 @@ a:hover { text-decoration: underline; }
 .aiwms-nav { flex: 1; padding: 12px 8px; overflow-y: auto; }
 .aiwms-nav-section {
     font-family: var(--font-display);
-    color: var(--bfl-grey-300);
+    color: var(--bfl-yellow);
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 1.2px;
