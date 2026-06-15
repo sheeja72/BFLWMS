@@ -23,11 +23,15 @@ jobs:
         with:
           dotnet-version: '9.x'
 
+      - name: Compute version
+        id: ver
+        run: echo "value=1.0.${{ github.run_number }}" >> $GITHUB_OUTPUT
+
       - name: Build with dotnet
-        run: dotnet build --configuration Release
+        run: dotnet build --configuration Release -p:Version=${{ steps.ver.outputs.value }}
 
       - name: dotnet publish
-        run: dotnet publish -c Release -o ${{env.DOTNET_ROOT}}/myapp
+        run: dotnet publish -c Release -o ${{env.DOTNET_ROOT}}/myapp -p:Version=${{ steps.ver.outputs.value }}
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
