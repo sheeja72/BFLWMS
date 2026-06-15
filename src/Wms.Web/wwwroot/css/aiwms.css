@@ -183,10 +183,13 @@ a:hover { text-decoration: underline; }
 .aiwms-brand-title::before {
     content: '';
     display: inline-block;
-    width: 28px;
-    height: 28px;
+    width: 32px;
+    height: 32px;
     background: url('/img/bfl-logo.png') center/contain no-repeat;
-    mix-blend-mode: multiply;
+    /* invert + hue-rotate: white → black (blends with charcoal sidebar),
+       yellow stays yellow. Cleanest way to hide the white halo without
+       needing a transparent PNG. */
+    filter: invert(1) hue-rotate(180deg);
 }
 .aiwms-brand-sub {
     font-family: var(--font-display);
