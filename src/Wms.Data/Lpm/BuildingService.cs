@@ -28,7 +28,7 @@ public static class DbOpContext
 ///   - Azure SQL WMS DB (WmsAzure conn) — ALL transactional writes + most reads.
 ///     Tables: WmsPCR, WmsOpenBox, WmsOpenBoxItem, WmsOpenBoxScan, WmsBoxSequence,
 ///     WmsContainerPhotoCheck, WmsOpenUSACont, WmsKNBBoxes, WmsBuildingCompletion,
-///     WmsBlueToteIDMaster, WmsUPCBoxHead, WmsUPCBoxDet, WmsPhotochecking.
+///     WmsBlueToteIDMaster, WmsUPCBoxHead, WmsUPCBoxDet, WMSContBuilding.
 ///   - OnPremBackupDB (UAE backup conn) — read-only validation for:
 ///     contreceipt, upc_subclass, SubclassMaster.
 ///
@@ -735,8 +735,8 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                 transaction: tx, cancellationToken: ct));
         }
 
-        // 3) WmsPhotochecking — ONE ROW PER SCAN
-        var photoSql = @"INSERT INTO dbo.WmsPhotochecking
+        // 3) WMSContBuilding — ONE ROW PER SCAN
+        var photoSql = @"INSERT INTO dbo.WMSContBuilding
             (Country, ContNo, TrnDate, Time1, UPC, PhotoSize, Result, CheckedBy, CmpName, BoxSize,
              Photo, Style, Color, GroupCode, ItemName, Warehouse, PhotoCheckType, RRP,
              Logistics_BoxNo, Season, ToteID, RoboStatus, BarCode)
@@ -749,7 +749,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
             var qty = (int)it.Qty;
             for (int i = 0; i < qty; i++)
             {
-                DbOpContext.Set("INSERT dbo.WmsPhotochecking (checkout step 3 — one per scan)", photoSql);
+                DbOpContext.Set("INSERT dbo.WMSContBuilding (checkout step 3 — one per scan)", photoSql);
                 await c.ExecuteAsync(new CommandDefinition(photoSql,
                     new { Country = country, Cont = contno, Item = (string)it.ItemCode, Size = (string?)it.Size ?? "",
                           Result = (string?)it.Result ?? "SHOP", User = checkoutUser, Pc = pcName,
