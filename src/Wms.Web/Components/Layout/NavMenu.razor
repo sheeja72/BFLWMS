@@ -11,6 +11,14 @@
                 <span class="aiwms-nav-icon">inventory_2</span>
                 <span>LPM Manual Building</span>
             </a>
+            <AuthorizeView Roles="Admin,WHManager" Context="ctxAlloc">
+                <Authorized>
+                    <a href="building/container-allocation" class="aiwms-nav-link">
+                        <span class="aiwms-nav-icon">assignment_turned_in</span>
+                        <span>Container Allocation</span>
+                    </a>
+                </Authorized>
+            </AuthorizeView>
 
             <div class="aiwms-nav-section">Item Encoding</div>
             <a href="encoding" class="aiwms-nav-link">
