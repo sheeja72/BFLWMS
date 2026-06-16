@@ -1,4 +1,3 @@
-using System.Text.Json;
 using Wms.Core;
 using Wms.Data.Configuration;
 using Dapper;
@@ -323,97 +322,164 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         return result;
     }
 
-    // ===================== Save Draft (Azure WMS WmsAllocationDraft) =====================
+    // ===================== Save Draft (LPMSIM tables) =====================
     public async Task SaveDraftAsync(string country, string contno, IReadOnlyList<AllocationRow> rows, CancellationToken ct = default)
     {
         if (rows.Count == 0) return;
-        var json = JsonSerializer.Serialize(rows);
         var totalQty = rows.Sum(r => r.AllocQty);
-        await using var w = OpenWms();
-        await w.ExecuteAsync(new CommandDefinition(@"
-            MERGE dbo.WmsAllocationDraft AS t
-            USING (SELECT @ct AS Country, @c AS ContNo) s
-              ON t.Country = s.Country AND t.ContNo = s.ContNo
-            WHEN MATCHED THEN
-              UPDATE SET DraftJson = @j, RowCount1 = @rc, TotalQty = @tq,
-                         SavedTS = SYSDATETIME(), SavedBy = @u
-            WHEN NOT MATCHED THEN
-              INSERT (Country, ContNo, DraftJson, RowCount1, TotalQty, SavedTS, SavedBy)
-              VALUES (@ct, @c, @j, @rc, @tq, SYSDATETIME(), @u);",
-            new { ct = country, c = contno, j = json, rc = rows.Count, tq = totalQty, u = user.Name },
+        await using var c = OpenOnPremBackup();
+        // Wipe any prior draft for this (Country, ContNo) so re-Save replaces cleanly.
+        await c.ExecuteAsync(new CommandDefinition(@"
+            DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail WHERE Country = @ct AND ContNo = @c;
+            DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftHeader WHERE Country = @ct AND ContNo = @c;",
+            new { ct = country, c = contno }, cancellationToken: ct));
+
+        await c.ExecuteAsync(new CommandDefinition(@"
+            INSERT INTO LPMSIM.dbo.WMS_ContAllocationDraftHeader
+                (Country, ContNo, RowCount1, TotalQty, SavedTS, SavedBy)
+            VALUES (@ct, @c, @rc, @tq, SYSDATETIME(), @u);",
+            new { ct = country, c = contno, rc = rows.Count, tq = totalQty, u = user.Name },
             cancellationToken: ct));
+
+        var detailSql = @"INSERT INTO LPMSIM.dbo.WMS_ContAllocationDraftDetail
+            (Country, ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode,
+             Qty, QtyIssue, ShopCode, TcmContno, Itemname, BuildingCategory,
+             LPMDt, ORAPONo, Division, Remarks)
+          VALUES
+            (@Country, @ContNo, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)),
+             @UPC, @ItemCode, @GroupCode, @Qty, 0, @ShopCode, @ContNo, @ItemName, @Country,
+             @LPMDt, @OraPONo, @Division, @Remarks);";
+        foreach (var r in rows)
+        {
+            await c.ExecuteAsync(new CommandDefinition(detailSql, new
+            {
+                Country = country, ContNo = r.Contno, UPC = r.ItemCode, ItemCode = r.ItemCode,
+                GroupCode = r.VolumeGroup, Qty = r.AllocQty, ShopCode = r.ShopCode,
+                ItemName = r.ItemName, LPMDt = r.LPMDt, OraPONo = r.OraPONo,
+                Division = r.Division,
+                Remarks = r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null,
+            }, cancellationToken: ct));
+        }
     }
 
     public async Task<List<AllocationRow>> LoadDraftAsync(string country, string contno, CancellationToken ct = default)
     {
-        await using var w = OpenWms();
-        var json = await w.ExecuteScalarAsync<string?>(new CommandDefinition(
-            "SELECT DraftJson FROM dbo.WmsAllocationDraft WHERE Country = @ct AND ContNo = @c",
-            new { ct = country, c = contno }, cancellationToken: ct));
-        if (string.IsNullOrEmpty(json)) return new();
-        try
-        {
-            return JsonSerializer.Deserialize<List<AllocationRow>>(json) ?? new();
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidOperationException(
-                $"Draft JSON could not be parsed for {country}/{contno} ({json.Length} chars). " +
-                $"Likely a schema change since the draft was saved. Re-run Process and Save Draft again. " +
-                $"Inner: {ex.GetType().Name}: {ex.Message}", ex);
-        }
+        await using var c = OpenOnPremBackup();
+        // Read draft detail; map back to AllocationRow shape. Several fields
+        // (VolumeGroup, MerchNeedMonth, SkuMax, Brand, StoreName, DivCode) aren't
+        // persisted on the detail row so they come back as defaults — preview
+        // grid still works, sums/totals stay correct.
+        var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName,
+                                       int? Qty, string? ShopCode, string? GroupCode, string? Division,
+                                       string? Remarks, DateTime? LPMDt)>(new CommandDefinition(@"
+            SELECT ContNo, ORAPONo, Itemcode, Itemname, Qty, ShopCode, GroupCode, Division, Remarks, LPMDt
+            FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail WITH (NOLOCK)
+            WHERE Country = @ct AND ContNo = @c
+            ORDER BY IdNo",
+            new { ct = country, c = contno }, cancellationToken: ct))).AsList();
+
+        return rows.Select(r => new AllocationRow(
+            Contno: r.ContNo,
+            OraPONo: r.OraPONo ?? "",
+            ItemCode: r.ItemCode ?? "",
+            ItemName: r.ItemName,
+            Brand: null,
+            PoQty: r.Qty ?? 0,
+            ShopCode: r.ShopCode ?? "",
+            StoreName: null,
+            Country: country,
+            Division: r.Division,
+            VolumeGroup: r.GroupCode ?? "",
+            SkuMax: 0,
+            AllocQty: r.Qty ?? 0,
+            MerchNeedMonth: 0,
+            DivCode: 0,
+            RoundRobinExtra: ParseRoundRobin(r.Remarks),
+            LPM: null,
+            LPMDt: r.LPMDt
+        )).ToList();
+    }
+
+    private static int ParseRoundRobin(string? remarks)
+    {
+        if (string.IsNullOrEmpty(remarks) || !remarks.StartsWith("RR+")) return 0;
+        return int.TryParse(remarks.AsSpan(3), out var n) ? n : 0;
     }
 
     public async Task<AllocationStatus> GetStatusAsync(string country, string contno, CancellationToken ct = default)
     {
-        bool hasDraft = false; int draftRows = 0;
-        await using (var w = OpenWms())
-        {
-            var d = await w.QueryFirstOrDefaultAsync<(int? RowCount1, int? TotalQty)>(new CommandDefinition(
-                "SELECT RowCount1, TotalQty FROM dbo.WmsAllocationDraft WHERE Country = @ct AND ContNo = @c",
-                new { ct = country, c = contno }, cancellationToken: ct));
-            if (d.RowCount1 is not null) { hasDraft = true; draftRows = d.RowCount1.Value; }
-        }
-        bool hasFinal = false; int finalRows = 0; DateTime? finalAt = null;
-        await using (var c = OpenOnPremBackup())
-        {
-            var f = await c.QueryFirstOrDefaultAsync<(int Count1, DateTime? Max1)>(new CommandDefinition(
-                "SELECT COUNT(*) AS Count1, MAX(TrnDate) AS Max1 FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
-                new { c = contno }, cancellationToken: ct));
-            if (f.Count1 > 0) { hasFinal = true; finalRows = f.Count1; finalAt = f.Max1; }
-        }
-        return new AllocationStatus(hasDraft, hasFinal, draftRows, finalRows, finalAt);
+        await using var c = OpenOnPremBackup();
+        var d = await c.QueryFirstOrDefaultAsync<(int? RowCount1, int? TotalQty)>(new CommandDefinition(
+            "SELECT RowCount1, TotalQty FROM LPMSIM.dbo.WMS_ContAllocationDraftHeader WHERE Country = @ct AND ContNo = @c",
+            new { ct = country, c = contno }, cancellationToken: ct));
+        var hasDraft = d.RowCount1 is not null;
+        var draftRows = d.RowCount1 ?? 0;
+
+        var f = await c.QueryFirstOrDefaultAsync<(int Count1, DateTime? Max1)>(new CommandDefinition(
+            "SELECT COUNT(*) AS Count1, MAX(TrnDate) AS Max1 FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
+            new { c = contno }, cancellationToken: ct));
+        var hasFinal = f.Count1 > 0;
+        return new AllocationStatus(hasDraft, hasFinal, draftRows, f.Count1, f.Max1);
     }
 
-    // ===================== Confirm & Save to LPMSIM.WMS_ContAllocationData =====================
-    // Inserts the allocation rows. Idempotency is NOT enforced — re-running will
-    // create duplicates. (Add a delete-by-Contno first if you want re-run support.)
+    // ===================== Confirm & Save (Draft -> WMS_ContAllocationData) =====================
+    // Atomic-ish: INSERT...SELECT from draft into final, then DELETE drafts.
+    // If a draft exists, prefers that (single SQL copy). Falls back to inserting
+    // the in-memory rows if no draft exists yet.
     public async Task<int> SaveAllocationAsync(IReadOnlyList<AllocationRow> rows, CancellationToken ct = default)
     {
         if (rows.Count == 0) return 0;
+        var country = rows[0].Country;
+        var contno  = rows[0].Contno;
+
         await using var c = OpenOnPremBackup();
-        // INSERT goes to LPMSIM via 3-part naming (OnPremBackup conn has access).
-        var sql = @"INSERT INTO LPMSIM.dbo.WMS_ContAllocationData
-            (ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode, Qty, QtyIssue,
-             ShopCode, TcmContno, ORAPONo, LPMDt, BuildingCategory, Remarks)
+
+        // Is there a saved draft for this (Country, ContNo)? If yes, copy and delete.
+        var draftRows = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
+            "SELECT COUNT(*) FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail WHERE Country = @ct AND ContNo = @c",
+            new { ct = country, c = contno }, cancellationToken: ct)) ?? 0;
+
+        if (draftRows > 0)
+        {
+            var copySql = @"
+                INSERT INTO LPMSIM.dbo.WMS_ContAllocationData
+                  (ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode, Season, Department, Division,
+                   Result, FinalResult, ResultType, Qty, QtyIssue, OrPrice, PrintFlag, RfidFlag,
+                   Company, ShopCode, Itemname, Barcode, SalesPrice, RefNo, Mark, Uid,
+                   RStatus, RDateTime, PStatus, PDateTime, Excess, TcmContno, BuildingCategory,
+                   LPMDt, LPMBoxNO, ORAPONo, Style, Remarks)
+                SELECT
+                   ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode, Season, Department, Division,
+                   Result, FinalResult, ResultType, Qty, QtyIssue, OrPrice, PrintFlag, RfidFlag,
+                   Company, ShopCode, Itemname, Barcode, SalesPrice, RefNo, Mark, Uid,
+                   RStatus, RDateTime, PStatus, PDateTime, Excess, TcmContno, BuildingCategory,
+                   LPMDt, LPMBoxNO, ORAPONo, Style, Remarks
+                FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail
+                WHERE Country = @ct AND ContNo = @c;
+
+                DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail WHERE Country = @ct AND ContNo = @c;
+                DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftHeader WHERE Country = @ct AND ContNo = @c;";
+            await c.ExecuteAsync(new CommandDefinition(copySql, new { ct = country, c = contno }, cancellationToken: ct));
+            return draftRows;
+        }
+
+        // Fallback path — no draft, insert in-memory rows directly.
+        var insertSql = @"INSERT INTO LPMSIM.dbo.WMS_ContAllocationData
+            (ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode, Division, Qty, QtyIssue,
+             ShopCode, TcmContno, ORAPONo, LPMDt, Itemname, BuildingCategory, Remarks)
           VALUES
             (@ContNo, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)),
-             @UPC, @ItemCode, @GroupCode, @Qty, 0,
-             @ShopCode, @ContNo, @OraPONo, @LPMDt, @Country, @Remarks);";
+             @UPC, @ItemCode, @GroupCode, @Division, @Qty, 0,
+             @ShopCode, @ContNo, @OraPONo, @LPMDt, @ItemName, @Country, @Remarks);";
         var affected = 0;
         foreach (var r in rows)
         {
-            affected += await c.ExecuteAsync(new CommandDefinition(sql, new
+            affected += await c.ExecuteAsync(new CommandDefinition(insertSql, new
             {
-                ContNo    = r.Contno,
-                UPC       = r.ItemCode,
-                ItemCode  = r.ItemCode,
-                GroupCode = r.VolumeGroup,
-                Qty       = r.AllocQty,
-                ShopCode  = r.ShopCode,
-                OraPONo   = r.OraPONo,
-                LPMDt     = r.LPMDt,
-                Country   = r.Country,
+                ContNo    = r.Contno,  UPC = r.ItemCode, ItemCode = r.ItemCode,
+                GroupCode = r.VolumeGroup, Division = r.Division, Qty = r.AllocQty,
+                ShopCode  = r.ShopCode, OraPONo = r.OraPONo, LPMDt = r.LPMDt,
+                ItemName  = r.ItemName, Country = r.Country,
                 Remarks   = r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null,
             }, cancellationToken: ct));
         }
