@@ -107,7 +107,7 @@
             }
             <span>Allocation @(_status?.HasFinal == true ? "(FINAL)" : _status?.HasDraft == true ? "(Draft)" : "Preview") — @rendered.Count of @_filteredCount filtered (of @_allocation.Count total), total @rendered.Sum(r => r.AllocQty) pcs shown@(capped ? $" — capped at {MAX_RENDER_ROWS}, use filters to narrow" : "")</span>
             <span style="display:flex; gap:8px">
-                <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@_busy">Export to Excel</button>
+                <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync">Export to Excel</button>
             </span>
         </div>
 
@@ -284,7 +284,7 @@
     private int _progressCurrent, _progressTotal;
     private string? _progressItem;
 
-    private string _view = "ItemStore";
+    private string _view = "Store";  // Store summary loads fastest — no per-item rows
     private string? _sortKey;
     private bool _sortAsc = true;
     private HashSet<string> _filterDivs = new();
