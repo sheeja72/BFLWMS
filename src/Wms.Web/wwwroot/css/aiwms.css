@@ -181,16 +181,11 @@ a:hover { text-decoration: underline; }
     gap: 8px;
 }
 .aiwms-brand-title::before {
-    content: 'shopping_bag';
-    font-family: var(--font-icon);
-    font-size: 28px;
-    color: var(--bfl-yellow);
-    line-height: 1;
-    font-variation-settings: 'FILL' 1, 'wght' 500, 'GRAD' 0, 'opsz' 24;
-    font-feature-settings: 'liga';
-    /* Use the Material Symbols glyph until a transparent-bg BFL logo PNG
-       is provided — the .png in /img/bfl-logo.png has a solid white
-       background which is hard to mask out without re-export. */
+    content: '';
+    display: inline-block;
+    width: 32px;
+    height: 32px;
+    background: url('/img/bfl-logo.png') center/contain no-repeat;
 }
 .aiwms-brand-sub {
     font-family: var(--font-display);
