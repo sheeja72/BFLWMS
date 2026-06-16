@@ -22,25 +22,29 @@ public record ContainerAllocationValidationResult(
 
 public record ValidationStep(string Label, bool Ok, string? Detail);
 
-/// <summary>Progress event from ProcessAllocationAsync. Current/Total are PO line items processed.</summary>
+/// <summary>Progress event from ProcessAllocationAsync.</summary>
 public record AllocationProgress(int Current, int Total, string? CurrentItem);
 
-/// <summary>
-/// One row in the allocation preview / output. Each row = one PO line item
-/// distributed to one destination store.
-/// </summary>
+/// <summary>One row in the allocation preview / output. Each row = one PO line item distributed to one destination store.</summary>
 public record AllocationRow(
     string  Contno,
     string  OraPONo,
     string  ItemCode,
-    int     PoQty,           // original qty on the PO line
-    string  ShopCode,        // destination StoreID
+    string? ItemName,
+    string? Brand,
+    int     PoQty,
+    string  ShopCode,
+    string? StoreName,
     string  Country,
+    string? Division,
     string  VolumeGroup,
-    int     SkuMax,          // the rule cap that applied
-    int     AllocQty,        // qty assigned to this store
+    int     SkuMax,
+    int     AllocQty,
     int     MerchNeedMonth,
     int     DivCode,
-    int     RoundRobinExtra, // pieces given over and above SkuMax via round-robin
+    int     RoundRobinExtra,
     string? LPM,
     DateTime? LPMDt);
+
+/// <summary>State info shown above the buttons.</summary>
+public record AllocationStatus(bool HasDraft, bool HasFinal, int DraftRows, int FinalRows, DateTime? FinalAt);

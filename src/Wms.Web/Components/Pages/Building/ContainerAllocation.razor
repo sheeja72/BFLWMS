@@ -16,31 +16,39 @@
 
 <div class="aiwms-section">
     <div class="aiwms-card-header">Inputs</div>
-    <div style="display:grid; grid-template-columns: 1fr 1fr 1.5fr auto auto; gap:12px; align-items:end;">
-        <div>
-            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">COUNTRY *</label>
-            <select @bind="_country" @bind:after="OnCountryChangedAsync" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-body); font-size:13px; background:white;">
-                <option value="">-- Select --</option>
-                @foreach (var c in _countries) { <option value="@c">@c</option> }
-            </select>
-        </div>
-        <div>
-            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">WAREHOUSE *</label>
-            <select @bind="_warehouse" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-body); font-size:13px; background:white;">
-                <option value="">-- Select --</option>
-                @foreach (var w in _warehouses) { <option value="@w">@w</option> }
-            </select>
-        </div>
-        <div>
-            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">CONTAINER NO *</label>
-            <input @bind="_contno" placeholder="e.g. AEINT6255" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-mono); font-size:13px; background:white;" />
-        </div>
-        <button class="aiwms-btn aiwms-btn-secondary" @onclick="LoadPoDataAsync" disabled="@(_busy || !CanLoad)">
-            Load PO Data
+    <div class="aiwms-form-row">
+        <label>Country *</label>
+        <select @bind="_country" @bind:after="OnCountryChangedAsync">
+            <option value="">-- Select --</option>
+            @foreach (var c in _countries) { <option value="@c">@c</option> }
+        </select>
+    </div>
+    <div class="aiwms-form-row">
+        <label>Warehouse *</label>
+        <select @bind="_warehouse">
+            <option value="">-- Select --</option>
+            @foreach (var w in _warehouses) { <option value="@w">@w</option> }
+        </select>
+    </div>
+    <div class="aiwms-form-row">
+        <label>Container No *</label>
+        <input @bind="_contno" @bind:after="OnContnoChangedAsync" placeholder="e.g. AEINT6255" />
+    </div>
+
+    <div style="display:flex; gap:12px; margin-top:12px; flex-wrap:wrap">
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="LoadPoDataAsync" disabled="@(_busy || !CanLoad)">Load PO Data</button>
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="ProcessAsync" disabled="@(_busy || !CanProcess || _status?.HasFinal == true)">
+            @(_status?.HasFinal == true ? "🔒 Locked (final saved)" : "Process")
         </button>
-        <button class="aiwms-btn aiwms-btn-primary" @onclick="ProcessAsync" disabled="@(_busy || !CanProcess)">
-            Process
-        </button>
+        @if (_allocation.Count > 0)
+        {
+            <button class="aiwms-btn aiwms-btn-secondary" @onclick="SaveDraftAsync" disabled="@_busy">Save Draft</button>
+            <button class="aiwms-btn aiwms-btn-success" @onclick="ConfirmSaveAsync" disabled="@_busy">Confirm &amp; Save</button>
+        }
+        @if (_status?.HasDraft == true && _allocation.Count == 0)
+        {
+            <button class="aiwms-btn aiwms-btn-secondary" @onclick="ViewDraftAsync" disabled="@_busy">View Draft (@_status.DraftRows rows)</button>
+        }
     </div>
 
     @if (_progressTotal > 0)
@@ -68,51 +76,167 @@
         <div class="aiwms-card-header">PO Data — @_poData.Count rows</div>
         <table class="aiwms-table">
             <thead>
-                <tr>
-                    <th>Contno</th>
-                    <th>Receipt Dt</th>
-                    <th>PO No</th>
-                    <th>LPM</th>
-                    <th>Buyer</th>
-                    <th>Division</th>
-                    <th>Brand</th>
-                    <th style="text-align:right">Qty</th>
-                    <th>Dest. Country</th>
-                </tr>
+                <tr><th>Contno</th><th>Receipt Dt</th><th>PO No</th><th>LPM</th><th>Buyer</th><th>Division</th><th>Brand</th><th style="text-align:right">Qty</th><th>Dest. Country</th></tr>
             </thead>
             <tbody>
                 @foreach (var r in _poData)
                 {
                     <tr>
-                        <td>@r.Contno</td>
-                        <td>@r.ContReceiptDT?.ToString("yyyy-MM-dd")</td>
-                        <td>@r.PONO</td>
-                        <td>@r.LPM</td>
-                        <td>@r.Buyer</td>
-                        <td>@r.Division</td>
-                        <td>@r.Brand</td>
-                        <td style="text-align:right">@r.Qty</td>
-                        <td>@r.DestCountry</td>
+                        <td>@r.Contno</td><td>@r.ContReceiptDT?.ToString("yyyy-MM-dd")</td><td>@r.PONO</td>
+                        <td>@r.LPM</td><td>@r.Buyer</td><td>@r.Division</td><td>@r.Brand</td>
+                        <td style="text-align:right">@r.Qty</td><td>@r.DestCountry</td>
                     </tr>
                 }
             </tbody>
-            <tfoot>
-                <tr style="background:var(--bfl-grey-50); font-weight:800">
-                    <td colspan="7" style="text-align:right">Total</td>
-                    <td style="text-align:right">@_poData.Sum(r => r.Qty)</td>
-                    <td></td>
-                </tr>
-            </tfoot>
+            <tfoot><tr style="background:var(--bfl-grey-50); font-weight:800"><td colspan="7" style="text-align:right">Total</td><td style="text-align:right">@_poData.Sum(r => r.Qty)</td><td></td></tr></tfoot>
         </table>
     </div>
 }
 
-@if (_validation is not null)
+@if (_allocation.Count > 0)
 {
     <div class="aiwms-section">
-        <div class="aiwms-card-header">
-            Validation — @(_validation.Ok ? "ALL PASSED" : "BLOCKED")
+        <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px">
+            <span>Allocation @(_status?.HasFinal == true ? "(FINAL)" : _status?.HasDraft == true ? "(Draft)" : "Preview") — @Filtered.Count() rows shown of @_allocation.Count, total @Filtered.Sum(r => r.AllocQty) pcs</span>
+            <span style="display:flex; gap:8px">
+                <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@_busy">Export to Excel</button>
+            </span>
         </div>
+
+        <!-- Report view picker -->
+        <div style="display:flex; gap:14px; align-items:center; padding:10px 0; border-bottom:1px solid var(--border-default); margin-bottom:10px">
+            <strong style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--text-secondary)">Report:</strong>
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="ItemStore" checked="@(_view == "ItemStore")" @onchange="@(_ => SetView("ItemStore"))" /> Item × Store</label>
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="ItemSummary" checked="@(_view == "ItemSummary")" @onchange="@(_ => SetView("ItemSummary"))" /> Item Summary</label>
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="Store" checked="@(_view == "Store")" @onchange="@(_ => SetView("Store"))" /> Store</label>
+        </div>
+
+        <!-- Filters -->
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; padding-bottom:12px">
+            <div>
+                <label style="font-size:10px; font-weight:700; color:var(--text-secondary)">DIVISION</label>
+                <select multiple size="3" style="width:100%; font-size:12px" @onchange="OnDivChanged">
+                    @foreach (var d in _allocation.Where(a => a.Division is not null).Select(a => a.Division!).Distinct().OrderBy(x => x)) { <option value="@d" selected="@_filterDivs.Contains(d)">@d</option> }
+                </select>
+            </div>
+            <div>
+                <label style="font-size:10px; font-weight:700; color:var(--text-secondary)">STORE NAME</label>
+                <select multiple size="3" style="width:100%; font-size:12px" @onchange="OnStoreChanged">
+                    @foreach (var s in _allocation.Where(a => a.StoreName is not null).Select(a => a.StoreName!).Distinct().OrderBy(x => x)) { <option value="@s" selected="@_filterStores.Contains(s)">@s</option> }
+                </select>
+            </div>
+            <div>
+                <label style="font-size:10px; font-weight:700; color:var(--text-secondary)">PO NO</label>
+                <select multiple size="3" style="width:100%; font-size:12px" @onchange="OnPoChanged">
+                    @foreach (var p in _allocation.Select(a => a.OraPONo).Distinct().OrderBy(x => x)) { <option value="@p" selected="@_filterPos.Contains(p)">@p</option> }
+                </select>
+            </div>
+            <div>
+                <label style="font-size:10px; font-weight:700; color:var(--text-secondary)">ITEMCODE (contains)</label>
+                <input @bind="_filterItemCode" @bind:event="oninput" placeholder="search…" style="width:100%; padding:6px; font-size:12px" />
+                <div style="margin-top:4px"><a href="#" style="font-size:11px" @onclick:preventDefault @onclick="ClearFilters">Clear all filters</a></div>
+            </div>
+        </div>
+
+        @if (_view == "ItemStore")
+        {
+            <table class="aiwms-table aiwms-table-dense">
+                <thead>
+                    <tr>
+                        <th style="cursor:pointer" @onclick='() => Sort("OraPONo")'>OraPONo @SortArrow("OraPONo")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("ItemCode")'>ItemCode @SortArrow("ItemCode")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("ItemName")'>Item Name @SortArrow("ItemName")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("Brand")'>Brand @SortArrow("Brand")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("PoQty")'>PO Qty @SortArrow("PoQty")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("ShopCode")'>ShopCode @SortArrow("ShopCode")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("StoreName")'>Store Name @SortArrow("StoreName")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("Country")'>Country @SortArrow("Country")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("VolumeGroup")'>VolumeGroup @SortArrow("VolumeGroup")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("MerchNeedMonth")'>MerchNeed/Mo @SortArrow("MerchNeedMonth")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("SkuMax")'>SKUMax @SortArrow("SkuMax")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("AllocQty")'>Alloc Qty @SortArrow("AllocQty")</th>
+                        <th style="text-align:right">RR Extra</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in Filtered)
+                    {
+                        <tr>
+                            <td>@r.OraPONo</td><td>@r.ItemCode</td><td>@r.ItemName</td><td>@r.Brand</td><td>@r.Division</td>
+                            <td style="text-align:right">@r.PoQty</td>
+                            <td>@r.ShopCode</td><td>@r.StoreName</td><td>@r.Country</td>
+                            <td>@r.VolumeGroup</td><td style="text-align:right">@r.MerchNeedMonth</td>
+                            <td style="text-align:right">@r.SkuMax</td>
+                            <td style="text-align:right">@r.AllocQty</td>
+                            <td style="text-align:right">@(r.RoundRobinExtra > 0 ? r.RoundRobinExtra.ToString() : "")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+        else if (_view == "ItemSummary")
+        {
+            <table class="aiwms-table aiwms-table-dense">
+                <thead>
+                    <tr>
+                        <th>OraPONo</th><th>ItemCode</th><th>Item Name</th><th>Brand</th><th>Division</th>
+                        <th style="text-align:right">PO Qty</th><th style="text-align:right">Total Alloc</th><th style="text-align:right">Stores</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var g in Filtered.GroupBy(r => new { r.OraPONo, r.ItemCode })
+                                              .Select(g => new { g.Key.OraPONo, g.Key.ItemCode,
+                                                                  ItemName=g.First().ItemName, Brand=g.First().Brand, Division=g.First().Division,
+                                                                  PoQty=g.First().PoQty, Total=g.Sum(x=>x.AllocQty), Stores=g.Count() })
+                                              .OrderBy(x => x.OraPONo).ThenBy(x => x.ItemCode))
+                    {
+                        <tr>
+                            <td>@g.OraPONo</td><td>@g.ItemCode</td><td>@g.ItemName</td><td>@g.Brand</td><td>@g.Division</td>
+                            <td style="text-align:right">@g.PoQty</td>
+                            <td style="text-align:right">@g.Total</td>
+                            <td style="text-align:right">@g.Stores</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+        else if (_view == "Store")
+        {
+            <table class="aiwms-table aiwms-table-dense">
+                <thead>
+                    <tr>
+                        <th>ShopCode</th><th>Store Name</th><th>Country</th><th>VolumeGroup</th>
+                        <th style="text-align:right">MerchNeed/Mo</th><th>Division</th><th>Brand</th>
+                        <th style="text-align:right">PO Qty (sum)</th><th style="text-align:right">Allocated Qty</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var g in Filtered.GroupBy(r => r.ShopCode)
+                                              .Select(g => new {
+                                                  ShopCode=g.Key, StoreName=g.First().StoreName, Country=g.First().Country,
+                                                  VolumeGroup=g.First().VolumeGroup, MerchNeedMonth=g.First().MerchNeedMonth,
+                                                  Division=g.First().Division, Brand=string.Join(", ", g.Select(x=>x.Brand).Where(b=>b is not null).Distinct()),
+                                                  PoQty=g.Sum(x=>x.PoQty), Alloc=g.Sum(x=>x.AllocQty) })
+                                              .OrderBy(x => x.ShopCode))
+                    {
+                        <tr>
+                            <td>@g.ShopCode</td><td>@g.StoreName</td><td>@g.Country</td><td>@g.VolumeGroup</td>
+                            <td style="text-align:right">@g.MerchNeedMonth</td><td>@g.Division</td><td>@g.Brand</td>
+                            <td style="text-align:right">@g.PoQty</td>
+                            <td style="text-align:right">@g.Alloc</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+}
+
+@if (_validation is not null && _allocation.Count == 0)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header">Validation — @(_validation.Ok ? "ALL PASSED" : "BLOCKED")</div>
         <table class="aiwms-table">
             <thead><tr><th>Step</th><th>Status</th><th>Detail</th></tr></thead>
             <tbody>
@@ -120,67 +244,8 @@
                 {
                     <tr>
                         <td>@s.Label</td>
-                        <td>
-                            <span class="aiwms-pill @(s.Ok ? "tier1" : "tier4")">
-                                @(s.Ok ? "OK" : "FAIL")
-                            </span>
-                        </td>
+                        <td><span class="aiwms-pill @(s.Ok ? "tier1" : "tier4")">@(s.Ok ? "OK" : "FAIL")</span></td>
                         <td>@s.Detail</td>
-                    </tr>
-                }
-            </tbody>
-        </table>
-
-        @if (_validation.Ok)
-        {
-            <div class="aiwms-alert success" style="margin-top:12px">
-                All checks passed. @(_allocation.Count == 0 ? "Computing allocation..." : $"{_allocation.Count} allocation rows computed.")
-            </div>
-        }
-    </div>
-}
-
-@if (_allocation.Count > 0)
-{
-    <div class="aiwms-section">
-        <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between">
-            <span>Allocation Preview — @_allocation.Count rows, total @_allocation.Sum(r => r.AllocQty) pcs</span>
-            <span style="display:flex; gap:8px">
-                <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@_busy">Export to Excel</button>
-                <button class="aiwms-btn aiwms-btn-primary" @onclick="ConfirmSaveAsync" disabled="@(_busy || _saved)">@(_saved ? "Saved ✓" : "Confirm & Save")</button>
-            </span>
-        </div>
-        <table class="aiwms-table aiwms-table-dense">
-            <thead>
-                <tr>
-                    <th>Contno</th>
-                    <th>OraPONo</th>
-                    <th>ItemCode</th>
-                    <th>PO Qty</th>
-                    <th>ShopCode</th>
-                    <th>Country</th>
-                    <th>VolumeGroup</th>
-                    <th style="text-align:right">SKUMax</th>
-                    <th style="text-align:right">Alloc Qty</th>
-                    <th style="text-align:right">RR Extra</th>
-                    <th style="text-align:right">MerchNeed/Mo</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var r in _allocation)
-                {
-                    <tr>
-                        <td>@r.Contno</td>
-                        <td>@r.OraPONo</td>
-                        <td>@r.ItemCode</td>
-                        <td>@r.PoQty</td>
-                        <td>@r.ShopCode</td>
-                        <td>@r.Country</td>
-                        <td>@r.VolumeGroup</td>
-                        <td style="text-align:right">@r.SkuMax</td>
-                        <td style="text-align:right">@r.AllocQty</td>
-                        <td style="text-align:right">@(r.RoundRobinExtra > 0 ? r.RoundRobinExtra.ToString() : "")</td>
-                        <td style="text-align:right">@r.MerchNeedMonth</td>
                     </tr>
                 }
             </tbody>
@@ -193,10 +258,7 @@
     private List<string> _warehouses = new();
     private List<PoDataRow> _poData = new();
     private List<AllocationRow> _allocation = new();
-    private bool _saved;
-    private int _progressCurrent;
-    private int _progressTotal;
-    private string? _progressItem;
+    private AllocationStatus? _status;
     private ContainerAllocationValidationResult? _validation;
 
     private string _country = "";
@@ -205,6 +267,16 @@
     private bool _busy;
     private string _message = "";
     private bool _messageIsError;
+    private int _progressCurrent, _progressTotal;
+    private string? _progressItem;
+
+    private string _view = "ItemStore";
+    private string? _sortKey;
+    private bool _sortAsc = true;
+    private HashSet<string> _filterDivs = new();
+    private HashSet<string> _filterStores = new();
+    private HashSet<string> _filterPos = new();
+    private string _filterItemCode = "";
 
     private bool CanLoad => !string.IsNullOrWhiteSpace(_contno);
     private bool CanProcess => !string.IsNullOrWhiteSpace(_country)
@@ -219,20 +291,36 @@
 
     private async Task OnCountryChangedAsync()
     {
-        _warehouse = "";
-        _warehouses = new();
+        _warehouse = ""; _warehouses = new();
         if (string.IsNullOrWhiteSpace(_country)) return;
         try { _warehouses = await Svc.GetWarehousesAsync(_country); }
         catch (Exception ex) { ShowError($"Failed to load warehouses: {ex.Message}"); }
+        await RefreshStatusAsync();
+    }
+
+    private async Task OnContnoChangedAsync()
+    {
+        await RefreshStatusAsync();
+    }
+
+    private async Task RefreshStatusAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_country) || string.IsNullOrWhiteSpace(_contno))
+        {
+            _status = null; return;
+        }
+        try { _status = await Svc.GetStatusAsync(_country, _contno); }
+        catch { _status = null; }
     }
 
     private async Task LoadPoDataAsync()
     {
-        _busy = true; _message = ""; _validation = null; _allocation = new(); _saved = false;
+        _busy = true; _message = ""; _validation = null; _allocation = new();
         try
         {
             _poData = await Svc.LoadPoDataAsync(_contno);
             if (_poData.Count == 0) ShowInfo("No rows found in usaorgfile_LPM for this container.");
+            await RefreshStatusAsync();
         }
         catch (Exception ex) { ShowError($"Load failed: {ex.Message}"); }
         finally { _busy = false; }
@@ -240,69 +328,50 @@
 
     private async Task ProcessAsync()
     {
-        _busy = true; _message = ""; _allocation = new(); _saved = false;
+        _busy = true; _message = ""; _allocation = new();
         _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
         try
         {
             _validation = await Svc.ValidateAsync(_country, _contno);
-            if (!_validation.Ok)
-            {
-                ShowError("Validation failed — see steps below.");
-                return;
-            }
-
-            var progress = new Progress<AllocationProgress>(async p =>
-            {
-                _progressCurrent = p.Current;
-                _progressTotal   = p.Total;
-                _progressItem    = p.CurrentItem;
+            if (!_validation.Ok) { ShowError("Validation failed — see steps below."); return; }
+            var progress = new Progress<AllocationProgress>(async p => {
+                _progressCurrent = p.Current; _progressTotal = p.Total; _progressItem = p.CurrentItem;
                 await InvokeAsync(StateHasChanged);
             });
-
             _allocation = await Svc.ProcessAllocationAsync(_contno, progress);
-
             if (_allocation.Count == 0)
-                ShowError("No allocation rows produced. Check LPM_EOM_Output (current month) + LPM_SKUMaxRule coverage.");
+                ShowError("No allocation rows produced. Check LPM_EOM_Output + LPM_SKUMaxRule coverage.");
             else
                 ShowInfo($"Allocation computed: {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
         }
         catch (Exception ex) { ShowError($"Process failed: {ex.Message}"); }
-        finally
-        {
-            _busy = false;
-            _progressTotal = 0; _progressCurrent = 0; _progressItem = null;
-        }
+        finally { _busy = false; _progressTotal = 0; }
     }
 
-    private async Task ExportCsvAsync()
+    private async Task SaveDraftAsync()
     {
-        var sb = new StringBuilder();
-        sb.AppendLine("Contno,OraPONo,ItemCode,PoQty,ShopCode,Country,VolumeGroup,SkuMax,AllocQty,RoundRobinExtra,MerchNeedMonth,DivCode,LPM,LPMDt");
-        foreach (var r in _allocation)
+        _busy = true; _message = "";
+        try
         {
-            sb.Append(Csv(r.Contno)).Append(',').Append(Csv(r.OraPONo)).Append(',').Append(Csv(r.ItemCode)).Append(',')
-              .Append(r.PoQty).Append(',').Append(Csv(r.ShopCode)).Append(',').Append(Csv(r.Country)).Append(',')
-              .Append(Csv(r.VolumeGroup)).Append(',').Append(r.SkuMax).Append(',').Append(r.AllocQty).Append(',')
-              .Append(r.RoundRobinExtra).Append(',').Append(r.MerchNeedMonth).Append(',').Append(r.DivCode).Append(',')
-              .Append(Csv(r.LPM)).Append(',').Append(r.LPMDt?.ToString("yyyy-MM-dd"))
-              .AppendLine();
+            await Svc.SaveDraftAsync(_country, _contno, _allocation);
+            await RefreshStatusAsync();
+            ShowInfo($"Draft saved ({_allocation.Count} rows).");
         }
-        var bytes = Encoding.UTF8.GetBytes(sb.ToString());
-        var b64 = Convert.ToBase64String(bytes);
-        var filename = $"allocation_{_contno}_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
-        await JS.InvokeVoidAsync("eval", $@"
-            (function() {{
-                var a = document.createElement('a');
-                a.href = 'data:text/csv;base64,{b64}';
-                a.download = '{filename}';
-                document.body.appendChild(a); a.click(); document.body.removeChild(a);
-            }})();");
+        catch (Exception ex) { ShowError($"Save draft failed: {ex.Message}"); }
+        finally { _busy = false; }
     }
 
-    private static string Csv(string? s) => s is null ? ""
-        : (s.Contains(',') || s.Contains('"') || s.Contains('\n'))
-            ? "\"" + s.Replace("\"", "\"\"") + "\""
-            : s;
+    private async Task ViewDraftAsync()
+    {
+        _busy = true; _message = "";
+        try
+        {
+            _allocation = await Svc.LoadDraftAsync(_country, _contno);
+            ShowInfo($"Loaded draft — {_allocation.Count} rows.");
+        }
+        catch (Exception ex) { ShowError($"Load draft failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
 
     private async Task ConfirmSaveAsync()
     {
@@ -310,13 +379,86 @@
         try
         {
             var n = await Svc.SaveAllocationAsync(_allocation);
-            _saved = true;
+            await RefreshStatusAsync();
             ShowInfo($"Saved {n} rows to LPMSIM.WMS_ContAllocationData.");
         }
         catch (Exception ex) { ShowError($"Save failed: {ex.Message}"); }
         finally { _busy = false; }
     }
 
-    private void ShowError(string msg)   { _message = msg; _messageIsError = true; }
-    private void ShowInfo(string msg)    { _message = msg; _messageIsError = false; }
+    private async Task ExportCsvAsync()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Contno,OraPONo,ItemCode,ItemName,Brand,PoQty,ShopCode,StoreName,Country,Division,VolumeGroup,SkuMax,AllocQty,RoundRobinExtra,MerchNeedMonth,LPM,LPMDt");
+        foreach (var r in Filtered)
+        {
+            sb.Append(Csv(r.Contno)).Append(',').Append(Csv(r.OraPONo)).Append(',').Append(Csv(r.ItemCode)).Append(',')
+              .Append(Csv(r.ItemName)).Append(',').Append(Csv(r.Brand)).Append(',').Append(r.PoQty).Append(',')
+              .Append(Csv(r.ShopCode)).Append(',').Append(Csv(r.StoreName)).Append(',').Append(Csv(r.Country)).Append(',')
+              .Append(Csv(r.Division)).Append(',').Append(Csv(r.VolumeGroup)).Append(',')
+              .Append(r.SkuMax).Append(',').Append(r.AllocQty).Append(',').Append(r.RoundRobinExtra).Append(',')
+              .Append(r.MerchNeedMonth).Append(',').Append(Csv(r.LPM)).Append(',').Append(r.LPMDt?.ToString("yyyy-MM-dd"))
+              .AppendLine();
+        }
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(sb.ToString()));
+        var filename = $"allocation_{_contno}_{_view}_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+        await JS.InvokeVoidAsync("eval", $"(function(){{var a=document.createElement('a');a.href='data:text/csv;base64,{b64}';a.download='{filename}';document.body.appendChild(a);a.click();document.body.removeChild(a);}})();");
+    }
+
+    private static string Csv(string? s) => s is null ? ""
+        : (s.Contains(',') || s.Contains('"') || s.Contains('\n')) ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
+
+    // --- Filtering + sorting ---
+    private IEnumerable<AllocationRow> Filtered
+    {
+        get
+        {
+            IEnumerable<AllocationRow> q = _allocation;
+            if (_filterDivs.Count   > 0) q = q.Where(r => r.Division   is not null && _filterDivs.Contains(r.Division));
+            if (_filterStores.Count > 0) q = q.Where(r => r.StoreName  is not null && _filterStores.Contains(r.StoreName));
+            if (_filterPos.Count    > 0) q = q.Where(r => _filterPos.Contains(r.OraPONo));
+            if (!string.IsNullOrWhiteSpace(_filterItemCode))
+                q = q.Where(r => r.ItemCode.Contains(_filterItemCode, StringComparison.OrdinalIgnoreCase));
+            if (_sortKey is not null)
+            {
+                Func<AllocationRow, object?> k = _sortKey switch {
+                    "OraPONo" => r => r.OraPONo,
+                    "ItemCode" => r => r.ItemCode,
+                    "ItemName" => r => r.ItemName,
+                    "Brand" => r => r.Brand,
+                    "Division" => r => r.Division,
+                    "PoQty" => r => r.PoQty,
+                    "ShopCode" => r => r.ShopCode,
+                    "StoreName" => r => r.StoreName,
+                    "Country" => r => r.Country,
+                    "VolumeGroup" => r => r.VolumeGroup,
+                    "MerchNeedMonth" => r => r.MerchNeedMonth,
+                    "SkuMax" => r => r.SkuMax,
+                    "AllocQty" => r => r.AllocQty,
+                    _ => r => r.OraPONo,
+                };
+                q = _sortAsc ? q.OrderBy(k) : q.OrderByDescending(k);
+            }
+            return q.ToList();
+        }
+    }
+
+    private void Sort(string key)
+    {
+        if (_sortKey == key) _sortAsc = !_sortAsc;
+        else { _sortKey = key; _sortAsc = true; }
+    }
+    private string SortArrow(string key) => _sortKey == key ? (_sortAsc ? "▲" : "▼") : "";
+
+    private void SetView(string v) { _view = v; }
+    private void ClearFilters()
+    {
+        _filterDivs.Clear(); _filterStores.Clear(); _filterPos.Clear(); _filterItemCode = "";
+    }
+    private void OnDivChanged(ChangeEventArgs e)   => _filterDivs   = ((string[]?)e.Value ?? Array.Empty<string>()).ToHashSet();
+    private void OnStoreChanged(ChangeEventArgs e) => _filterStores = ((string[]?)e.Value ?? Array.Empty<string>()).ToHashSet();
+    private void OnPoChanged(ChangeEventArgs e)    => _filterPos    = ((string[]?)e.Value ?? Array.Empty<string>()).ToHashSet();
+
+    private void ShowError(string msg) { _message = msg; _messageIsError = true; }
+    private void ShowInfo(string msg)  { _message = msg; _messageIsError = false; }
 }

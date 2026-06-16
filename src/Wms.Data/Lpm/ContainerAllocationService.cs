@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Wms.Core;
 using Wms.Data.Configuration;
 using Dapper;
@@ -190,14 +191,33 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
         if (lines.Count == 0) return result;
 
-        // 2. Resolve DivCode per item via vupc_subclass.DivID
-        var divByItem = (await c.QueryAsync<(string itemcode, int? DivID)>(new CommandDefinition(@"
-            SELECT itemcode, DivID
+        // 2. Resolve DivCode + Division name per item via vupc_subclass
+        var itemMeta = (await c.QueryAsync<(string itemcode, int? DivID, string? Division)>(new CommandDefinition(@"
+            SELECT itemcode, DivID, Division
             FROM datareporting.dbo.vupc_subclass WITH (NOLOCK)
             WHERE itemcode IN @items",
             new { items = lines.Select(l => l.ItemCode).Distinct().ToArray() }, cancellationToken: ct)))
             .GroupBy(r => r.itemcode)
-            .ToDictionary(g => g.Key, g => g.First().DivID ?? 0, StringComparer.OrdinalIgnoreCase);
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        var divByItem = itemMeta.ToDictionary(kv => kv.Key, kv => kv.Value.DivID ?? 0, StringComparer.OrdinalIgnoreCase);
+
+        // 2b. ItemName + Brand from usa.USAOrgFile (joined on ContNo + ItemCode)
+        var orgByItem = (await c.QueryAsync<(string itemcode, string? itemname, string? vendor)>(new CommandDefinition(@"
+            SELECT itemcode, MAX(itemname) AS itemname, MAX(vendor) AS vendor
+            FROM usa.dbo.USAOrgFile WITH (NOLOCK)
+            WHERE contno = @c AND itemcode IN @items
+            GROUP BY itemcode",
+            new { c = contno, items = lines.Select(l => l.ItemCode).Distinct().ToArray() }, cancellationToken: ct)))
+            .ToDictionary(r => r.itemcode, r => (r.itemname, r.vendor), StringComparer.OrdinalIgnoreCase);
+
+        // 2c. StoreName lookup from bfldata.DataSettings.PBFullname (key column: StoreID)
+        var storeNameById = (await c.QueryAsync<(string StoreID, string? PBFullname)>(new CommandDefinition(@"
+            SELECT StoreID, MAX(PBFullname) AS PBFullname
+            FROM bfldata.dbo.DataSettings WITH (NOLOCK)
+            WHERE PBFullname IS NOT NULL
+            GROUP BY StoreID",
+            cancellationToken: ct)))
+            .ToDictionary(r => r.StoreID, r => r.PBFullname, StringComparer.OrdinalIgnoreCase);
 
         // 3. For each PO line, query eligible stores+rules in priority order
         //    (VolumeGroup ASC = A first, then MerchNeedMonth DESC).
@@ -239,13 +259,20 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 if (remaining <= 0) break;
                 var take = Math.Min(s.SKUMax, remaining);
                 if (take <= 0) continue;
+                orgByItem.TryGetValue(line.ItemCode, out var meta);
+                storeNameById.TryGetValue(s.StoreID, out var storeName);
+                itemMeta.TryGetValue(line.ItemCode, out var iMeta);
                 allocs[s.StoreID] = new AllocationRow(
                     Contno: line.ContNo,
                     OraPONo: line.OraPONo,
                     ItemCode: line.ItemCode,
+                    ItemName: meta.itemname,
+                    Brand: meta.vendor,
                     PoQty: line.Qty,
                     ShopCode: s.StoreID,
+                    StoreName: storeName,
                     Country: s.Country,
+                    Division: iMeta.Division,
                     VolumeGroup: s.VolumeGroup,
                     SkuMax: s.SKUMax,
                     AllocQty: take,
@@ -274,11 +301,16 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                     }
                     else
                     {
+                        orgByItem.TryGetValue(line.ItemCode, out var meta2);
+                        storeNameById.TryGetValue(s.StoreID, out var sn2);
+                        itemMeta.TryGetValue(line.ItemCode, out var im2);
                         allocs[s.StoreID] = new AllocationRow(
-                            line.ContNo, line.OraPONo, line.ItemCode, line.Qty,
-                            s.StoreID, s.Country, s.VolumeGroup, s.SKUMax,
-                            AllocQty: 1, s.MerchNeedMonth, divCode,
-                            RoundRobinExtra: 1, line.LPM, line.LPMDt);
+                            Contno: line.ContNo, OraPONo: line.OraPONo, ItemCode: line.ItemCode,
+                            ItemName: meta2.itemname, Brand: meta2.vendor, PoQty: line.Qty,
+                            ShopCode: s.StoreID, StoreName: sn2, Country: s.Country,
+                            Division: im2.Division, VolumeGroup: s.VolumeGroup, SkuMax: s.SKUMax,
+                            AllocQty: 1, MerchNeedMonth: s.MerchNeedMonth, DivCode: divCode,
+                            RoundRobinExtra: 1, LPM: line.LPM, LPMDt: line.LPMDt);
                     }
                     remaining--;
                     idx++;
@@ -289,6 +321,58 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         }
 
         return result;
+    }
+
+    // ===================== Save Draft (Azure WMS WmsAllocationDraft) =====================
+    public async Task SaveDraftAsync(string country, string contno, IReadOnlyList<AllocationRow> rows, CancellationToken ct = default)
+    {
+        if (rows.Count == 0) return;
+        var json = JsonSerializer.Serialize(rows);
+        var totalQty = rows.Sum(r => r.AllocQty);
+        await using var w = OpenWms();
+        await w.ExecuteAsync(new CommandDefinition(@"
+            MERGE dbo.WmsAllocationDraft AS t
+            USING (SELECT @ct AS Country, @c AS ContNo) s
+              ON t.Country = s.Country AND t.ContNo = s.ContNo
+            WHEN MATCHED THEN
+              UPDATE SET DraftJson = @j, RowCount1 = @rc, TotalQty = @tq,
+                         SavedTS = SYSDATETIME(), SavedBy = @u
+            WHEN NOT MATCHED THEN
+              INSERT (Country, ContNo, DraftJson, RowCount1, TotalQty, SavedTS, SavedBy)
+              VALUES (@ct, @c, @j, @rc, @tq, SYSDATETIME(), @u);",
+            new { ct = country, c = contno, j = json, rc = rows.Count, tq = totalQty, u = user.Name },
+            cancellationToken: ct));
+    }
+
+    public async Task<List<AllocationRow>> LoadDraftAsync(string country, string contno, CancellationToken ct = default)
+    {
+        await using var w = OpenWms();
+        var json = await w.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT DraftJson FROM dbo.WmsAllocationDraft WHERE Country = @ct AND ContNo = @c",
+            new { ct = country, c = contno }, cancellationToken: ct));
+        if (string.IsNullOrEmpty(json)) return new();
+        return JsonSerializer.Deserialize<List<AllocationRow>>(json) ?? new();
+    }
+
+    public async Task<AllocationStatus> GetStatusAsync(string country, string contno, CancellationToken ct = default)
+    {
+        bool hasDraft = false; int draftRows = 0;
+        await using (var w = OpenWms())
+        {
+            var d = await w.QueryFirstOrDefaultAsync<(int? RowCount1, int? TotalQty)>(new CommandDefinition(
+                "SELECT RowCount1, TotalQty FROM dbo.WmsAllocationDraft WHERE Country = @ct AND ContNo = @c",
+                new { ct = country, c = contno }, cancellationToken: ct));
+            if (d.RowCount1 is not null) { hasDraft = true; draftRows = d.RowCount1.Value; }
+        }
+        bool hasFinal = false; int finalRows = 0; DateTime? finalAt = null;
+        await using (var c = OpenOnPremBackup())
+        {
+            var f = await c.QueryFirstOrDefaultAsync<(int Count1, DateTime? Max1)>(new CommandDefinition(
+                "SELECT COUNT(*) AS Count1, MAX(TrnDate) AS Max1 FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
+                new { c = contno }, cancellationToken: ct));
+            if (f.Count1 > 0) { hasFinal = true; finalRows = f.Count1; finalAt = f.Max1; }
+        }
+        return new AllocationStatus(hasDraft, hasFinal, draftRows, finalRows, finalAt);
     }
 
     // ===================== Confirm & Save to LPMSIM.WMS_ContAllocationData =====================
