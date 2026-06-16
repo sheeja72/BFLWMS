@@ -27,6 +27,13 @@ public class Program
 
         builder.Services.AddRazorComponents()
             .AddInteractiveServerComponents(o => o.DetailedErrors = true);
+
+        // Bump the SignalR receive limit so large render diffs (e.g. an allocation
+        // grid with thousands of rows) don't blow up with the default 32 KB cap.
+        builder.Services.Configure<Microsoft.AspNetCore.SignalR.HubOptions>(o =>
+        {
+            o.MaximumReceiveMessageSize = 32 * 1024 * 1024; // 32 MB
+        });
         builder.Services.Configure<Microsoft.AspNetCore.Components.Server.CircuitOptions>(o =>
         {
             o.DetailedErrors = true;
