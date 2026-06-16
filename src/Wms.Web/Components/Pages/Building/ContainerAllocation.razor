@@ -48,21 +48,21 @@
                 <button class="aiwms-btn aiwms-btn-secondary" @onclick="SaveDraftAsync" disabled="@_busy">Save Draft</button>
                 <button class="aiwms-btn aiwms-btn-success" @onclick="ConfirmSaveAsync" disabled="@_busy">Confirm &amp; Save</button>
             }
-            @if (_status?.HasDraft == true && _allocation.Count == 0)
+            @if (_status?.HasDraft == true)
             {
                 <button class="aiwms-btn aiwms-btn-secondary" @onclick="ViewDraftAsync" disabled="@_busy">View Draft (@_status.DraftRows rows)</button>
             }
         </div>
     }
 
-    @if (_progressTotal > 0)
+    @if (_progressTotal > 0 || _busy)
     {
-        <div style="margin-top:14px">
-            <div style="display:flex; justify-content:space-between; font-family:var(--font-display); font-size:12px; font-weight:700; margin-bottom:4px">
-                <span>Processing items… @_progressCurrent / @_progressTotal @(_progressItem is null ? "" : $"({_progressItem})")</span>
-                <span>@(_progressTotal == 0 ? 0 : (int)(100.0 * _progressCurrent / _progressTotal))%</span>
+        <div style="margin-top:14px; padding:12px 14px; background:var(--bfl-yellow-lite); border:1px solid var(--bfl-yellow); border-radius:var(--r-sm)">
+            <div style="display:flex; justify-content:space-between; font-family:var(--font-display); font-size:13px; font-weight:800; color:var(--bfl-black); margin-bottom:6px">
+                <span>@(_progressTotal == 0 ? "Processing…" : $"Processing items… {_progressCurrent} / {_progressTotal}") @(_progressItem is null ? "" : $"  →  {_progressItem}")</span>
+                <span>@(_progressTotal == 0 ? "" : $"{(int)(100.0 * _progressCurrent / _progressTotal)}%")</span>
             </div>
-            <div style="width:100%; height:8px; background:var(--bfl-grey-200); border-radius:var(--r-pill); overflow:hidden">
+            <div style="width:100%; height:10px; background:white; border-radius:var(--r-pill); overflow:hidden; border:1px solid var(--bfl-yellow-hov)">
                 <div style="height:100%; background:var(--bfl-yellow); width:@(_progressTotal == 0 ? 0 : (int)(100.0 * _progressCurrent / _progressTotal))%; transition:width .15s ease"></div>
             </div>
         </div>
@@ -118,26 +118,32 @@
         <!-- Filters -->
         <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; padding-bottom:12px">
             <div>
-                <label style="font-size:10px; font-weight:700; color:var(--text-secondary)">DIVISION</label>
-                <select multiple size="3" style="width:100%; font-size:12px" @onchange="OnDivChanged">
-                    @foreach (var d in _allocation.Where(a => a.Division is not null).Select(a => a.Division!).Distinct().OrderBy(x => x)) { <option value="@d" selected="@_filterDivs.Contains(d)">@d</option> }
-                </select>
+                <label style="font-size:11px; font-weight:800; color:var(--bfl-black)">DIVISION</label>
+                <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true"
+                           SelectedValues="_filterDivs" SelectedValuesChanged="@(v => _filterDivs = v.ToHashSet())"
+                           Placeholder="All" Variant="Variant.Outlined" Margin="Margin.Dense">
+                    @foreach (var d in _allocation.Where(a => a.Division is not null).Select(a => a.Division!).Distinct().OrderBy(x => x)) { <MudSelectItem T="string" Value="@d">@d</MudSelectItem> }
+                </MudSelect>
             </div>
             <div>
-                <label style="font-size:10px; font-weight:700; color:var(--text-secondary)">STORE NAME</label>
-                <select multiple size="3" style="width:100%; font-size:12px" @onchange="OnStoreChanged">
-                    @foreach (var s in _allocation.Where(a => a.StoreName is not null).Select(a => a.StoreName!).Distinct().OrderBy(x => x)) { <option value="@s" selected="@_filterStores.Contains(s)">@s</option> }
-                </select>
+                <label style="font-size:11px; font-weight:800; color:var(--bfl-black)">STORE NAME</label>
+                <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true"
+                           SelectedValues="_filterStores" SelectedValuesChanged="@(v => _filterStores = v.ToHashSet())"
+                           Placeholder="All" Variant="Variant.Outlined" Margin="Margin.Dense">
+                    @foreach (var s in _allocation.Where(a => a.StoreName is not null).Select(a => a.StoreName!).Distinct().OrderBy(x => x)) { <MudSelectItem T="string" Value="@s">@s</MudSelectItem> }
+                </MudSelect>
             </div>
             <div>
-                <label style="font-size:10px; font-weight:700; color:var(--text-secondary)">PO NO</label>
-                <select multiple size="3" style="width:100%; font-size:12px" @onchange="OnPoChanged">
-                    @foreach (var p in _allocation.Select(a => a.OraPONo).Distinct().OrderBy(x => x)) { <option value="@p" selected="@_filterPos.Contains(p)">@p</option> }
-                </select>
+                <label style="font-size:11px; font-weight:800; color:var(--bfl-black)">PO NO</label>
+                <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true"
+                           SelectedValues="_filterPos" SelectedValuesChanged="@(v => _filterPos = v.ToHashSet())"
+                           Placeholder="All" Variant="Variant.Outlined" Margin="Margin.Dense">
+                    @foreach (var p in _allocation.Select(a => a.OraPONo).Distinct().OrderBy(x => x)) { <MudSelectItem T="string" Value="@p">@p</MudSelectItem> }
+                </MudSelect>
             </div>
             <div>
-                <label style="font-size:10px; font-weight:700; color:var(--text-secondary)">ITEMCODE (contains)</label>
-                <input @bind="_filterItemCode" @bind:event="oninput" placeholder="search…" style="width:100%; padding:6px; font-size:12px" />
+                <label style="font-size:11px; font-weight:800; color:var(--bfl-black)">ITEMCODE (contains)</label>
+                <input @bind="_filterItemCode" @bind:event="oninput" placeholder="search…" style="width:100%; padding:8px 10px; font-size:13px; border:1px solid var(--border-default); border-radius:var(--r-sm); background:white" />
                 <div style="margin-top:4px"><a href="#" style="font-size:11px" @onclick:preventDefault @onclick="ClearFilters">Clear all filters</a></div>
             </div>
         </div>
@@ -459,10 +465,6 @@
     {
         _filterDivs.Clear(); _filterStores.Clear(); _filterPos.Clear(); _filterItemCode = "";
     }
-    private void OnDivChanged(ChangeEventArgs e)   => _filterDivs   = ((string[]?)e.Value ?? Array.Empty<string>()).ToHashSet();
-    private void OnStoreChanged(ChangeEventArgs e) => _filterStores = ((string[]?)e.Value ?? Array.Empty<string>()).ToHashSet();
-    private void OnPoChanged(ChangeEventArgs e)    => _filterPos    = ((string[]?)e.Value ?? Array.Empty<string>()).ToHashSet();
-
     private void ShowError(string msg) { _message = msg; _messageIsError = true; }
     private void ShowInfo(string msg)  { _message = msg; _messageIsError = false; }
 }
