@@ -1,9 +1,11 @@
 @page "/building/container-allocation"
 @rendermode RenderMode.InteractiveServer
+@using System.Text
 @using Wms.Core
 @using Wms.Data.Lpm
 @attribute [Authorize(Roles = "Admin,WHManager")]
 @inject ContainerAllocationService Svc
+@inject Microsoft.JSInterop.IJSRuntime JS
 
 <PageTitle>WMS — Container Allocation</PageTitle>
 
@@ -118,10 +120,58 @@
 
         @if (_validation.Ok)
         {
-            <div class="aiwms-alert info" style="margin-top:12px">
-                All checks passed. Process logic (Phase 2) will go here.
+            <div class="aiwms-alert success" style="margin-top:12px">
+                All checks passed. @(_allocation.Count == 0 ? "Computing allocation..." : $"{_allocation.Count} allocation rows computed.")
             </div>
         }
+    </div>
+}
+
+@if (_allocation.Count > 0)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between">
+            <span>Allocation Preview — @_allocation.Count rows, total @_allocation.Sum(r => r.AllocQty) pcs</span>
+            <span style="display:flex; gap:8px">
+                <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@_busy">Export to Excel</button>
+                <button class="aiwms-btn aiwms-btn-primary" @onclick="ConfirmSaveAsync" disabled="@(_busy || _saved)">@(_saved ? "Saved ✓" : "Confirm & Save")</button>
+            </span>
+        </div>
+        <table class="aiwms-table aiwms-table-dense">
+            <thead>
+                <tr>
+                    <th>Contno</th>
+                    <th>OraPONo</th>
+                    <th>ItemCode</th>
+                    <th>PO Qty</th>
+                    <th>ShopCode</th>
+                    <th>Country</th>
+                    <th>VolumeGroup</th>
+                    <th style="text-align:right">SKUMax</th>
+                    <th style="text-align:right">Alloc Qty</th>
+                    <th style="text-align:right">RR Extra</th>
+                    <th style="text-align:right">MerchNeed/Mo</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in _allocation)
+                {
+                    <tr>
+                        <td>@r.Contno</td>
+                        <td>@r.OraPONo</td>
+                        <td>@r.ItemCode</td>
+                        <td>@r.PoQty</td>
+                        <td>@r.ShopCode</td>
+                        <td>@r.Country</td>
+                        <td>@r.VolumeGroup</td>
+                        <td style="text-align:right">@r.SkuMax</td>
+                        <td style="text-align:right">@r.AllocQty</td>
+                        <td style="text-align:right">@(r.RoundRobinExtra > 0 ? r.RoundRobinExtra.ToString() : "")</td>
+                        <td style="text-align:right">@r.MerchNeedMonth</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
     </div>
 }
 
@@ -129,6 +179,8 @@
     private List<string> _countries = new();
     private List<string> _warehouses = new();
     private List<PoDataRow> _poData = new();
+    private List<AllocationRow> _allocation = new();
+    private bool _saved;
     private ContainerAllocationValidationResult? _validation;
 
     private string _country = "";
@@ -160,7 +212,7 @@
 
     private async Task LoadPoDataAsync()
     {
-        _busy = true; _message = ""; _validation = null;
+        _busy = true; _message = ""; _validation = null; _allocation = new(); _saved = false;
         try
         {
             _poData = await Svc.LoadPoDataAsync(_contno);
@@ -172,13 +224,65 @@
 
     private async Task ProcessAsync()
     {
-        _busy = true; _message = "";
+        _busy = true; _message = ""; _allocation = new(); _saved = false;
         try
         {
             _validation = await Svc.ValidateAsync(_country, _contno);
-            if (!_validation.Ok) ShowError("Validation failed — see steps below.");
+            if (!_validation.Ok)
+            {
+                ShowError("Validation failed — see steps below.");
+                return;
+            }
+            _allocation = await Svc.ProcessAllocationAsync(_contno);
+            if (_allocation.Count == 0)
+                ShowError("No allocation rows produced. Check LPM_EOM_Output (current month) + LPM_SKUMaxRule coverage.");
+            else
+                ShowInfo($"Allocation computed: {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
         }
         catch (Exception ex) { ShowError($"Process failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private async Task ExportCsvAsync()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Contno,OraPONo,ItemCode,PoQty,ShopCode,Country,VolumeGroup,SkuMax,AllocQty,RoundRobinExtra,MerchNeedMonth,DivCode,LPM,LPMDt");
+        foreach (var r in _allocation)
+        {
+            sb.Append(Csv(r.Contno)).Append(',').Append(Csv(r.OraPONo)).Append(',').Append(Csv(r.ItemCode)).Append(',')
+              .Append(r.PoQty).Append(',').Append(Csv(r.ShopCode)).Append(',').Append(Csv(r.Country)).Append(',')
+              .Append(Csv(r.VolumeGroup)).Append(',').Append(r.SkuMax).Append(',').Append(r.AllocQty).Append(',')
+              .Append(r.RoundRobinExtra).Append(',').Append(r.MerchNeedMonth).Append(',').Append(r.DivCode).Append(',')
+              .Append(Csv(r.LPM)).Append(',').Append(r.LPMDt?.ToString("yyyy-MM-dd"))
+              .AppendLine();
+        }
+        var bytes = Encoding.UTF8.GetBytes(sb.ToString());
+        var b64 = Convert.ToBase64String(bytes);
+        var filename = $"allocation_{_contno}_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+        await JS.InvokeVoidAsync("eval", $@"
+            (function() {{
+                var a = document.createElement('a');
+                a.href = 'data:text/csv;base64,{b64}';
+                a.download = '{filename}';
+                document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            }})();");
+    }
+
+    private static string Csv(string? s) => s is null ? ""
+        : (s.Contains(',') || s.Contains('"') || s.Contains('\n'))
+            ? "\"" + s.Replace("\"", "\"\"") + "\""
+            : s;
+
+    private async Task ConfirmSaveAsync()
+    {
+        _busy = true; _message = "";
+        try
+        {
+            var n = await Svc.SaveAllocationAsync(_allocation);
+            _saved = true;
+            ShowInfo($"Saved {n} rows to LPMSIM.WMS_ContAllocationData.");
+        }
+        catch (Exception ex) { ShowError($"Save failed: {ex.Message}"); }
         finally { _busy = false; }
     }
 

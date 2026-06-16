@@ -159,6 +159,166 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         return new ContainerAllocationValidationResult(true, steps);
     }
 
+    // ===================== Process — preview allocation =====================
+    // Walks each PO line item, looks up DivCode from vupc_subclass, finds
+    // eligible stores via LPM_EOM_Output × LPM_SKUMaxRule (current month),
+    // orders by VolumeGroup A→B→C… then MerchNeedMonth DESC, and assigns
+    // min(SKUMax, remaining) per store. If qty remains after all stores
+    // hit cap, does round-robin one piece per store in same order until
+    // qty hits zero.
+    public async Task<List<AllocationRow>> ProcessAllocationAsync(string contno, CancellationToken ct = default)
+    {
+        var result = new List<AllocationRow>();
+        if (string.IsNullOrWhiteSpace(contno)) return result;
+        contno = contno.Trim();
+
+        await using var c = OpenOnPremBackup();
+
+        // 1. Load all PO line items for this container (one row per line — no GROUP BY).
+        var lines = (await c.QueryAsync<(string ContNo, string OraPONo, string ItemCode, int Qty, string? LPM, DateTime? LPMDt)>(
+            new CommandDefinition(@"
+                SELECT ContNo, OraPONo, ItemCode,
+                       CAST(ISNULL(orgqty,0) AS INT) AS Qty,
+                       LPM, LPMDt
+                FROM usa.dbo.usaorgfile_LPM WITH (NOLOCK)
+                WHERE ContNo = @c
+                ORDER BY OraPONo, LPM, ItemCode",
+                new { c = contno }, cancellationToken: ct))).AsList();
+
+        if (lines.Count == 0) return result;
+
+        // 2. Resolve DivCode per item via vupc_subclass.DivID
+        var divByItem = (await c.QueryAsync<(string itemcode, int? DivID)>(new CommandDefinition(@"
+            SELECT itemcode, DivID
+            FROM datareporting.dbo.vupc_subclass WITH (NOLOCK)
+            WHERE itemcode IN @items",
+            new { items = lines.Select(l => l.ItemCode).Distinct().ToArray() }, cancellationToken: ct)))
+            .GroupBy(r => r.itemcode)
+            .ToDictionary(g => g.Key, g => g.First().DivID ?? 0, StringComparer.OrdinalIgnoreCase);
+
+        // 3. For each PO line, query eligible stores+rules in priority order
+        //    (VolumeGroup ASC = A first, then MerchNeedMonth DESC).
+        foreach (var line in lines)
+        {
+            if (line.Qty <= 0) continue;
+            if (!divByItem.TryGetValue(line.ItemCode, out var divCode) || divCode == 0) continue;
+
+            var stores = (await c.QueryAsync<(string StoreID, string Country, string VolumeGroup, int MerchNeedMonth, int SKUMax)>(
+                new CommandDefinition(@"
+                    SELECT s.StoreID, s.Country, s.VolumeGroup,
+                           ISNULL(s.MerchNeedMonth, 0) AS MerchNeedMonth,
+                           r.SKUMax
+                    FROM dbo.LPM_EOM_Output s WITH (NOLOCK)
+                    INNER JOIN dbo.LPM_SKUMaxRule r WITH (NOLOCK)
+                       ON r.Country   = s.Country
+                      AND r.DivCode   = s.DivCode
+                      AND r.GroupCode = s.VolumeGroup
+                      AND r.IsActive  = 1
+                      AND @q BETWEEN r.WHStockFrom AND r.WHStockTo
+                    WHERE s.DivCode = @d
+                      AND s.Month1  = MONTH(SYSDATETIME())
+                      AND s.Year1   = YEAR(SYSDATETIME())
+                      AND s.VolumeGroup IS NOT NULL
+                    ORDER BY s.VolumeGroup, s.MerchNeedMonth DESC",
+                    new { q = line.Qty, d = divCode }, cancellationToken: ct))).AsList();
+
+            if (stores.Count == 0) continue;
+
+            // Pass 1: walk in order, fill each store up to its SKUMax.
+            var allocs = new Dictionary<string, AllocationRow>(StringComparer.OrdinalIgnoreCase);
+            var remaining = line.Qty;
+            foreach (var s in stores)
+            {
+                if (remaining <= 0) break;
+                var take = Math.Min(s.SKUMax, remaining);
+                if (take <= 0) continue;
+                allocs[s.StoreID] = new AllocationRow(
+                    Contno: line.ContNo,
+                    OraPONo: line.OraPONo,
+                    ItemCode: line.ItemCode,
+                    PoQty: line.Qty,
+                    ShopCode: s.StoreID,
+                    Country: s.Country,
+                    VolumeGroup: s.VolumeGroup,
+                    SkuMax: s.SKUMax,
+                    AllocQty: take,
+                    MerchNeedMonth: s.MerchNeedMonth,
+                    DivCode: divCode,
+                    RoundRobinExtra: 0,
+                    LPM: line.LPM,
+                    LPMDt: line.LPMDt);
+                remaining -= take;
+            }
+
+            // Pass 2: round-robin if there's still qty left after every store was filled to cap.
+            if (remaining > 0 && stores.Count > 0)
+            {
+                int idx = 0;
+                while (remaining > 0)
+                {
+                    var s = stores[idx % stores.Count];
+                    if (allocs.TryGetValue(s.StoreID, out var row))
+                    {
+                        allocs[s.StoreID] = row with
+                        {
+                            AllocQty = row.AllocQty + 1,
+                            RoundRobinExtra = row.RoundRobinExtra + 1,
+                        };
+                    }
+                    else
+                    {
+                        allocs[s.StoreID] = new AllocationRow(
+                            line.ContNo, line.OraPONo, line.ItemCode, line.Qty,
+                            s.StoreID, s.Country, s.VolumeGroup, s.SKUMax,
+                            AllocQty: 1, s.MerchNeedMonth, divCode,
+                            RoundRobinExtra: 1, line.LPM, line.LPMDt);
+                    }
+                    remaining--;
+                    idx++;
+                }
+            }
+
+            result.AddRange(allocs.Values);
+        }
+
+        return result;
+    }
+
+    // ===================== Confirm & Save to LPMSIM.WMS_ContAllocationData =====================
+    // Inserts the allocation rows. Idempotency is NOT enforced — re-running will
+    // create duplicates. (Add a delete-by-Contno first if you want re-run support.)
+    public async Task<int> SaveAllocationAsync(IReadOnlyList<AllocationRow> rows, CancellationToken ct = default)
+    {
+        if (rows.Count == 0) return 0;
+        await using var c = OpenOnPremBackup();
+        // INSERT goes to LPMSIM via 3-part naming (OnPremBackup conn has access).
+        var sql = @"INSERT INTO LPMSIM.dbo.WMS_ContAllocationData
+            (ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode, Qty, QtyIssue,
+             ShopCode, TcmContno, ORAPONo, LPMDt, BuildingCategory, Remarks)
+          VALUES
+            (@ContNo, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)),
+             @UPC, @ItemCode, @GroupCode, @Qty, 0,
+             @ShopCode, @ContNo, @OraPONo, @LPMDt, @Country, @Remarks);";
+        var affected = 0;
+        foreach (var r in rows)
+        {
+            affected += await c.ExecuteAsync(new CommandDefinition(sql, new
+            {
+                ContNo    = r.Contno,
+                UPC       = r.ItemCode,
+                ItemCode  = r.ItemCode,
+                GroupCode = r.VolumeGroup,
+                Qty       = r.AllocQty,
+                ShopCode  = r.ShopCode,
+                OraPONo   = r.OraPONo,
+                LPMDt     = r.LPMDt,
+                Country   = r.Country,
+                Remarks   = r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null,
+            }, cancellationToken: ct));
+        }
+        return affected;
+    }
+
     // ===================== Country / WH dropdowns (Azure WMS WHMaster) =====================
     public async Task<List<string>> GetCountriesAsync(CancellationToken ct = default)
     {
