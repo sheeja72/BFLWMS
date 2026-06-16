@@ -166,7 +166,10 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     // min(SKUMax, remaining) per store. If qty remains after all stores
     // hit cap, does round-robin one piece per store in same order until
     // qty hits zero.
-    public async Task<List<AllocationRow>> ProcessAllocationAsync(string contno, CancellationToken ct = default)
+    public async Task<List<AllocationRow>> ProcessAllocationAsync(
+        string contno,
+        IProgress<AllocationProgress>? progress = null,
+        CancellationToken ct = default)
     {
         var result = new List<AllocationRow>();
         if (string.IsNullOrWhiteSpace(contno)) return result;
@@ -198,8 +201,12 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
         // 3. For each PO line, query eligible stores+rules in priority order
         //    (VolumeGroup ASC = A first, then MerchNeedMonth DESC).
+        progress?.Report(new AllocationProgress(0, lines.Count, null));
+        var idxLine = 0;
         foreach (var line in lines)
         {
+            idxLine++;
+            progress?.Report(new AllocationProgress(idxLine, lines.Count, line.ItemCode));
             if (line.Qty <= 0) continue;
             if (!divByItem.TryGetValue(line.ItemCode, out var divCode) || divCode == 0) continue;
 

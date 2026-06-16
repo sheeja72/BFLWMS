@@ -43,6 +43,19 @@
         </button>
     </div>
 
+    @if (_progressTotal > 0)
+    {
+        <div style="margin-top:14px">
+            <div style="display:flex; justify-content:space-between; font-family:var(--font-display); font-size:12px; font-weight:700; margin-bottom:4px">
+                <span>Processing items… @_progressCurrent / @_progressTotal @(_progressItem is null ? "" : $"({_progressItem})")</span>
+                <span>@(_progressTotal == 0 ? 0 : (int)(100.0 * _progressCurrent / _progressTotal))%</span>
+            </div>
+            <div style="width:100%; height:8px; background:var(--bfl-grey-200); border-radius:var(--r-pill); overflow:hidden">
+                <div style="height:100%; background:var(--bfl-yellow); width:@(_progressTotal == 0 ? 0 : (int)(100.0 * _progressCurrent / _progressTotal))%; transition:width .15s ease"></div>
+            </div>
+        </div>
+    }
+
     @if (!string.IsNullOrEmpty(_message))
     {
         <div class="aiwms-alert @(_messageIsError ? "error" : "info")" style="margin-top:12px">@_message</div>
@@ -181,6 +194,9 @@
     private List<PoDataRow> _poData = new();
     private List<AllocationRow> _allocation = new();
     private bool _saved;
+    private int _progressCurrent;
+    private int _progressTotal;
+    private string? _progressItem;
     private ContainerAllocationValidationResult? _validation;
 
     private string _country = "";
@@ -225,6 +241,7 @@
     private async Task ProcessAsync()
     {
         _busy = true; _message = ""; _allocation = new(); _saved = false;
+        _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
         try
         {
             _validation = await Svc.ValidateAsync(_country, _contno);
@@ -233,14 +250,28 @@
                 ShowError("Validation failed — see steps below.");
                 return;
             }
-            _allocation = await Svc.ProcessAllocationAsync(_contno);
+
+            var progress = new Progress<AllocationProgress>(async p =>
+            {
+                _progressCurrent = p.Current;
+                _progressTotal   = p.Total;
+                _progressItem    = p.CurrentItem;
+                await InvokeAsync(StateHasChanged);
+            });
+
+            _allocation = await Svc.ProcessAllocationAsync(_contno, progress);
+
             if (_allocation.Count == 0)
                 ShowError("No allocation rows produced. Check LPM_EOM_Output (current month) + LPM_SKUMaxRule coverage.");
             else
                 ShowInfo($"Allocation computed: {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
         }
         catch (Exception ex) { ShowError($"Process failed: {ex.Message}"); }
-        finally { _busy = false; }
+        finally
+        {
+            _busy = false;
+            _progressTotal = 0; _progressCurrent = 0; _progressItem = null;
+        }
     }
 
     private async Task ExportCsvAsync()
