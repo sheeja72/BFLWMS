@@ -21,3 +21,23 @@ public record ContainerAllocationValidationResult(
     IReadOnlyList<ValidationStep> Steps);
 
 public record ValidationStep(string Label, bool Ok, string? Detail);
+
+/// <summary>
+/// One row in the allocation preview / output. Each row = one PO line item
+/// distributed to one destination store.
+/// </summary>
+public record AllocationRow(
+    string  Contno,
+    string  OraPONo,
+    string  ItemCode,
+    int     PoQty,           // original qty on the PO line
+    string  ShopCode,        // destination StoreID
+    string  Country,
+    string  VolumeGroup,
+    int     SkuMax,          // the rule cap that applied
+    int     AllocQty,        // qty assigned to this store
+    int     MerchNeedMonth,
+    int     DivCode,
+    int     RoundRobinExtra, // pieces given over and above SkuMax via round-robin
+    string? LPM,
+    DateTime? LPMDt);
