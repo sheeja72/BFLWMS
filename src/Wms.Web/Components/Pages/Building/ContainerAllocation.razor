@@ -378,6 +378,9 @@
     private async Task ViewDraftAsync()
     {
         _busy = true; _message = ""; _allocation = new();
+        // Clear any stale filters / sort so the first render is small
+        _filterDivs = new(); _filterStores = new(); _filterPos = new(); _filterItemCode = "";
+        _sortKey = null;
         await InvokeAsync(StateHasChanged);
         try
         {
