@@ -351,7 +351,17 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             "SELECT DraftJson FROM dbo.WmsAllocationDraft WHERE Country = @ct AND ContNo = @c",
             new { ct = country, c = contno }, cancellationToken: ct));
         if (string.IsNullOrEmpty(json)) return new();
-        return JsonSerializer.Deserialize<List<AllocationRow>>(json) ?? new();
+        try
+        {
+            return JsonSerializer.Deserialize<List<AllocationRow>>(json) ?? new();
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"Draft JSON could not be parsed for {country}/{contno} ({json.Length} chars). " +
+                $"Likely a schema change since the draft was saved. Re-run Process and Save Draft again. " +
+                $"Inner: {ex.GetType().Name}: {ex.Message}", ex);
+        }
     }
 
     public async Task<AllocationStatus> GetStatusAsync(string country, string contno, CancellationToken ct = default)
