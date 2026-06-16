@@ -9,23 +9,19 @@ namespace Wms.Web.Auth;
 /// <summary>
 /// Runs once per request after Entra OIDC has authenticated the user.
 ///
-/// Pulls the email from the OIDC claims, finds/creates the matching WmsUser
-/// row on Azure SQL, and attaches:
+/// Pulls the email from the OIDC claims, finds the matching WmsUser row on
+/// Azure SQL, and attaches:
 ///   - aiwms_active = "1" (gates the RequireActiveUser policy)
 ///   - role claims from WmsUserRole
 ///
-/// First-login auto-create mirrors the Barcode Generator pattern: if the
-/// signed-in Entra user has no WmsUser row, we create one with the
-/// configured DefaultRole. Admin can then promote them.
+/// No auto-create — users must be provisioned by an Admin via the
+/// User Management UI. Unknown sign-ins land on the "Access denied" page.
 /// </summary>
 public class WmsClaimsTransformer(
     IDbContextFactory<WmsDbContext> dbFactory,
-    IConfiguration cfg,
     ILogger<WmsClaimsTransformer> logger) : IClaimsTransformation
 {
     public const string ActiveClaim = "aiwms_active";
-
-    private string DefaultRole => cfg["Wms:DefaultRole"] ?? "WHAssociate";
 
     public async Task<ClaimsPrincipal> TransformAsync(ClaimsPrincipal principal)
     {
@@ -59,29 +55,11 @@ public class WmsClaimsTransformer(
                 email, user is null ? "NULL" : "FOUND",
                 user is null ? "n/a" : string.Join(",", user.UserRoles.Select(r => r.RoleCode)));
 
-            // Auto-create on first login
+            // No auto-create — Admin must provision via User Management UI.
             if (user is null)
             {
-                user = new WmsUser
-                {
-                    Username = email,
-                    DisplayName = displayName,
-                    Email = email,
-                    IsActive = true,
-                    CreatedBy = "OIDC-auto-create",
-                };
-                db.Users.Add(user);
-                db.UserRoles.Add(new WmsUserRole
-                {
-                    Username = email,
-                    RoleCode = DefaultRole,
-                });
-                await db.SaveChangesAsync(cts.Token);
-
-                // Re-load with roles
-                user = await db.Users
-                    .Include(u => u.UserRoles)
-                    .FirstAsync(u => u.Username == email, cts.Token);
+                logger.LogWarning("ClaimsTransformer: user '{Email}' is not provisioned in WmsUser — access denied.", email);
+                return principal;
             }
 
             if (!user.IsActive)
