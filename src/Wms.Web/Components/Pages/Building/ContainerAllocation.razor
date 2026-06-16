@@ -117,32 +117,42 @@
             <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="ItemStore" checked="@(_view == "ItemStore")" @onchange="@(_ => SetView("ItemStore"))" /> Item × Store</label>
             <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="ItemSummary" checked="@(_view == "ItemSummary")" @onchange="@(_ => SetView("ItemSummary"))" /> Item Summary</label>
             <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="Store" checked="@(_view == "Store")" @onchange="@(_ => SetView("Store"))" /> Store</label>
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="CountrySummary" checked="@(_view == "CountrySummary")" @onchange="@(_ => SetView("CountrySummary"))" /> Country Summary</label>
         </div>
 
         <!-- Filters -->
         <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; padding-bottom:12px">
             <div>
                 <label style="font-size:11px; font-weight:800; color:var(--bfl-black)">DIVISION</label>
+                <input @bind="_divSearch" @bind:event="oninput" placeholder="search…" style="width:100%; margin-bottom:4px; padding:6px 8px; font-size:12px; border:1px solid var(--border-default); border-radius:var(--r-sm); background:white" />
                 <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true"
                            SelectedValues="_filterDivs" SelectedValuesChanged="@(v => _filterDivs = v.ToHashSet())"
                            Placeholder="All" Variant="Variant.Outlined" Margin="Margin.Dense">
-                    @foreach (var d in _allocation.Where(a => a.Division is not null).Select(a => a.Division!).Distinct().OrderBy(x => x)) { <MudSelectItem T="string" Value="@d">@d</MudSelectItem> }
+                    @foreach (var d in _allocation.Where(a => a.Division is not null).Select(a => a.Division!).Distinct()
+                                                  .Where(x => string.IsNullOrEmpty(_divSearch) || x.Contains(_divSearch, StringComparison.OrdinalIgnoreCase))
+                                                  .OrderBy(x => x)) { <MudSelectItem T="string" Value="@d">@d</MudSelectItem> }
                 </MudSelect>
             </div>
             <div>
                 <label style="font-size:11px; font-weight:800; color:var(--bfl-black)">STORE NAME</label>
+                <input @bind="_storeSearch" @bind:event="oninput" placeholder="search…" style="width:100%; margin-bottom:4px; padding:6px 8px; font-size:12px; border:1px solid var(--border-default); border-radius:var(--r-sm); background:white" />
                 <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true"
                            SelectedValues="_filterStores" SelectedValuesChanged="@(v => _filterStores = v.ToHashSet())"
                            Placeholder="All" Variant="Variant.Outlined" Margin="Margin.Dense">
-                    @foreach (var s in _allocation.Where(a => a.StoreName is not null).Select(a => a.StoreName!).Distinct().OrderBy(x => x)) { <MudSelectItem T="string" Value="@s">@s</MudSelectItem> }
+                    @foreach (var s in _allocation.Where(a => a.StoreName is not null).Select(a => a.StoreName!).Distinct()
+                                                  .Where(x => string.IsNullOrEmpty(_storeSearch) || x.Contains(_storeSearch, StringComparison.OrdinalIgnoreCase))
+                                                  .OrderBy(x => x)) { <MudSelectItem T="string" Value="@s">@s</MudSelectItem> }
                 </MudSelect>
             </div>
             <div>
                 <label style="font-size:11px; font-weight:800; color:var(--bfl-black)">PO NO</label>
+                <input @bind="_poSearch" @bind:event="oninput" placeholder="search…" style="width:100%; margin-bottom:4px; padding:6px 8px; font-size:12px; border:1px solid var(--border-default); border-radius:var(--r-sm); background:white" />
                 <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true"
                            SelectedValues="_filterPos" SelectedValuesChanged="@(v => _filterPos = v.ToHashSet())"
                            Placeholder="All" Variant="Variant.Outlined" Margin="Margin.Dense">
-                    @foreach (var p in _allocation.Select(a => a.OraPONo).Distinct().OrderBy(x => x)) { <MudSelectItem T="string" Value="@p">@p</MudSelectItem> }
+                    @foreach (var p in _allocation.Select(a => a.OraPONo).Distinct()
+                                                  .Where(x => string.IsNullOrEmpty(_poSearch) || x.Contains(_poSearch, StringComparison.OrdinalIgnoreCase))
+                                                  .OrderBy(x => x)) { <MudSelectItem T="string" Value="@p">@p</MudSelectItem> }
                 </MudSelect>
             </div>
             <div>
@@ -194,21 +204,23 @@
             <table class="aiwms-table aiwms-table-dense">
                 <thead>
                     <tr>
-                        <th>OraPONo</th><th>ItemCode</th><th>Item Name</th><th>Brand</th><th>Division</th>
-                        <th style="text-align:right">PO Qty</th><th style="text-align:right">Total Alloc</th><th style="text-align:right">Stores</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("OraPONo")'>OraPONo @SortArrow("OraPONo")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("ItemCode")'>ItemCode @SortArrow("ItemCode")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("ItemName")'>Item Name @SortArrow("ItemName")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("Brand")'>Brand @SortArrow("Brand")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("PoQty")'>PO Qty @SortArrow("PoQty")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("TotalAlloc")'>Total Alloc @SortArrow("TotalAlloc")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("Stores")'>Stores @SortArrow("Stores")</th>
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (var g in Filtered.GroupBy(r => new { r.OraPONo, r.ItemCode })
-                                              .Select(g => new { g.Key.OraPONo, g.Key.ItemCode,
-                                                                  ItemName=g.First().ItemName, Brand=g.First().Brand, Division=g.First().Division,
-                                                                  PoQty=g.First().PoQty, Total=g.Sum(x=>x.AllocQty), Stores=g.Count() })
-                                              .OrderBy(x => x.OraPONo).ThenBy(x => x.ItemCode))
+                    @foreach (var g in ItemSummaryRows)
                     {
                         <tr>
                             <td>@g.OraPONo</td><td>@g.ItemCode</td><td>@g.ItemName</td><td>@g.Brand</td><td>@g.Division</td>
                             <td style="text-align:right">@g.PoQty</td>
-                            <td style="text-align:right">@g.Total</td>
+                            <td style="text-align:right">@g.TotalAlloc</td>
                             <td style="text-align:right">@g.Stores</td>
                         </tr>
                     }
@@ -220,25 +232,53 @@
             <table class="aiwms-table aiwms-table-dense">
                 <thead>
                     <tr>
-                        <th>ShopCode</th><th>Store Name</th><th>Country</th><th>VolumeGroup</th>
-                        <th style="text-align:right">MerchNeed/Mo</th><th>Division</th><th>Brand</th>
-                        <th style="text-align:right">PO Qty (sum)</th><th style="text-align:right">Allocated Qty</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("ShopCode")'>ShopCode @SortArrow("ShopCode")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("StoreName")'>Store Name @SortArrow("StoreName")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("Country")'>Country @SortArrow("Country")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("VolumeGroup")'>VolumeGroup @SortArrow("VolumeGroup")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("MerchNeedMonth")'>MerchNeed/Mo @SortArrow("MerchNeedMonth")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("Brand")'>Brand @SortArrow("Brand")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("PoQtySum")'>PO Qty (sum) @SortArrow("PoQtySum")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("AllocSum")'>Allocated Qty @SortArrow("AllocSum")</th>
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (var g in Filtered.GroupBy(r => r.ShopCode)
-                                              .Select(g => new {
-                                                  ShopCode=g.Key, StoreName=g.First().StoreName, Country=g.First().Country,
-                                                  VolumeGroup=g.First().VolumeGroup, MerchNeedMonth=g.First().MerchNeedMonth,
-                                                  Division=g.First().Division, Brand=string.Join(", ", g.Select(x=>x.Brand).Where(b=>b is not null).Distinct()),
-                                                  PoQty=g.Sum(x=>x.PoQty), Alloc=g.Sum(x=>x.AllocQty) })
-                                              .OrderBy(x => x.ShopCode))
+                    @foreach (var g in StoreRows)
                     {
                         <tr>
                             <td>@g.ShopCode</td><td>@g.StoreName</td><td>@g.Country</td><td>@g.VolumeGroup</td>
                             <td style="text-align:right">@g.MerchNeedMonth</td><td>@g.Division</td><td>@g.Brand</td>
+                            <td style="text-align:right">@g.PoQtySum</td>
+                            <td style="text-align:right">@g.AllocSum</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+        else if (_view == "CountrySummary")
+        {
+            <table class="aiwms-table aiwms-table-dense">
+                <thead>
+                    <tr>
+                        <th style="cursor:pointer" @onclick='() => Sort("Country")'>Country @SortArrow("Country")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("StoresCount")'>Stores Count @SortArrow("StoresCount")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("OraPONo")'>PO No @SortArrow("OraPONo")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("PoQty")'>PO Qty @SortArrow("PoQty")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("AllocQty")'>Allocated Qty @SortArrow("AllocQty")</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var g in CountrySummaryRows)
+                    {
+                        <tr>
+                            <td>@g.Country</td>
+                            <td style="text-align:right">@g.StoresCount</td>
+                            <td>@g.OraPONo</td>
+                            <td>@g.Division</td>
                             <td style="text-align:right">@g.PoQty</td>
-                            <td style="text-align:right">@g.Alloc</td>
+                            <td style="text-align:right">@g.AllocQty</td>
                         </tr>
                     }
                 </tbody>
@@ -291,6 +331,9 @@
     private HashSet<string> _filterStores = new();
     private HashSet<string> _filterPos = new();
     private string _filterItemCode = "";
+    private string _divSearch = "";
+    private string _storeSearch = "";
+    private string _poSearch = "";
 
     private bool CanLoad => !string.IsNullOrWhiteSpace(_contno);
     private bool CanProcess => !string.IsNullOrWhiteSpace(_country)
@@ -430,7 +473,10 @@
     // --- Filtering + sorting ---
     private const int MAX_RENDER_ROWS = 1000;
     private int _filteredCount;
-    private IEnumerable<AllocationRow> Filtered
+
+    // No cap, no sort — used by grouped views (Item Summary, Store, Country Summary)
+    // and as the base for the capped+sorted ItemStore `Filtered`.
+    private IEnumerable<AllocationRow> FilteredAll
     {
         get
         {
@@ -440,6 +486,15 @@
             if (_filterPos.Count    > 0) q = q.Where(r => _filterPos.Contains(r.OraPONo));
             if (!string.IsNullOrWhiteSpace(_filterItemCode))
                 q = q.Where(r => r.ItemCode.Contains(_filterItemCode, StringComparison.OrdinalIgnoreCase));
+            return q;
+        }
+    }
+
+    private IEnumerable<AllocationRow> Filtered
+    {
+        get
+        {
+            IEnumerable<AllocationRow> q = FilteredAll;
             if (_sortKey is not null)
             {
                 Func<AllocationRow, object?> k = _sortKey switch {
@@ -466,6 +521,86 @@
         }
     }
 
+    // --- Grouped view row types + getters (sorted by _sortKey if applicable) ---
+    private record ItemSummaryRowVm(string OraPONo, string ItemCode, string? ItemName, string? Brand, string? Division, int PoQty, int TotalAlloc, int Stores);
+    private record StoreRowVm(string ShopCode, string? StoreName, string Country, string VolumeGroup, int MerchNeedMonth, string? Division, string Brand, int PoQtySum, int AllocSum);
+    private record CountrySummaryRowVm(string Country, int StoresCount, string OraPONo, string? Division, int PoQty, int AllocQty);
+
+    private IEnumerable<ItemSummaryRowVm> ItemSummaryRows
+    {
+        get
+        {
+            var rows = FilteredAll
+                .GroupBy(r => new { r.OraPONo, r.ItemCode })
+                .Select(g => new ItemSummaryRowVm(g.Key.OraPONo, g.Key.ItemCode,
+                    g.First().ItemName, g.First().Brand, g.First().Division,
+                    g.First().PoQty, g.Sum(x => x.AllocQty), g.Count()));
+            if (_sortKey is null)
+                return rows.OrderBy(r => r.OraPONo).ThenBy(r => r.ItemCode);
+            Func<ItemSummaryRowVm, object?> k = _sortKey switch {
+                "OraPONo" => r => r.OraPONo, "ItemCode" => r => r.ItemCode, "ItemName" => r => r.ItemName,
+                "Brand" => r => r.Brand, "Division" => r => r.Division, "PoQty" => r => r.PoQty,
+                "TotalAlloc" => r => r.TotalAlloc, "Stores" => r => r.Stores,
+                _ => r => r.OraPONo,
+            };
+            return _sortAsc ? rows.OrderBy(k) : rows.OrderByDescending(k);
+        }
+    }
+
+    private IEnumerable<StoreRowVm> StoreRows
+    {
+        get
+        {
+            var rows = FilteredAll
+                .GroupBy(r => r.ShopCode)
+                .Select(g => new StoreRowVm(
+                    g.Key, g.First().StoreName, g.First().Country, g.First().VolumeGroup,
+                    g.First().MerchNeedMonth, g.First().Division,
+                    string.Join(", ", g.Select(x => x.Brand).Where(b => b is not null).Distinct()),
+                    g.Sum(x => x.PoQty), g.Sum(x => x.AllocQty)));
+            if (_sortKey is null)
+                return rows.OrderBy(r => r.ShopCode);
+            Func<StoreRowVm, object?> k = _sortKey switch {
+                "ShopCode" => r => r.ShopCode, "StoreName" => r => r.StoreName, "Country" => r => r.Country,
+                "VolumeGroup" => r => r.VolumeGroup, "MerchNeedMonth" => r => r.MerchNeedMonth,
+                "Division" => r => r.Division, "Brand" => r => r.Brand,
+                "PoQtySum" => r => r.PoQtySum, "AllocSum" => r => r.AllocSum,
+                _ => r => r.ShopCode,
+            };
+            return _sortAsc ? rows.OrderBy(k) : rows.OrderByDescending(k);
+        }
+    }
+
+    private IEnumerable<CountrySummaryRowVm> CountrySummaryRows
+    {
+        get
+        {
+            // Stores Count = distinct ShopCode per country (across the whole filtered set,
+            // not just within the (Country, PO, Division) grouping)
+            var all = FilteredAll.ToList();
+            var storesPerCountry = all
+                .GroupBy(r => r.Country)
+                .ToDictionary(g => g.Key, g => g.Select(r => r.ShopCode).Distinct().Count());
+
+            var rows = all
+                .GroupBy(r => new { r.Country, r.OraPONo, r.Division })
+                .Select(g => new CountrySummaryRowVm(
+                    g.Key.Country,
+                    storesPerCountry.TryGetValue(g.Key.Country, out var n) ? n : 0,
+                    g.Key.OraPONo, g.Key.Division,
+                    g.Sum(x => x.PoQty), g.Sum(x => x.AllocQty)));
+            if (_sortKey is null)
+                return rows.OrderBy(r => r.Country).ThenBy(r => r.OraPONo).ThenBy(r => r.Division);
+            Func<CountrySummaryRowVm, object?> k = _sortKey switch {
+                "Country" => r => r.Country, "StoresCount" => r => r.StoresCount,
+                "OraPONo" => r => r.OraPONo, "Division" => r => r.Division,
+                "PoQty" => r => r.PoQty, "AllocQty" => r => r.AllocQty,
+                _ => r => r.Country,
+            };
+            return _sortAsc ? rows.OrderBy(k) : rows.OrderByDescending(k);
+        }
+    }
+
     private void Sort(string key)
     {
         if (_sortKey == key) _sortAsc = !_sortAsc;
@@ -473,10 +608,11 @@
     }
     private string SortArrow(string key) => _sortKey == key ? (_sortAsc ? "▲" : "▼") : "";
 
-    private void SetView(string v) { _view = v; }
+    private void SetView(string v) { _view = v; _sortKey = null; _sortAsc = true; }
     private void ClearFilters()
     {
         _filterDivs.Clear(); _filterStores.Clear(); _filterPos.Clear(); _filterItemCode = "";
+        _divSearch = ""; _storeSearch = ""; _poSearch = "";
     }
     private void ShowError(string msg) { _message = msg; _messageIsError = true; }
     private void ShowInfo(string msg)  { _message = msg; _messageIsError = false; }
