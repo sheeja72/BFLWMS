@@ -101,7 +101,11 @@
 {
     <div class="aiwms-section">
         <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px">
-            <span>Allocation @(_status?.HasFinal == true ? "(FINAL)" : _status?.HasDraft == true ? "(Draft)" : "Preview") — @Filtered.Count() rows shown of @_allocation.Count, total @Filtered.Sum(r => r.AllocQty) pcs</span>
+            @{
+                var rendered = Filtered.ToList();
+                var capped = _filteredCount > MAX_RENDER_ROWS;
+            }
+            <span>Allocation @(_status?.HasFinal == true ? "(FINAL)" : _status?.HasDraft == true ? "(Draft)" : "Preview") — @rendered.Count of @_filteredCount filtered (of @_allocation.Count total), total @rendered.Sum(r => r.AllocQty) pcs shown@(capped ? $" — capped at {MAX_RENDER_ROWS}, use filters to narrow" : "")</span>
             <span style="display:flex; gap:8px">
                 <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@_busy">Export to Excel</button>
             </span>
@@ -373,11 +377,13 @@
 
     private async Task ViewDraftAsync()
     {
-        _busy = true; _message = "";
+        _busy = true; _message = ""; _allocation = new();
+        await InvokeAsync(StateHasChanged);
         try
         {
-            _allocation = await Svc.LoadDraftAsync(_country, _contno);
-            ShowInfo($"Loaded draft — {_allocation.Count} rows.");
+            var draft = await Svc.LoadDraftAsync(_country, _contno);
+            _allocation = draft;
+            ShowInfo($"Loaded draft — {_allocation.Count} rows (showing first {Math.Min(MAX_RENDER_ROWS, _allocation.Count)}; filter to narrow).");
         }
         catch (Exception ex) { ShowError($"Load draft failed: {ex.Message}"); }
         finally { _busy = false; }
@@ -419,6 +425,8 @@
         : (s.Contains(',') || s.Contains('"') || s.Contains('\n')) ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
 
     // --- Filtering + sorting ---
+    private const int MAX_RENDER_ROWS = 1000;
+    private int _filteredCount;
     private IEnumerable<AllocationRow> Filtered
     {
         get
@@ -449,7 +457,9 @@
                 };
                 q = _sortAsc ? q.OrderBy(k) : q.OrderByDescending(k);
             }
-            return q.ToList();
+            var list = q.ToList();
+            _filteredCount = list.Count;
+            return list.Take(MAX_RENDER_ROWS);
         }
     }
 
