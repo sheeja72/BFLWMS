@@ -16,40 +16,44 @@
 
 <div class="aiwms-section">
     <div class="aiwms-card-header">Inputs</div>
-    <div class="aiwms-form-row">
-        <label>Country *</label>
-        <select @bind="_country" @bind:after="OnCountryChangedAsync">
-            <option value="">-- Select --</option>
-            @foreach (var c in _countries) { <option value="@c">@c</option> }
-        </select>
-    </div>
-    <div class="aiwms-form-row">
-        <label>Warehouse *</label>
-        <select @bind="_warehouse">
-            <option value="">-- Select --</option>
-            @foreach (var w in _warehouses) { <option value="@w">@w</option> }
-        </select>
-    </div>
-    <div class="aiwms-form-row">
-        <label>Container No *</label>
-        <input @bind="_contno" @bind:after="OnContnoChangedAsync" placeholder="e.g. AEINT6255" />
-    </div>
-
-    <div style="display:flex; gap:12px; margin-top:12px; flex-wrap:wrap">
+    <div style="display:grid; grid-template-columns: 1fr 1fr 1.5fr auto auto; gap:12px; align-items:end; flex-wrap:wrap">
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">COUNTRY *</label>
+            <select @bind="_country" @bind:after="OnCountryChangedAsync" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-body); font-size:13px; background:white;">
+                <option value="">-- Select --</option>
+                @foreach (var c in _countries) { <option value="@c">@c</option> }
+            </select>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">WAREHOUSE *</label>
+            <select @bind="_warehouse" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-body); font-size:13px; background:white;">
+                <option value="">-- Select --</option>
+                @foreach (var w in _warehouses) { <option value="@w">@w</option> }
+            </select>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">CONTAINER NO *</label>
+            <input @bind="_contno" @bind:after="OnContnoChangedAsync" placeholder="e.g. AEINT6255" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-mono); font-size:13px; background:white;" />
+        </div>
         <button class="aiwms-btn aiwms-btn-secondary" @onclick="LoadPoDataAsync" disabled="@(_busy || !CanLoad)">Load PO Data</button>
         <button class="aiwms-btn aiwms-btn-primary" @onclick="ProcessAsync" disabled="@(_busy || !CanProcess || _status?.HasFinal == true)">
-            @(_status?.HasFinal == true ? "🔒 Locked (final saved)" : "Process")
+            @(_status?.HasFinal == true ? "🔒 Locked" : "Process")
         </button>
-        @if (_allocation.Count > 0)
-        {
-            <button class="aiwms-btn aiwms-btn-secondary" @onclick="SaveDraftAsync" disabled="@_busy">Save Draft</button>
-            <button class="aiwms-btn aiwms-btn-success" @onclick="ConfirmSaveAsync" disabled="@_busy">Confirm &amp; Save</button>
-        }
-        @if (_status?.HasDraft == true && _allocation.Count == 0)
-        {
-            <button class="aiwms-btn aiwms-btn-secondary" @onclick="ViewDraftAsync" disabled="@_busy">View Draft (@_status.DraftRows rows)</button>
-        }
     </div>
+    @if (_allocation.Count > 0 || _status?.HasDraft == true)
+    {
+        <div style="display:flex; gap:12px; margin-top:12px; flex-wrap:wrap">
+            @if (_allocation.Count > 0)
+            {
+                <button class="aiwms-btn aiwms-btn-secondary" @onclick="SaveDraftAsync" disabled="@_busy">Save Draft</button>
+                <button class="aiwms-btn aiwms-btn-success" @onclick="ConfirmSaveAsync" disabled="@_busy">Confirm &amp; Save</button>
+            }
+            @if (_status?.HasDraft == true && _allocation.Count == 0)
+            {
+                <button class="aiwms-btn aiwms-btn-secondary" @onclick="ViewDraftAsync" disabled="@_busy">View Draft (@_status.DraftRows rows)</button>
+            }
+        </div>
+    }
 
     @if (_progressTotal > 0)
     {
