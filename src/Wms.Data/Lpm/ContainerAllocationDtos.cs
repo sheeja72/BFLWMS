@@ -22,6 +22,9 @@ public record ContainerAllocationValidationResult(
 
 public record ValidationStep(string Label, bool Ok, string? Detail);
 
+/// <summary>Progress event from ProcessAllocationAsync. Current/Total are PO line items processed.</summary>
+public record AllocationProgress(int Current, int Total, string? CurrentItem);
+
 /// <summary>
 /// One row in the allocation preview / output. Each row = one PO line item
 /// distributed to one destination store.
