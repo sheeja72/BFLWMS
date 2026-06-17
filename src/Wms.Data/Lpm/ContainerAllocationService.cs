@@ -169,6 +169,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     public async Task<List<AllocationRow>> ProcessAllocationAsync(
         string contno,
         IProgress<AllocationProgress>? progress = null,
+        RunOption runOption = RunOption.FillSKUMax,
         CancellationToken ct = default)
     {
         var result = new List<AllocationRow>();
@@ -250,41 +251,60 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
             if (stores.Count == 0) continue;
 
-            // Pass 1: walk in order, fill each store up to its SKUMax.
+            // Pass 1: walk in order. Fill SKUMax = give each store min(SKUMax, remaining)
+            //         Round Robin = give 1 pc per pass, respecting SKUMax cap; loop until
+            //         qty=0 or all stores at cap.
             var allocs = new Dictionary<string, AllocationRow>(StringComparer.OrdinalIgnoreCase);
             var remaining = line.Qty;
-            foreach (var s in stores)
+
+            AllocationRow MakeRow(string sid, string sn, string country, string vg, int merch, int cap, int take)
             {
-                if (remaining <= 0) break;
-                var take = Math.Min(s.SKUMax, remaining);
-                if (take <= 0) continue;
                 orgByItem.TryGetValue(line.ItemCode, out var meta);
-                storeNameById.TryGetValue(s.StoreID, out var storeName);
                 itemMeta.TryGetValue(line.ItemCode, out var iMeta);
-                allocs[s.StoreID] = new AllocationRow(
-                    Contno: line.ContNo,
-                    OraPONo: line.OraPONo,
-                    ItemCode: line.ItemCode,
-                    ItemName: meta.itemname,
-                    Brand: meta.vendor,
-                    PoQty: line.Qty,
-                    StoreID: s.StoreID,
-                    StoreName: storeName,
-                    Country: s.Country,
-                    Division: iMeta.Division,
-                    VolumeGroup: s.VolumeGroup,
-                    SkuMax: s.SKUMax,
-                    AllocQty: take,
-                    MerchNeedMonth: s.MerchNeedMonth,
-                    DivCode: divCode,
-                    RoundRobinExtra: 0,
-                    LPM: line.LPM,
-                    LPMDt: line.LPMDt);
-                remaining -= take;
+                return new AllocationRow(
+                    Contno: line.ContNo, OraPONo: line.OraPONo, ItemCode: line.ItemCode,
+                    ItemName: meta.itemname, Brand: meta.vendor, PoQty: line.Qty,
+                    StoreID: sid, StoreName: sn, Country: country, Division: iMeta.Division,
+                    VolumeGroup: vg, SkuMax: cap, AllocQty: take, MerchNeedMonth: merch,
+                    DivCode: divCode, RoundRobinExtra: 0, LPM: line.LPM, LPMDt: line.LPMDt);
             }
 
-            // Pass 2: round-robin if there's still qty left after every store was filled to cap.
-            if (remaining > 0 && stores.Count > 0)
+            if (runOption == RunOption.FillSKUMax)
+            {
+                foreach (var s in stores)
+                {
+                    if (remaining <= 0) break;
+                    var take = Math.Min(s.SKUMax, remaining);
+                    if (take <= 0) continue;
+                    storeNameById.TryGetValue(s.StoreID, out var storeName);
+                    allocs[s.StoreID] = MakeRow(s.StoreID, storeName ?? "", s.Country, s.VolumeGroup, s.MerchNeedMonth, s.SKUMax, take);
+                    remaining -= take;
+                }
+            }
+            else // RoundRobin — 1 pc per store per pass, respect SKUMax
+            {
+                while (remaining > 0)
+                {
+                    bool any = false;
+                    foreach (var s in stores)
+                    {
+                        if (remaining <= 0) break;
+                        var current = allocs.TryGetValue(s.StoreID, out var row) ? row.AllocQty : 0;
+                        if (current >= s.SKUMax) continue;
+                        storeNameById.TryGetValue(s.StoreID, out var storeName);
+                        allocs[s.StoreID] = row is null
+                            ? MakeRow(s.StoreID, storeName ?? "", s.Country, s.VolumeGroup, s.MerchNeedMonth, s.SKUMax, 1)
+                            : row with { AllocQty = current + 1 };
+                        remaining--;
+                        any = true;
+                    }
+                    if (!any) break;  // every store at cap
+                }
+            }
+
+            // Pass 2: round-robin (ignoring SKUMax) if Fill SKUMax mode has remaining qty.
+            // In RoundRobin mode we respect the cap strictly — excess remains unallocated.
+            if (runOption == RunOption.FillSKUMax && remaining > 0 && stores.Count > 0)
             {
                 int idx = 0;
                 while (remaining > 0)
@@ -323,7 +343,8 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     }
 
     // ===================== Save Draft (LPMSIM tables) =====================
-    public async Task SaveDraftAsync(string country, string contno, IReadOnlyList<AllocationRow> rows, CancellationToken ct = default)
+    public async Task SaveDraftAsync(string country, string contno, IReadOnlyList<AllocationRow> rows,
+        string? warehouse = null, RunOption runOption = RunOption.FillSKUMax, CancellationToken ct = default)
     {
         if (rows.Count == 0) return;
         var totalQty = rows.Sum(r => r.AllocQty);
@@ -336,9 +357,10 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
         await c.ExecuteAsync(new CommandDefinition(@"
             INSERT INTO LPMSIM.dbo.WMS_ContAllocationDraftHeader
-                (Country, ContNo, RowCount1, TotalQty, SavedTS, SavedBy)
-            VALUES (@ct, @c, @rc, @tq, SYSDATETIME(), @u);",
-            new { ct = country, c = contno, rc = rows.Count, tq = totalQty, u = user.Name },
+                (Country, ContNo, Warehouse, RunOption, RowCount1, TotalQty, SavedTS, SavedBy)
+            VALUES (@ct, @c, @wh, @ro, @rc, @tq, SYSDATETIME(), @u);",
+            new { ct = country, c = contno, wh = warehouse, ro = runOption.ToString(),
+                  rc = rows.Count, tq = totalQty, u = user.Name },
             cancellationToken: ct));
 
         var detailSql = @"INSERT INTO LPMSIM.dbo.WMS_ContAllocationDraftDetail
@@ -409,8 +431,8 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     public async Task<AllocationStatus> GetStatusAsync(string country, string contno, CancellationToken ct = default)
     {
         await using var c = OpenOnPremBackup();
-        var d = await c.QueryFirstOrDefaultAsync<(int? RowCount1, int? TotalQty)>(new CommandDefinition(
-            "SELECT RowCount1, TotalQty FROM LPMSIM.dbo.WMS_ContAllocationDraftHeader WHERE Country = @ct AND ContNo = @c",
+        var d = await c.QueryFirstOrDefaultAsync<(int? RowCount1, int? TotalQty, string? RunOption)>(new CommandDefinition(
+            "SELECT RowCount1, TotalQty, RunOption FROM LPMSIM.dbo.WMS_ContAllocationDraftHeader WHERE Country = @ct AND ContNo = @c",
             new { ct = country, c = contno }, cancellationToken: ct));
         var hasDraft = d.RowCount1 is not null;
         var draftRows = d.RowCount1 ?? 0;
@@ -419,7 +441,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             "SELECT COUNT(*) AS Count1, MAX(TrnDate) AS Max1 FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
             new { c = contno }, cancellationToken: ct));
         var hasFinal = f.Count1 > 0;
-        return new AllocationStatus(hasDraft, hasFinal, draftRows, f.Count1, f.Max1);
+        return new AllocationStatus(hasDraft, hasFinal, draftRows, f.Count1, f.Max1, d.RunOption);
     }
 
     // ===================== Confirm & Save (Draft -> WMS_ContAllocationData) =====================

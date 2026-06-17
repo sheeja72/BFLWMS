@@ -47,4 +47,7 @@ public record AllocationRow(
     DateTime? LPMDt);
 
 /// <summary>State info shown above the buttons.</summary>
-public record AllocationStatus(bool HasDraft, bool HasFinal, int DraftRows, int FinalRows, DateTime? FinalAt);
+public record AllocationStatus(bool HasDraft, bool HasFinal, int DraftRows, int FinalRows, DateTime? FinalAt, string? DraftRunOption);
+
+/// <summary>How to distribute qty across eligible stores.</summary>
+public enum RunOption { FillSKUMax = 0, RoundRobin = 1 }
