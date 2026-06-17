@@ -11,6 +11,8 @@ IF OBJECT_ID('dbo.WMS_ContAllocationDraftHeader','U') IS NULL
 CREATE TABLE dbo.WMS_ContAllocationDraftHeader (
     Country     VARCHAR(20)   NOT NULL,
     ContNo      VARCHAR(15)   NOT NULL,
+    Warehouse   VARCHAR(50)   NULL,
+    RunOption   VARCHAR(20)   NULL,
     RowCount1   INT           NOT NULL,
     TotalQty    INT           NOT NULL,
     SavedTS     DATETIME2(0)  NOT NULL CONSTRAINT DF_WMS_ContAllocDraftHdr_TS DEFAULT(SYSDATETIME()),

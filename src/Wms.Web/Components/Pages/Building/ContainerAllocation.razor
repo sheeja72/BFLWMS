@@ -5,6 +5,7 @@
 @using Wms.Data.Lpm
 @attribute [Authorize(Roles = "Admin,WHManager")]
 @inject ContainerAllocationService Svc
+@inject ICurrentUser CurrentUser
 @inject Microsoft.JSInterop.IJSRuntime JS
 
 <PageTitle>WMS — Container Allocation</PageTitle>
@@ -16,7 +17,7 @@
 
 <div class="aiwms-section">
     <div class="aiwms-card-header">Inputs</div>
-    <div style="display:grid; grid-template-columns: 1fr 1fr 1.5fr auto auto; gap:12px; align-items:end; flex-wrap:wrap">
+    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr 180px auto auto; gap:12px; align-items:end; flex-wrap:wrap">
         <div>
             <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">COUNTRY *</label>
             <select @bind="_country" @bind:after="OnCountryChangedAsync" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-body); font-size:13px; background:white;">
@@ -29,6 +30,13 @@
             <select @bind="_warehouse" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-body); font-size:13px; background:white;">
                 <option value="">-- Select --</option>
                 @foreach (var w in _warehouses) { <option value="@w">@w</option> }
+            </select>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">RUN OPTION</label>
+            <select @bind="_runOption" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-body); font-size:13px; background:white;">
+                <option value="FillSKUMax">Fill SKUMax</option>
+                <option value="RoundRobin">Round Robin</option>
             </select>
         </div>
         <div>
@@ -45,7 +53,6 @@
         <div style="display:flex; gap:12px; margin-top:12px; flex-wrap:wrap">
             @if (_allocation.Count > 0)
             {
-                <button class="aiwms-btn aiwms-btn-secondary" @onclick="SaveDraftAsync" disabled="@_busy">Save Draft</button>
                 <button class="aiwms-btn aiwms-btn-success" @onclick="ConfirmSaveAsync" disabled="@_busy">Confirm &amp; Save</button>
             }
             @if (_status?.HasDraft == true)
@@ -318,6 +325,7 @@
     private string _country = "";
     private string _warehouse = "";
     private string _contno = "";
+    private string _runOption = "FillSKUMax";
     private bool _busy;
     private string _message = "";
     private bool _messageIsError;
@@ -344,6 +352,17 @@
     {
         try { _countries = await Svc.GetCountriesAsync(); }
         catch (Exception ex) { ShowError($"Failed to load countries: {ex.Message}"); }
+
+        // Default Country + Warehouse from the logged-in user's WmsUser row.
+        await CurrentUser.EnsureLoadedAsync();
+        if (!string.IsNullOrWhiteSpace(CurrentUser.Country) && _countries.Contains(CurrentUser.Country!))
+        {
+            _country = CurrentUser.Country!;
+            try { _warehouses = await Svc.GetWarehousesAsync(_country); }
+            catch { _warehouses = new(); }
+            if (!string.IsNullOrWhiteSpace(CurrentUser.Warehouse) && _warehouses.Contains(CurrentUser.Warehouse!))
+                _warehouse = CurrentUser.Warehouse!;
+        }
     }
 
     private async Task OnCountryChangedAsync()
@@ -366,7 +385,13 @@
         {
             _status = null; return;
         }
-        try { _status = await Svc.GetStatusAsync(_country, _contno); }
+        try
+        {
+            _status = await Svc.GetStatusAsync(_country, _contno);
+            // Recall prior Run Option when revisiting the same container.
+            if (!string.IsNullOrEmpty(_status?.DraftRunOption))
+                _runOption = _status.DraftRunOption!;
+        }
         catch { _status = null; }
     }
 
@@ -395,27 +420,22 @@
                 _progressCurrent = p.Current; _progressTotal = p.Total; _progressItem = p.CurrentItem;
                 await InvokeAsync(StateHasChanged);
             });
-            _allocation = await Svc.ProcessAllocationAsync(_contno, progress);
+            var ro = _runOption == "RoundRobin" ? RunOption.RoundRobin : RunOption.FillSKUMax;
+            _allocation = await Svc.ProcessAllocationAsync(_contno, progress, ro);
             if (_allocation.Count == 0)
+            {
                 ShowError("No allocation rows produced. Check LPM_EOM_Output + LPM_SKUMaxRule coverage.");
+            }
             else
-                ShowInfo($"Allocation computed: {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
+            {
+                // Auto-save draft so the user doesn't have to click a separate button.
+                await Svc.SaveDraftAsync(_country, _contno, _allocation, _warehouse, ro);
+                await RefreshStatusAsync();
+                ShowInfo($"Allocation computed and draft saved: {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
+            }
         }
         catch (Exception ex) { ShowError($"Process failed: {ex.Message}"); }
         finally { _busy = false; _progressTotal = 0; }
-    }
-
-    private async Task SaveDraftAsync()
-    {
-        _busy = true; _message = "";
-        try
-        {
-            await Svc.SaveDraftAsync(_country, _contno, _allocation);
-            await RefreshStatusAsync();
-            ShowInfo($"Draft saved ({_allocation.Count} rows).");
-        }
-        catch (Exception ex) { ShowError($"Save draft failed: {ex.Message}"); }
-        finally { _busy = false; }
     }
 
     private async Task ViewDraftAsync()
@@ -588,7 +608,10 @@
                     g.Key.Country,
                     storesPerCountry.TryGetValue(g.Key.Country, out var n) ? n : 0,
                     g.Key.OraPONo, g.Key.Division,
-                    g.Sum(x => x.PoQty), g.Sum(x => x.AllocQty)));
+                    // PO Qty per (Country, PO, Division) = sum of distinct PoQty per ItemCode
+                    // (raw .Sum multi-counts because each item × store row repeats the same PoQty)
+                    g.GroupBy(x => x.ItemCode).Sum(ig => ig.First().PoQty),
+                    g.Sum(x => x.AllocQty)));
             if (_sortKey is null)
                 return rows.OrderBy(r => r.Country).ThenBy(r => r.OraPONo).ThenBy(r => r.Division);
             Func<CountrySummaryRowVm, object?> k = _sortKey switch {
