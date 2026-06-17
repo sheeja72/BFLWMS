@@ -41,7 +41,7 @@ CREATE TABLE dbo.WMS_ContAllocationDraftDetail (
     PrintFlag         VARCHAR(1)    NULL,
     RfidFlag          VARCHAR(1)    NULL,
     Company           VARCHAR(30)   NULL,
-    ShopCode          VARCHAR(5)    NULL,
+    StoreID           VARCHAR(20)   NULL,
     Itemname          VARCHAR(150)  NULL,
     Barcode           VARCHAR(30)   NULL,
     SalesPrice        VARCHAR(30)   NULL,

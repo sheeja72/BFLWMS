@@ -173,7 +173,7 @@
                         <th style="cursor:pointer" @onclick='() => Sort("Brand")'>Brand @SortArrow("Brand")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("PoQty")'>PO Qty @SortArrow("PoQty")</th>
-                        <th style="cursor:pointer" @onclick='() => Sort("ShopCode")'>ShopCode @SortArrow("ShopCode")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("StoreID")'>Store ID @SortArrow("StoreID")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("StoreName")'>Store Name @SortArrow("StoreName")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("Country")'>Country @SortArrow("Country")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("VolumeGroup")'>VolumeGroup @SortArrow("VolumeGroup")</th>
@@ -189,7 +189,7 @@
                         <tr>
                             <td>@r.OraPONo</td><td>@r.ItemCode</td><td>@r.ItemName</td><td>@r.Brand</td><td>@r.Division</td>
                             <td style="text-align:right">@r.PoQty</td>
-                            <td>@r.ShopCode</td><td>@r.StoreName</td><td>@r.Country</td>
+                            <td>@r.StoreID</td><td>@r.StoreName</td><td>@r.Country</td>
                             <td>@r.VolumeGroup</td><td style="text-align:right">@r.MerchNeedMonth</td>
                             <td style="text-align:right">@r.SkuMax</td>
                             <td style="text-align:right">@r.AllocQty</td>
@@ -232,7 +232,7 @@
             <table class="aiwms-table aiwms-table-dense">
                 <thead>
                     <tr>
-                        <th style="cursor:pointer" @onclick='() => Sort("ShopCode")'>ShopCode @SortArrow("ShopCode")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("StoreID")'>Store ID @SortArrow("StoreID")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("StoreName")'>Store Name @SortArrow("StoreName")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("Country")'>Country @SortArrow("Country")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("VolumeGroup")'>VolumeGroup @SortArrow("VolumeGroup")</th>
@@ -247,7 +247,7 @@
                     @foreach (var g in StoreRows)
                     {
                         <tr>
-                            <td>@g.ShopCode</td><td>@g.StoreName</td><td>@g.Country</td><td>@g.VolumeGroup</td>
+                            <td>@g.StoreID</td><td>@g.StoreName</td><td>@g.Country</td><td>@g.VolumeGroup</td>
                             <td style="text-align:right">@g.MerchNeedMonth</td><td>@g.Division</td><td>@g.Brand</td>
                             <td style="text-align:right">@g.PoQtySum</td>
                             <td style="text-align:right">@g.AllocSum</td>
@@ -451,12 +451,12 @@
     private async Task ExportCsvAsync()
     {
         var sb = new StringBuilder();
-        sb.AppendLine("Contno,OraPONo,ItemCode,ItemName,Brand,PoQty,ShopCode,StoreName,Country,Division,VolumeGroup,SkuMax,AllocQty,RoundRobinExtra,MerchNeedMonth,LPM,LPMDt");
+        sb.AppendLine("Contno,OraPONo,ItemCode,ItemName,Brand,PoQty,StoreID,StoreName,Country,Division,VolumeGroup,SkuMax,AllocQty,RoundRobinExtra,MerchNeedMonth,LPM,LPMDt");
         foreach (var r in Filtered)
         {
             sb.Append(Csv(r.Contno)).Append(',').Append(Csv(r.OraPONo)).Append(',').Append(Csv(r.ItemCode)).Append(',')
               .Append(Csv(r.ItemName)).Append(',').Append(Csv(r.Brand)).Append(',').Append(r.PoQty).Append(',')
-              .Append(Csv(r.ShopCode)).Append(',').Append(Csv(r.StoreName)).Append(',').Append(Csv(r.Country)).Append(',')
+              .Append(Csv(r.StoreID)).Append(',').Append(Csv(r.StoreName)).Append(',').Append(Csv(r.Country)).Append(',')
               .Append(Csv(r.Division)).Append(',').Append(Csv(r.VolumeGroup)).Append(',')
               .Append(r.SkuMax).Append(',').Append(r.AllocQty).Append(',').Append(r.RoundRobinExtra).Append(',')
               .Append(r.MerchNeedMonth).Append(',').Append(Csv(r.LPM)).Append(',').Append(r.LPMDt?.ToString("yyyy-MM-dd"))
@@ -504,7 +504,7 @@
                     "Brand" => r => r.Brand,
                     "Division" => r => r.Division,
                     "PoQty" => r => r.PoQty,
-                    "ShopCode" => r => r.ShopCode,
+                    "StoreID" => r => r.StoreID,
                     "StoreName" => r => r.StoreName,
                     "Country" => r => r.Country,
                     "VolumeGroup" => r => r.VolumeGroup,
@@ -523,7 +523,7 @@
 
     // --- Grouped view row types + getters (sorted by _sortKey if applicable) ---
     private record ItemSummaryRowVm(string OraPONo, string ItemCode, string? ItemName, string? Brand, string? Division, int PoQty, int TotalAlloc, int Stores);
-    private record StoreRowVm(string ShopCode, string? StoreName, string Country, string VolumeGroup, int MerchNeedMonth, string? Division, string Brand, int PoQtySum, int AllocSum);
+    private record StoreRowVm(string StoreID, string? StoreName, string Country, string VolumeGroup, int MerchNeedMonth, string? Division, string Brand, int PoQtySum, int AllocSum);
     private record CountrySummaryRowVm(string Country, int StoresCount, string OraPONo, string? Division, int PoQty, int AllocQty);
 
     private IEnumerable<ItemSummaryRowVm> ItemSummaryRows
@@ -552,20 +552,20 @@
         get
         {
             var rows = FilteredAll
-                .GroupBy(r => r.ShopCode)
+                .GroupBy(r => r.StoreID)
                 .Select(g => new StoreRowVm(
                     g.Key, g.First().StoreName, g.First().Country, g.First().VolumeGroup,
                     g.First().MerchNeedMonth, g.First().Division,
                     string.Join(", ", g.Select(x => x.Brand).Where(b => b is not null).Distinct()),
                     g.Sum(x => x.PoQty), g.Sum(x => x.AllocQty)));
             if (_sortKey is null)
-                return rows.OrderBy(r => r.ShopCode);
+                return rows.OrderBy(r => r.StoreID);
             Func<StoreRowVm, object?> k = _sortKey switch {
-                "ShopCode" => r => r.ShopCode, "StoreName" => r => r.StoreName, "Country" => r => r.Country,
+                "StoreID" => r => r.StoreID, "StoreName" => r => r.StoreName, "Country" => r => r.Country,
                 "VolumeGroup" => r => r.VolumeGroup, "MerchNeedMonth" => r => r.MerchNeedMonth,
                 "Division" => r => r.Division, "Brand" => r => r.Brand,
                 "PoQtySum" => r => r.PoQtySum, "AllocSum" => r => r.AllocSum,
-                _ => r => r.ShopCode,
+                _ => r => r.StoreID,
             };
             return _sortAsc ? rows.OrderBy(k) : rows.OrderByDescending(k);
         }
@@ -575,12 +575,12 @@
     {
         get
         {
-            // Stores Count = distinct ShopCode per country (across the whole filtered set,
+            // Stores Count = distinct StoreID per country (across the whole filtered set,
             // not just within the (Country, PO, Division) grouping)
             var all = FilteredAll.ToList();
             var storesPerCountry = all
                 .GroupBy(r => r.Country)
-                .ToDictionary(g => g.Key, g => g.Select(r => r.ShopCode).Distinct().Count());
+                .ToDictionary(g => g.Key, g => g.Select(r => r.StoreID).Distinct().Count());
 
             var rows = all
                 .GroupBy(r => new { r.Country, r.OraPONo, r.Division })
