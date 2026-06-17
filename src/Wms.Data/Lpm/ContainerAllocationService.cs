@@ -268,7 +268,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                     ItemName: meta.itemname,
                     Brand: meta.vendor,
                     PoQty: line.Qty,
-                    ShopCode: s.StoreID,
+                    StoreID: s.StoreID,
                     StoreName: storeName,
                     Country: s.Country,
                     Division: iMeta.Division,
@@ -306,7 +306,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                         allocs[s.StoreID] = new AllocationRow(
                             Contno: line.ContNo, OraPONo: line.OraPONo, ItemCode: line.ItemCode,
                             ItemName: meta2.itemname, Brand: meta2.vendor, PoQty: line.Qty,
-                            ShopCode: s.StoreID, StoreName: sn2, Country: s.Country,
+                            StoreID: s.StoreID, StoreName: sn2, Country: s.Country,
                             Division: im2.Division, VolumeGroup: s.VolumeGroup, SkuMax: s.SKUMax,
                             AllocQty: 1, MerchNeedMonth: s.MerchNeedMonth, DivCode: divCode,
                             RoundRobinExtra: 1, LPM: line.LPM, LPMDt: line.LPMDt);
@@ -343,18 +343,18 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
         var detailSql = @"INSERT INTO LPMSIM.dbo.WMS_ContAllocationDraftDetail
             (Country, ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode,
-             Qty, QtyIssue, ShopCode, TcmContno, Itemname, BuildingCategory,
+             Qty, QtyIssue, StoreID, TcmContno, Itemname, BuildingCategory,
              LPMDt, ORAPONo, Division, Remarks)
           VALUES
             (@Country, @ContNo, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)),
-             @UPC, @ItemCode, @GroupCode, @Qty, 0, @ShopCode, @ContNo, @ItemName, @Country,
+             @UPC, @ItemCode, @GroupCode, @Qty, 0, @StoreID, @ContNo, @ItemName, @Country,
              @LPMDt, @OraPONo, @Division, @Remarks);";
         foreach (var r in rows)
         {
             await c.ExecuteAsync(new CommandDefinition(detailSql, new
             {
                 Country = country, ContNo = r.Contno, UPC = r.ItemCode, ItemCode = r.ItemCode,
-                GroupCode = r.VolumeGroup, Qty = r.AllocQty, ShopCode = r.ShopCode,
+                GroupCode = r.VolumeGroup, Qty = r.AllocQty, StoreID = r.StoreID,
                 ItemName = r.ItemName, LPMDt = r.LPMDt, OraPONo = r.OraPONo,
                 Division = r.Division,
                 Remarks = r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null,
@@ -370,9 +370,9 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         // persisted on the detail row so they come back as defaults — preview
         // grid still works, sums/totals stay correct.
         var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName,
-                                       int? Qty, string? ShopCode, string? GroupCode, string? Division,
+                                       int? Qty, string? StoreID, string? GroupCode, string? Division,
                                        string? Remarks, DateTime? LPMDt)>(new CommandDefinition(@"
-            SELECT ContNo, ORAPONo, Itemcode, Itemname, Qty, ShopCode, GroupCode, Division, Remarks, LPMDt
+            SELECT ContNo, ORAPONo, Itemcode, Itemname, Qty, StoreID, GroupCode, Division, Remarks, LPMDt
             FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail WITH (NOLOCK)
             WHERE Country = @ct AND ContNo = @c
             ORDER BY IdNo",
@@ -385,7 +385,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             ItemName: r.ItemName,
             Brand: null,
             PoQty: r.Qty ?? 0,
-            ShopCode: r.ShopCode ?? "",
+            StoreID: r.StoreID ?? "",
             StoreName: null,
             Country: country,
             Division: r.Division,
@@ -445,13 +445,13 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 INSERT INTO LPMSIM.dbo.WMS_ContAllocationData
                   (ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode, Season, Department, Division,
                    Result, FinalResult, ResultType, Qty, QtyIssue, OrPrice, PrintFlag, RfidFlag,
-                   Company, ShopCode, Itemname, Barcode, SalesPrice, RefNo, Mark, Uid,
+                   Company, StoreID, Itemname, Barcode, SalesPrice, RefNo, Mark, Uid,
                    RStatus, RDateTime, PStatus, PDateTime, Excess, TcmContno, BuildingCategory,
                    LPMDt, LPMBoxNO, ORAPONo, Style, Remarks)
                 SELECT
                    ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode, Season, Department, Division,
                    Result, FinalResult, ResultType, Qty, QtyIssue, OrPrice, PrintFlag, RfidFlag,
-                   Company, ShopCode, Itemname, Barcode, SalesPrice, RefNo, Mark, Uid,
+                   Company, StoreID, Itemname, Barcode, SalesPrice, RefNo, Mark, Uid,
                    RStatus, RDateTime, PStatus, PDateTime, Excess, TcmContno, BuildingCategory,
                    LPMDt, LPMBoxNO, ORAPONo, Style, Remarks
                 FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail
@@ -466,11 +466,11 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         // Fallback path — no draft, insert in-memory rows directly.
         var insertSql = @"INSERT INTO LPMSIM.dbo.WMS_ContAllocationData
             (ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode, Division, Qty, QtyIssue,
-             ShopCode, TcmContno, ORAPONo, LPMDt, Itemname, BuildingCategory, Remarks)
+             StoreID, TcmContno, ORAPONo, LPMDt, Itemname, BuildingCategory, Remarks)
           VALUES
             (@ContNo, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)),
              @UPC, @ItemCode, @GroupCode, @Division, @Qty, 0,
-             @ShopCode, @ContNo, @OraPONo, @LPMDt, @ItemName, @Country, @Remarks);";
+             @StoreID, @ContNo, @OraPONo, @LPMDt, @ItemName, @Country, @Remarks);";
         var affected = 0;
         foreach (var r in rows)
         {
@@ -478,7 +478,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             {
                 ContNo    = r.Contno,  UPC = r.ItemCode, ItemCode = r.ItemCode,
                 GroupCode = r.VolumeGroup, Division = r.Division, Qty = r.AllocQty,
-                ShopCode  = r.ShopCode, OraPONo = r.OraPONo, LPMDt = r.LPMDt,
+                StoreID   = r.StoreID, OraPONo = r.OraPONo, LPMDt = r.LPMDt,
                 ItemName  = r.ItemName, Country = r.Country,
                 Remarks   = r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null,
             }, cancellationToken: ct));

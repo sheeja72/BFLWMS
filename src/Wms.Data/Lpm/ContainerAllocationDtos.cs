@@ -33,7 +33,7 @@ public record AllocationRow(
     string? ItemName,
     string? Brand,
     int     PoQty,
-    string  ShopCode,
+    string  StoreID,
     string? StoreName,
     string  Country,
     string? Division,
