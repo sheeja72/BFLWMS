@@ -254,7 +254,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             if (line.Qty <= 0) continue;
             if (!divByItem.TryGetValue(line.ItemCode, out var divCode) || divCode == 0) continue;
 
-            var stores = (await c.QueryAsync<(string StoreID, string Country, string VolumeGroup, int MerchNeedMonth, int SKUMax)>(
+            var rawStores = (await c.QueryAsync<(string StoreID, string Country, string VolumeGroup, int MerchNeedMonth, int SKUMax)>(
                 new CommandDefinition(@"
                     SELECT s.StoreID, s.Country, s.VolumeGroup,
                            ISNULL(s.MerchNeedMonth, 0) AS MerchNeedMonth,
@@ -271,7 +271,19 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                       AND s.Year1   = YEAR(SYSDATETIME())
                       AND s.VolumeGroup IS NOT NULL
                     ORDER BY s.VolumeGroup, s.MerchNeedMonth DESC",
-                    new { q = line.Qty, d = divCode }, cancellationToken: ct))).AsList();
+                    new { q = line.Qty, d = divCode }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+
+            // CRITICAL: LPM_SKUMaxRule may have multiple active rules with overlapping
+            // stock ranges for the same (Country, DivCode, GroupCode). That causes the
+            // join to return DUPLICATE rows per store. If we iterate raw, Round Robin
+            // gives the same store N pieces per pass (over-allocation) and Fill SKUMax
+            // overwrites its own dictionary entry while still decrementing remaining
+            // (under-allocation). Dedupe by StoreID, keeping the first row per the
+            // ORDER BY priority (VolumeGroup A→B→C, MerchNeedMonth DESC).
+            var stores = rawStores
+                .GroupBy(s => s.StoreID, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
 
             if (stores.Count == 0) continue;
 
@@ -363,6 +375,15 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             result.AddRange(allocs.Values);
         }
 
+        // Sanity check: total allocated must equal sum of PO line qtys (Fill SKUMax)
+        // or be <= total in RoundRobin (excess unallocated when all stores at cap).
+        var poTotal = lines.Sum(l => l.Qty);
+        var allocTotal = result.Sum(r => r.AllocQty);
+        if (runOption == RunOption.FillSKUMax && allocTotal != poTotal)
+            Console.Error.WriteLine($"[ContainerAllocation] WARN: Fill SKUMax allocated {allocTotal} vs PO total {poTotal} (delta {allocTotal - poTotal}).");
+        if (runOption == RunOption.RoundRobin && allocTotal > poTotal)
+            Console.Error.WriteLine($"[ContainerAllocation] WARN: RoundRobin over-allocated {allocTotal} vs PO total {poTotal} (delta {allocTotal - poTotal}).");
+
         return result;
     }
 
@@ -408,6 +429,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         dt.Columns.Add("Itemcode",         typeof(string));
         dt.Columns.Add("GroupCode",        typeof(string));
         dt.Columns.Add("Qty",              typeof(int));
+        dt.Columns.Add("PoQty",            typeof(int));
         dt.Columns.Add("QtyIssue",         typeof(int));
         dt.Columns.Add("StoreID",          typeof(string));
         dt.Columns.Add("TcmContno",        typeof(string));
@@ -433,6 +455,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 r.ItemCode,
                 r.VolumeGroup,
                 r.AllocQty,
+                r.PoQty,
                 0,
                 r.StoreID,
                 r.Contno,
@@ -473,13 +496,13 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         // persisted on the detail row so they come back as defaults — preview
         // grid still works, sums/totals stay correct.
         var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName,
-                                       int? Qty, string? StoreID, string? GroupCode, string? Division,
+                                       int? Qty, int? PoQty, string? StoreID, string? GroupCode, string? Division,
                                        string? Remarks, DateTime? LPMDt)>(new CommandDefinition(@"
-            SELECT ContNo, ORAPONo, Itemcode, Itemname, Qty, StoreID, GroupCode, Division, Remarks, LPMDt
+            SELECT ContNo, ORAPONo, Itemcode, Itemname, Qty, PoQty, StoreID, GroupCode, Division, Remarks, LPMDt
             FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail WITH (NOLOCK)
             WHERE Country = @ct AND ContNo = @c
             ORDER BY IdNo",
-            new { ct = country, c = contno }, cancellationToken: ct))).AsList();
+            new { ct = country, c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
 
         return rows.Select(r => new AllocationRow(
             Contno: r.ContNo,
@@ -487,7 +510,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             ItemCode: r.ItemCode ?? "",
             ItemName: r.ItemName,
             Brand: null,
-            PoQty: r.Qty ?? 0,
+            PoQty: r.PoQty ?? 0,
             StoreID: r.StoreID ?? "",
             StoreName: null,
             Country: country,
