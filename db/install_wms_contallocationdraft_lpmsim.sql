@@ -38,6 +38,7 @@ CREATE TABLE dbo.WMS_ContAllocationDraftDetail (
     FinalResult       VARCHAR(100)  NULL,
     ResultType        VARCHAR(3)    NULL,
     Qty               INT           NULL,
+    PoQty             INT           NULL,
     QtyIssue          INT           NULL,
     OrPrice           FLOAT         NULL,
     PrintFlag         VARCHAR(1)    NULL,
