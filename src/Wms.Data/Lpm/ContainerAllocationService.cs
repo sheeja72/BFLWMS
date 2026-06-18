@@ -23,16 +23,28 @@ namespace Wms.Data.Lpm;
 /// </summary>
 public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICurrentUser user)
 {
+    // Default 15s post-login timeout is too tight when the on-prem SQL is busy
+    // (saw a 14003ms post-login on a real Process call). Bump to 60s for this
+    // service only — every other caller stays on the configured default.
+    private const int ConnectTimeoutSeconds = 60;
+    private const int CommandTimeoutSeconds = 60;
+
+    private static string WithConnectTimeout(string cs)
+    {
+        var b = new SqlConnectionStringBuilder(cs) { ConnectTimeout = ConnectTimeoutSeconds };
+        return b.ConnectionString;
+    }
+
     private SqlConnection OpenOnPremBackup()
     {
-        var c = new SqlConnection(resolver.GetOnPremBackupConnectionString());
+        var c = new SqlConnection(WithConnectTimeout(resolver.GetOnPremBackupConnectionString()));
         c.Open();
         return c;
     }
 
     private SqlConnection OpenWms()
     {
-        var c = new SqlConnection(resolver.GetWmsAzureConnectionString());
+        var c = new SqlConnection(WithConnectTimeout(resolver.GetWmsAzureConnectionString()));
         c.Open();
         return c;
     }
@@ -77,8 +89,15 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     }
 
     // ===================== Validate (Process button — Phase 1) =====================
+    // 5 logical steps, but only 4 round-trips:
+    //   1) Contreceipt.TCMNo                              — 1 round-trip (gate)
+    //   2) usa.KNBBoxes                                   — 1 round-trip (gate)
+    //   3) 3-way qty sums                                 — 1 round-trip (3 sub-selects)
+    //   4+5) WmsOpenBox + WmsBuildingCompletion           — 1 round-trip (combined)
     public async Task<ContainerAllocationValidationResult> ValidateAsync(
-        string country, string contno, CancellationToken ct = default)
+        string country, string contno,
+        IProgress<AllocationProgress>? progress = null,
+        CancellationToken ct = default)
     {
         var steps = new List<ValidationStep>();
         if (string.IsNullOrWhiteSpace(contno))
@@ -92,63 +111,67 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             return new ContainerAllocationValidationResult(false, steps);
         }
         contno = contno.Trim();
+        const int TOTAL = 5;
 
-        // 1. Contreceipt.TCMNo
         await using (var c = OpenOnPremBackup())
         {
+            // 1. Contreceipt.TCMNo
+            progress?.Report(new AllocationProgress(1, TOTAL, "Validating: Contreceipt"));
             var ok = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
                 "SELECT TOP 1 1 FROM bfldata.dbo.Contreceipt WITH (NOLOCK) WHERE TCMNo = @c",
-                new { c = contno }, cancellationToken: ct)) == 1;
+                new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)) == 1;
             steps.Add(new ValidationStep(
                 "Container exists in bfldata.Contreceipt (TCMNo)",
                 ok,
                 ok ? null : $"No row in bfldata.Contreceipt with TCMNo = '{contno}'."));
             if (!ok) return new ContainerAllocationValidationResult(false, steps);
 
-            // 2. usa.knbboxes
+            // 2. usa.KNBBoxes
+            progress?.Report(new AllocationProgress(2, TOTAL, "Validating: KNBBoxes"));
             var ok2 = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
                 "SELECT TOP 1 1 FROM usa.dbo.KNBBoxes WITH (NOLOCK) WHERE contno = @c",
-                new { c = contno }, cancellationToken: ct)) == 1;
+                new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)) == 1;
             steps.Add(new ValidationStep(
                 "Container exists in usa.KNBBoxes",
                 ok2,
                 ok2 ? null : $"No row in usa.KNBBoxes with contno = '{contno}'."));
             if (!ok2) return new ContainerAllocationValidationResult(false, steps);
 
-            // 3. Three-way qty match: USAOrgFile vs usaorgfile_LPM vs hodata..vUSAOrder
-            var q1 = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-                "SELECT ISNULL(SUM(orgqty),0) FROM usa.dbo.USAOrgFile WITH (NOLOCK) WHERE ContNo = @c",
-                new { c = contno }, cancellationToken: ct)) ?? 0;
-            var q2 = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-                "SELECT ISNULL(SUM(orgqty),0) FROM usa.dbo.usaorgfile_LPM WITH (NOLOCK) WHERE ContNo = @c",
-                new { c = contno }, cancellationToken: ct)) ?? 0;
-            var q3 = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-                "SELECT ISNULL(SUM(qty),0) FROM hodata.dbo.vUSAOrder WITH (NOLOCK) WHERE refno = @c",
-                new { c = contno }, cancellationToken: ct)) ?? 0;
-            var qtyOk = q1 > 0 && q1 == q2 && q2 == q3;
+            // 3. Three-way qty match — combined into ONE round-trip (3 sub-selects).
+            progress?.Report(new AllocationProgress(3, TOTAL, "Validating: three-way qty match"));
+            var qty = await c.QueryFirstAsync<(int Q1, int Q2, int Q3)>(new CommandDefinition(@"
+                SELECT
+                    (SELECT ISNULL(SUM(orgqty),0) FROM usa.dbo.USAOrgFile     WITH (NOLOCK) WHERE ContNo = @c) AS Q1,
+                    (SELECT ISNULL(SUM(orgqty),0) FROM usa.dbo.usaorgfile_LPM WITH (NOLOCK) WHERE ContNo = @c) AS Q2,
+                    (SELECT ISNULL(SUM(qty),0)    FROM hodata.dbo.vUSAOrder   WITH (NOLOCK) WHERE refno  = @c) AS Q3",
+                new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            var qtyOk = qty.Q1 > 0 && qty.Q1 == qty.Q2 && qty.Q2 == qty.Q3;
             steps.Add(new ValidationStep(
                 "Three-way qty match (USAOrgFile = usaorgfile_LPM = hodata.vUSAOrder)",
                 qtyOk,
-                qtyOk ? $"All three = {q1}." : $"USAOrgFile={q1}, usaorgfile_LPM={q2}, vUSAOrder={q3} — must be > 0 and equal."));
+                qtyOk ? $"All three = {qty.Q1}." : $"USAOrgFile={qty.Q1}, usaorgfile_LPM={qty.Q2}, vUSAOrder={qty.Q3} — must be > 0 and equal."));
             if (!qtyOk) return new ContainerAllocationValidationResult(false, steps);
         }
 
-        // 4. Not already started building (Azure WMS — any WmsOpenBox row for this Contno)
-        // 5. Not already completed (Azure WMS — WmsBuildingCompletion)
+        // 4+5: WmsOpenBox + WmsBuildingCompletion — combined into ONE round-trip.
+        progress?.Report(new AllocationProgress(4, TOTAL, "Validating: build status"));
         await using (var w = OpenWms())
         {
-            var building = await w.ExecuteScalarAsync<int?>(new CommandDefinition(
-                "SELECT TOP 1 1 FROM dbo.WmsOpenBox WITH (NOLOCK) WHERE Contno = @c",
-                new { c = contno }, cancellationToken: ct)) == 1;
+            var status = await w.QueryFirstAsync<(int Building, int Completed)>(new CommandDefinition(@"
+                SELECT
+                    (SELECT COUNT(*) FROM dbo.WmsOpenBox            WITH (NOLOCK) WHERE Contno = @c)                                 AS Building,
+                    (SELECT COUNT(*) FROM dbo.WmsBuildingCompletion WITH (NOLOCK) WHERE Country = @ct AND ContNo = @c)                AS Completed",
+                new { ct = country, c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+
+            var building = status.Building > 0;
             steps.Add(new ValidationStep(
                 "Container not yet being built (no WmsOpenBox row)",
                 !building,
                 building ? $"Container {contno} already has open box(es) in WmsOpenBox." : null));
             if (building) return new ContainerAllocationValidationResult(false, steps);
 
-            var completed = await w.ExecuteScalarAsync<int?>(new CommandDefinition(
-                "SELECT TOP 1 1 FROM dbo.WmsBuildingCompletion WITH (NOLOCK) WHERE Country = @ct AND ContNo = @c",
-                new { ct = country, c = contno }, cancellationToken: ct)) == 1;
+            progress?.Report(new AllocationProgress(5, TOTAL, "Validating: completion status"));
+            var completed = status.Completed > 0;
             steps.Add(new ValidationStep(
                 "Container not yet completed (no WmsBuildingCompletion row)",
                 !completed,

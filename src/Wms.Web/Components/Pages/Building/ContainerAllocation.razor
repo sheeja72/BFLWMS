@@ -414,12 +414,14 @@
         _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
         try
         {
-            _validation = await Svc.ValidateAsync(_country, _contno);
-            if (!_validation.Ok) { ShowError("Validation failed — see steps below."); return; }
             var progress = new Progress<AllocationProgress>(async p => {
                 _progressCurrent = p.Current; _progressTotal = p.Total; _progressItem = p.CurrentItem;
                 await InvokeAsync(StateHasChanged);
             });
+            _validation = await Svc.ValidateAsync(_country, _contno, progress);
+            if (!_validation.Ok) { ShowError("Validation failed — see steps below."); return; }
+            // Reset progress for the Process phase so the bar starts fresh at 0/N.
+            _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
             var ro = _runOption == "RoundRobin" ? RunOption.RoundRobin : RunOption.FillSKUMax;
             _allocation = await Svc.ProcessAllocationAsync(_contno, progress, ro);
             if (_allocation.Count == 0)
