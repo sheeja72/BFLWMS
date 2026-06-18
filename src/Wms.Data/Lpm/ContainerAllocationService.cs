@@ -1,3 +1,4 @@
+using System.Data;
 using Wms.Core;
 using Wms.Data.Configuration;
 using Dapper;
@@ -366,45 +367,102 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     }
 
     // ===================== Save Draft (LPMSIM tables) =====================
+    // Detail rows go via SqlBulkCopy — 7000+ row drafts went from
+    // "per-row INSERT one at a time, minutes of wall-time" to a couple
+    // of seconds. Header still uses a normal INSERT (one row).
     public async Task SaveDraftAsync(string country, string contno, IReadOnlyList<AllocationRow> rows,
-        string? warehouse = null, RunOption runOption = RunOption.FillSKUMax, CancellationToken ct = default)
+        string? warehouse = null, RunOption runOption = RunOption.FillSKUMax,
+        IProgress<AllocationProgress>? progress = null,
+        CancellationToken ct = default)
     {
         if (rows.Count == 0) return;
         var totalQty = rows.Sum(r => r.AllocQty);
         await using var c = OpenOnPremBackup();
-        // Wipe any prior draft for this (Country, ContNo) so re-Save replaces cleanly.
+
+        // 1) Wipe any prior draft for this (Country, ContNo) so re-Save replaces cleanly.
+        progress?.Report(new AllocationProgress(0, rows.Count, "Saving draft: cleaning prior data"));
         await c.ExecuteAsync(new CommandDefinition(@"
             DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail WHERE Country = @ct AND ContNo = @c;
             DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftHeader WHERE Country = @ct AND ContNo = @c;",
-            new { ct = country, c = contno }, cancellationToken: ct));
+            new { ct = country, c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
 
+        // 2) Header — single row.
+        progress?.Report(new AllocationProgress(0, rows.Count, "Saving draft: writing header"));
         await c.ExecuteAsync(new CommandDefinition(@"
             INSERT INTO LPMSIM.dbo.WMS_ContAllocationDraftHeader
                 (Country, ContNo, Warehouse, RunOption, RowCount1, TotalQty, SavedTS, SavedBy)
             VALUES (@ct, @c, @wh, @ro, @rc, @tq, SYSDATETIME(), @u);",
             new { ct = country, c = contno, wh = warehouse, ro = runOption.ToString(),
                   rc = rows.Count, tq = totalQty, u = user.Name },
-            cancellationToken: ct));
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
 
-        var detailSql = @"INSERT INTO LPMSIM.dbo.WMS_ContAllocationDraftDetail
-            (Country, ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode,
-             Qty, QtyIssue, StoreID, TcmContno, Itemname, BuildingCategory,
-             LPMDt, ORAPONo, Division, Remarks)
-          VALUES
-            (@Country, @ContNo, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)),
-             @UPC, @ItemCode, @GroupCode, @Qty, 0, @StoreID, @ContNo, @ItemName, @Country,
-             @LPMDt, @OraPONo, @Division, @Remarks);";
+        // 3) Detail — SqlBulkCopy. Build a DataTable that mirrors the 17 columns
+        //    the previous per-row INSERT was populating; everything else stays NULL.
+        progress?.Report(new AllocationProgress(0, rows.Count, "Saving draft: bulk insert"));
+        var dt = new DataTable();
+        dt.Columns.Add("Country",          typeof(string));
+        dt.Columns.Add("ContNo",           typeof(string));
+        dt.Columns.Add("TrnDate",          typeof(DateTime));
+        dt.Columns.Add("Time1",            typeof(TimeSpan));
+        dt.Columns.Add("UPC",              typeof(string));
+        dt.Columns.Add("Itemcode",         typeof(string));
+        dt.Columns.Add("GroupCode",        typeof(string));
+        dt.Columns.Add("Qty",              typeof(int));
+        dt.Columns.Add("QtyIssue",         typeof(int));
+        dt.Columns.Add("StoreID",          typeof(string));
+        dt.Columns.Add("TcmContno",        typeof(string));
+        dt.Columns.Add("Itemname",         typeof(string));
+        dt.Columns.Add("BuildingCategory", typeof(string));
+        dt.Columns.Add("LPMDt",            typeof(DateTime));
+        dt.Columns.Add("ORAPONo",          typeof(string));
+        dt.Columns.Add("Division",         typeof(string));
+        dt.Columns.Add("Remarks",          typeof(string));
+
+        var now = DateTime.Now;
+        var trnDate = now.Date;
+        var time1 = new TimeSpan(now.Hour, now.Minute, now.Second);
+
         foreach (var r in rows)
         {
-            await c.ExecuteAsync(new CommandDefinition(detailSql, new
-            {
-                Country = country, ContNo = r.Contno, UPC = r.ItemCode, ItemCode = r.ItemCode,
-                GroupCode = r.VolumeGroup, Qty = r.AllocQty, StoreID = r.StoreID,
-                ItemName = r.ItemName, LPMDt = r.LPMDt, OraPONo = r.OraPONo,
-                Division = r.Division,
-                Remarks = r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null,
-            }, cancellationToken: ct));
+            dt.Rows.Add(
+                country,
+                r.Contno,
+                trnDate,
+                time1,
+                r.ItemCode,
+                r.ItemCode,
+                r.VolumeGroup,
+                r.AllocQty,
+                0,
+                r.StoreID,
+                r.Contno,
+                (object?)r.ItemName ?? DBNull.Value,
+                country,
+                (object?)r.LPMDt ?? DBNull.Value,
+                r.OraPONo,
+                (object?)r.Division ?? DBNull.Value,
+                (object?)(r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null) ?? DBNull.Value);
         }
+
+        // SqlBulkCopy.DestinationTableName needs the table to be in the connection's
+        // current DB context; the existing OnPremBackup connection is on a different
+        // database. Switch context to LPMSIM for the duration of the bulk copy.
+        c.ChangeDatabase("LPMSIM");
+
+        using var bulk = new SqlBulkCopy(c)
+        {
+            DestinationTableName = "dbo.WMS_ContAllocationDraftDetail",
+            BatchSize            = 1000,
+            BulkCopyTimeout      = CommandTimeoutSeconds,
+            NotifyAfter          = 500,
+        };
+        bulk.SqlRowsCopied += (_, e) =>
+            progress?.Report(new AllocationProgress((int)e.RowsCopied, rows.Count, "Saving draft to LPMSIM"));
+        foreach (DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
+        await bulk.WriteToServerAsync(dt, ct);
+
+        progress?.Report(new AllocationProgress(rows.Count, rows.Count, "Saving draft: done"));
     }
 
     public async Task<List<AllocationRow>> LoadDraftAsync(string country, string contno, CancellationToken ct = default)

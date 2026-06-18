@@ -431,7 +431,10 @@
             else
             {
                 // Auto-save draft so the user doesn't have to click a separate button.
-                await Svc.SaveDraftAsync(_country, _contno, _allocation, _warehouse, ro);
+                // Reset progress so the banner shows the save phase cleanly.
+                _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
+                await InvokeAsync(StateHasChanged);
+                await Svc.SaveDraftAsync(_country, _contno, _allocation, _warehouse, ro, progress);
                 await RefreshStatusAsync();
                 ShowInfo($"Allocation computed and draft saved: {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
             }
