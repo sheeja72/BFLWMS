@@ -1,0 +1,268 @@
+@page "/reports/non-lpm-wh-stock"
+@rendermode RenderMode.InteractiveServer
+@using System.Text
+@using Wms.Core
+@using Wms.Data.Lpm
+@attribute [Authorize(Roles = "Admin,Reports")]
+@inject ReportsService Svc
+@inject Microsoft.JSInterop.IJSRuntime JS
+
+<PageTitle>WMS — Non-LPM WH Stock Report</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Non-LPM WH Stock Report (ELIGIBLE)</h2>
+    <p>Non-LPM warehouse stock (<code>LPMDt IS NULL</code>) per Division × Country, split into Summer / Winter. Filter: <code>ShopEligible != 'E'</code> AND <code>PalletCategory = 'ELIGIBLE'</code>. One row per Division.</p>
+</div>
+
+<div class="aiwms-section">
+    <div style="display:flex; flex-wrap:wrap; align-items:center; gap:12px">
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="LoadAsync" disabled="@_loading">@(_loading ? "Loading…" : "Load")</button>
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@(_pivotRows.Count == 0)">Export to Excel</button>
+        <input @bind="_search" @bind:event="oninput" @bind:after="RecomputePivot" placeholder="Filter division…"
+               style="padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white; min-width:240px;" />
+        @if (_loadedOnce && _rows.Count > 0)
+        {
+            <span style="font-size:12px; color:var(--text-secondary)">@_pivotRows.Count divisions · @PivotCountries.Length countries</span>
+        }
+    </div>
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="aiwms-alert @(_messageIsError ? "error" : "info")" style="margin-top:12px">@_message</div>
+    }
+</div>
+
+@if (_loading && _rows.Count == 0)
+{
+    <div class="aiwms-section"><div style="padding:14px; font-style:italic; color:var(--text-secondary)">Loading…</div></div>
+}
+else if (_loadedOnce && _rows.Count == 0)
+{
+    <div class="aiwms-section"><div class="aiwms-alert info">No Non-LPM eligible stock found.</div></div>
+}
+else if (_pivotRows.Count > 0)
+{
+    <div class="aiwms-section" style="overflow:auto; max-height:70vh; padding:0;">
+        <table style="border-collapse:collapse; width:100%; white-space:nowrap; font-size:13px;">
+            <thead>
+                <tr>
+                    <th style="@Th1Style text-align:left; min-width:220px; cursor:pointer;" rowspan="2" @onclick="() => SortBy(-1)" title="Sort by Division">Division @SortArrow(-1)</th>
+                    @foreach (var c in PivotCountries)
+                    {
+                        <th style="@Th1Style text-align:center;" colspan="2">@c.Label</th>
+                    }
+                    <th style="@ThGtStyle text-align:center;" colspan="2">Group Total</th>
+                </tr>
+                <tr>
+                    @for (int i = 0; i < PivotCountries.Length; i++)
+                    {
+                        var sIdx = 2 * i;
+                        var wIdx = 2 * i + 1;
+                        <th style="@Th2Style cursor:pointer;" @onclick="() => SortBy(sIdx)">Summer @SortArrow(sIdx)</th>
+                        <th style="@Th2Style cursor:pointer;" @onclick="() => SortBy(wIdx)">Winter @SortArrow(wIdx)</th>
+                    }
+                    <th style="@Th2GtStyle cursor:pointer;" @onclick="() => SortBy(GtSummerIdx)">Summer @SortArrow(GtSummerIdx)</th>
+                    <th style="@Th2GtStyle cursor:pointer;" @onclick="() => SortBy(GtWinterIdx)">Winter @SortArrow(GtWinterIdx)</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var prow in _pivotRows)
+                {
+                    <tr>
+                        <td style="@TdLStyle"><strong>@prow.Division</strong></td>
+                        @for (int i = 0; i < PivotCountries.Length; i++)
+                        {
+                            <td style="@TdStyle">@FmtCell(prow.Vals[2 * i])</td>
+                            <td style="@TdStyle">@FmtCell(prow.Vals[2 * i + 1])</td>
+                        }
+                        <td style="@TdGtStyle">@FmtCell(prow.Vals[GtSummerIdx])</td>
+                        <td style="@TdGtStyle">@FmtCell(prow.Vals[GtWinterIdx])</td>
+                    </tr>
+                }
+                <tr style="font-weight:700; background:#fff7e0;">
+                    <td style="@TdLStyle">TOTAL</td>
+                    @for (int i = 0; i < PivotCountries.Length; i++)
+                    {
+                        <td style="@TdStyle">@_pivotTotals[2 * i].ToString("N0")</td>
+                        <td style="@TdStyle">@_pivotTotals[2 * i + 1].ToString("N0")</td>
+                    }
+                    <td style="@TdGtStyle">@_pivotTotals[GtSummerIdx].ToString("N0")</td>
+                    <td style="@TdGtStyle">@_pivotTotals[GtWinterIdx].ToString("N0")</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+}
+else if (_loadedOnce && _rows.Count > 0)
+{
+    <div class="aiwms-section"><div class="aiwms-alert info">No divisions match the filter.</div></div>
+}
+
+@code {
+    private List<NonLpmWhStockRow> _rows = new();
+    private bool _loading;
+    private bool _loadedOnce;
+    private string _search = "";
+    private string _message = "";
+    private bool _messageIsError;
+
+    private static readonly (string Key, string Label)[] PivotCountries =
+    {
+        ("UAE", "UAE"), ("KSA", "KSA"), ("Kuwait", "Kuwait"),
+        ("Qatar", "Qatar"), ("Bahrain", "Bahrain"), ("MALAYSIA", "MYS")
+    };
+    private static readonly int GtSummerIdx = PivotCountries.Length * 2;
+    private static readonly int GtWinterIdx = PivotCountries.Length * 2 + 1;
+
+    private sealed record PivotRowVm(string Division, long[] Vals);
+    private List<PivotRowVm> _pivotRows = new();
+    private long[] _pivotTotals = new long[PivotCountries.Length * 2 + 2];
+
+    private const string Th1Style =
+        "border:1px solid #d8a400; padding:5px 10px; background:#f5c543; font-weight:700; position:sticky; top:0; z-index:3;";
+    private const string Th2Style =
+        "border:1px solid #d8a400; padding:5px 10px; background:#f5c543; font-weight:700; text-align:right; position:sticky; top:30px; z-index:3;";
+    private const string TdStyle  = "border:1px solid #e8e8e8; padding:3px 10px; text-align:right;";
+    private const string TdLStyle = "border:1px solid #e8e8e8; padding:3px 10px; text-align:left;";
+    private const string ThGtStyle =
+        "border:1px solid #c98f00; padding:5px 10px; background:#e3a600; font-weight:800; position:sticky; top:0; z-index:3;";
+    private const string Th2GtStyle =
+        "border:1px solid #c98f00; padding:5px 10px; background:#e3a600; font-weight:800; text-align:right; position:sticky; top:30px; z-index:3;";
+    private const string TdGtStyle =
+        "border:1px solid #e8e8e8; padding:3px 10px; text-align:right; background:#fff3cf; font-weight:700;";
+
+    private static string FmtCell(long v) => v == 0 ? "" : v.ToString("N0");
+
+    private int _sortCol = -1;
+    private bool _sortAsc = true;
+
+    private void SortBy(int col)
+    {
+        if (_sortCol == col) _sortAsc = !_sortAsc;
+        else { _sortCol = col; _sortAsc = col < 0; }
+        ApplySort();
+    }
+    private void ApplySort()
+    {
+        if (_sortCol < 0)
+            _pivotRows = (_sortAsc
+                ? _pivotRows.OrderBy(r => r.Division, StringComparer.OrdinalIgnoreCase)
+                : _pivotRows.OrderByDescending(r => r.Division, StringComparer.OrdinalIgnoreCase)).ToList();
+        else
+        {
+            int c = _sortCol;
+            _pivotRows = (_sortAsc
+                ? _pivotRows.OrderBy(r => r.Vals[c])
+                : _pivotRows.OrderByDescending(r => r.Vals[c])).ToList();
+        }
+    }
+    private string SortArrow(int col) => _sortCol == col ? (_sortAsc ? " ▲" : " ▼") : "";
+
+    private IEnumerable<NonLpmWhStockRow> Filtered =>
+        string.IsNullOrWhiteSpace(_search)
+            ? _rows
+            : _rows.Where(r => r.Division.Contains(_search, StringComparison.OrdinalIgnoreCase));
+
+    private void RecomputePivot()
+    {
+        var rows = Filtered.ToList();
+        var divisions = rows.Select(r => r.Division).Distinct()
+            .OrderBy(d => d, StringComparer.OrdinalIgnoreCase).ToList();
+
+        var byKey = new Dictionary<(string Division, string Country), NonLpmWhStockRow>();
+        foreach (var r in rows) byKey[(r.Division, r.Country)] = r;
+
+        var totals = new long[PivotCountries.Length * 2 + 2];
+        var vms = new List<PivotRowVm>(divisions.Count);
+        foreach (var d in divisions)
+        {
+            var vals = new long[PivotCountries.Length * 2 + 2];
+            for (int i = 0; i < PivotCountries.Length; i++)
+            {
+                if (byKey.TryGetValue((d, PivotCountries[i].Key), out var r))
+                {
+                    vals[2 * i]     = r.Summer;
+                    vals[2 * i + 1] = r.Winter;
+                    vals[GtSummerIdx] += r.Summer;
+                    vals[GtWinterIdx] += r.Winter;
+                }
+            }
+            for (int k = 0; k < vals.Length; k++) totals[k] += vals[k];
+            vms.Add(new PivotRowVm(d, vals));
+        }
+
+        _pivotRows = vms;
+        _pivotTotals = totals;
+        ApplySort();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true; _message = ""; StateHasChanged();
+        try
+        {
+            _rows = await Svc.GetNonLpmWhStockAsync();
+            _loadedOnce = true;
+            RecomputePivot();
+            ShowInfo($"Loaded {_rows.Count} rows.");
+        }
+        catch (Exception ex)
+        {
+            ShowError($"Load failed: {ex.Message}");
+            _rows = new();
+            RecomputePivot();
+        }
+        finally { _loading = false; }
+    }
+
+    private async Task ExportCsvAsync()
+    {
+        if (_pivotRows.Count == 0) return;
+        var sb = new StringBuilder();
+        // Two-row header: country labels merged-like (CSV duplicates them in row 1),
+        // sub-header in row 2.
+        var row1 = new StringBuilder("Division");
+        var row2 = new StringBuilder("");
+        foreach (var c in PivotCountries)
+        {
+            row1.Append(',').Append(c.Label).Append(',').Append(c.Label);
+            row2.Append(",Summer,Winter");
+        }
+        row1.Append(",Group Total,Group Total");
+        row2.Append(",Summer,Winter");
+        sb.AppendLine(row1.ToString());
+        sb.AppendLine(row2.ToString());
+
+        foreach (var prow in _pivotRows)
+        {
+            sb.Append(Csv(prow.Division));
+            for (int i = 0; i < PivotCountries.Length; i++)
+            {
+                sb.Append(',').Append(prow.Vals[2 * i]);
+                sb.Append(',').Append(prow.Vals[2 * i + 1]);
+            }
+            sb.Append(',').Append(prow.Vals[GtSummerIdx]);
+            sb.Append(',').Append(prow.Vals[GtWinterIdx]);
+            sb.AppendLine();
+        }
+        sb.Append("TOTAL");
+        for (int i = 0; i < PivotCountries.Length; i++)
+        {
+            sb.Append(',').Append(_pivotTotals[2 * i]);
+            sb.Append(',').Append(_pivotTotals[2 * i + 1]);
+        }
+        sb.Append(',').Append(_pivotTotals[GtSummerIdx]);
+        sb.Append(',').Append(_pivotTotals[GtWinterIdx]);
+        sb.AppendLine();
+
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(sb.ToString()));
+        var filename = $"NonLpmWhStock_{DateTime.Now:yyyyMMdd_HHmm}.csv";
+        await JS.InvokeVoidAsync("eval", $"(function(){{var a=document.createElement('a');a.href='data:text/csv;base64,{b64}';a.download='{filename}';document.body.appendChild(a);a.click();document.body.removeChild(a);}})();");
+    }
+
+    private static string Csv(string? s) => s is null ? ""
+        : (s.Contains(',') || s.Contains('"') || s.Contains('\n')) ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
+
+    private void ShowError(string msg) { _message = msg; _messageIsError = true; }
+    private void ShowInfo(string msg)  { _message = msg; _messageIsError = false; }
+}

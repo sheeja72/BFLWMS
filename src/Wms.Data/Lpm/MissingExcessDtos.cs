@@ -21,9 +21,12 @@ public record BoxDetailRow(
 public record ItemSummaryReportRow(
     string?  ItemCode,
     string?  ItemName,
-    string?  Hierarchy,
     string?  Division,
     string?  Department,
     int      MissingQty,
     int      ExcessQty,
     int      HOStock);
+
+/// <summary>Ported from LPMSIM. One row of the Non-LPM WH Stock report:
+/// (Country, Division) with Summer + Winter Non-LPM eligible qty.</summary>
+public record NonLpmWhStockRow(string Country, string Division, long Summer, long Winter);
