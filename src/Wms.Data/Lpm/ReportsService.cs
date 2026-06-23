@@ -150,7 +150,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
             SELECT
                 a.itemcode                             AS ItemCode,
                 im.description                         AS ItemName,
-                sub.Heirarchy                          AS Hierarchy,
+                sub.Hierarchy                          AS Hierarchy,
                 sub.Division                           AS Division,
                 sub.Department                         AS Department,
                 a.MissingQty                           AS MissingQty,
