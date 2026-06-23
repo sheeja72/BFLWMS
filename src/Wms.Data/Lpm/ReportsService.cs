@@ -29,12 +29,10 @@ public class ReportsService(IOnPremConnectionResolver resolver)
         return c;
     }
 
-    private SqlConnection OpenCountry(string country)
-    {
-        var c = new SqlConnection(WithConnectTimeout(resolver.GetCountryConnectionString(country)));
-        c.Open();
-        return c;
-    }
+    // All report queries currently hit OnPremBackup (UAE master) via 3-part naming —
+    // same as ContainerAllocationService — since per-country connection strings
+    // aren't configured. Wire to GetCountryConnectionString later if needed.
+    private SqlConnection OpenCountry(string country) => OpenOnPremBackup();
 
     public async Task<List<string>> GetCountriesAsync(CancellationToken ct = default)
     {
