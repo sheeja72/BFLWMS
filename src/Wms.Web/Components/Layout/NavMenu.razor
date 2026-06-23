@@ -34,6 +34,16 @@
         </Authorized>
     </AuthorizeView>
 
+    <AuthorizeView Roles="Admin,Reports">
+        <Authorized>
+            <div class="aiwms-nav-section">Reports</div>
+            <NavLink class="aiwms-nav-link" ActiveClass="active" href="reports/missing-excess">
+                <span class="aiwms-nav-icon">assessment</span>
+                <span>Missing / Excess Items from Production</span>
+            </NavLink>
+        </Authorized>
+    </AuthorizeView>
+
     <AuthorizeView Roles="Admin">
         <Authorized>
             <div class="aiwms-nav-section">Admin</div>

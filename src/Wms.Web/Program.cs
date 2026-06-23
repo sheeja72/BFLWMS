@@ -57,6 +57,7 @@ public class Program
         builder.Services.AddScoped<IActionLogger, ActionLogger>();
         builder.Services.AddScoped<BuildingService>();
         builder.Services.AddScoped<ContainerAllocationService>();
+        builder.Services.AddScoped<ReportsService>();
 
         // WMS DbContext — Azure SQL via AAD (Managed Identity in App Service,
         // AAD Default locally via `az login`). NO password in code.
