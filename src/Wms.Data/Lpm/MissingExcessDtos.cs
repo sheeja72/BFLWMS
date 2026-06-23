@@ -30,3 +30,13 @@ public record ItemSummaryReportRow(
 /// <summary>Ported from LPMSIM. One row of the Non-LPM WH Stock report:
 /// (Country, Division) with Summer + Winter Non-LPM eligible qty.</summary>
 public record NonLpmWhStockRow(string Country, string Division, long Summer, long Winter);
+
+/// <summary>Box Summary aggregated by month (yyyy-MM).</summary>
+public record BoxSummaryMonthRow(string Month, int BoxCount, int MissQty, int ExcessQty);
+
+/// <summary>Item Summary aggregated by (Division, Department).</summary>
+public record ItemSummaryByDivDeptRow(string? Division, string? Department, int MissingQty, int ExcessQty, int HOStock);
+
+/// <summary>Box Detail row with a Type label ("Missing" or "Excess") so the
+/// combined export distinguishes which side the row came from.</summary>
+public record BoxDetailCombinedRow(string Type, string? BoxNo, string? PreparedBy, string? ItemCode, int Qty, int QtyIssued, int Diff);

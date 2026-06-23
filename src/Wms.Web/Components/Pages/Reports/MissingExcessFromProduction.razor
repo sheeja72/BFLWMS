@@ -37,15 +37,14 @@
 
     <div style="display:flex; gap:14px; align-items:center; padding:12px 0 0 0; border-top:1px solid var(--border-default); margin-top:12px">
         <strong style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--text-secondary)">Report:</strong>
-        <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="BoxSummary"    checked="@(_view == "BoxSummary")"    @onchange="@(_ => SetView("BoxSummary"))"    /> Box Summary</label>
-        <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="BoxMissing"    checked="@(_view == "BoxMissing")"    @onchange="@(_ => SetView("BoxMissing"))"    /> Box Detail — Missing</label>
-        <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="BoxExcess"     checked="@(_view == "BoxExcess")"     @onchange="@(_ => SetView("BoxExcess"))"     /> Box Detail — Excess</label>
-        <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="ItemSummary"   checked="@(_view == "ItemSummary")"   @onchange="@(_ => SetView("ItemSummary"))"   /> Item Summary</label>
+        <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="BoxSummary"  checked="@(_view == "BoxSummary")"  @onchange="@(_ => SetView("BoxSummary"))"  /> Box Summary</label>
+        <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="BoxDetail"   checked="@(_view == "BoxDetail")"   @onchange="@(_ => SetView("BoxDetail"))"   /> Box Detail (Excel only)</label>
+        <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="rv" value="ItemSummary" checked="@(_view == "ItemSummary")" @onchange="@(_ => SetView("ItemSummary"))" /> Item Summary</label>
     </div>
 
     @if (_busy)
     {
-        <div style="margin-top:14px; padding:12px 14px; background:var(--bfl-yellow-lite); border:1px solid var(--bfl-yellow); border-radius:var(--r-sm); font-family:var(--font-display); font-size:13px; font-weight:800; color:var(--bfl-black)">Loading…</div>
+        <div style="margin-top:14px; padding:12px 14px; background:var(--bfl-yellow-lite); border:1px solid var(--bfl-yellow); border-radius:var(--r-sm); font-family:var(--font-display); font-size:13px; font-weight:800; color:var(--bfl-black)">@(_busyMsg ?? "Loading…")</div>
     }
     @if (!string.IsNullOrEmpty(_message))
     {
@@ -53,113 +52,105 @@
     }
 </div>
 
-@if (_loaded)
+@if (_view == "BoxDetail")
 {
     <div class="aiwms-section">
         <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between">
-            <span>Result — @ResultCount rows</span>
-            <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync">Export to Excel</button>
+            <span>Box Detail — Excel only (Missing + Excess combined)</span>
+            <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportBoxDetailAsync" disabled="@(_busy || !CanLoad)">Export to Excel</button>
         </div>
-
-        @if (_view == "BoxSummary")
-        {
-            <table class="aiwms-table aiwms-table-dense">
-                <thead>
+        <div style="padding:12px 14px; font-size:13px; color:var(--text-secondary)">
+            UI table skipped for this view because the row count is large.
+            Click Export to Excel to download Missing + Excess rows as CSV (with a Type column).
+        </div>
+    </div>
+}
+else if (_loaded && _view == "BoxSummary")
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between">
+            <span>Box Summary by Month — @_boxMonths.Count rows</span>
+            <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportBoxSummaryAsync" disabled="@_busy">Export to Excel</button>
+        </div>
+        <table class="aiwms-table aiwms-table-dense">
+            <thead>
+                <tr>
+                    <th style="cursor:pointer" @onclick='() => Sort("Month")'>Month @SortArrow("Month")</th>
+                    <th style="cursor:pointer; text-align:right" @onclick='() => Sort("BoxCount")'>Box Count @SortArrow("BoxCount")</th>
+                    <th style="cursor:pointer; text-align:right" @onclick='() => Sort("MissQty")'>Missing Qty @SortArrow("MissQty")</th>
+                    <th style="cursor:pointer; text-align:right" @onclick='() => Sort("ExcessQty")'>Excess Qty @SortArrow("ExcessQty")</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in SortedBoxMonths)
+                {
                     <tr>
-                        <th style="cursor:pointer" @onclick='() => Sort("BoxNo")'>Box No @SortArrow("BoxNo")</th>
-                        <th style="cursor:pointer" @onclick='() => Sort("ClosedDt")'>Closed Dt @SortArrow("ClosedDt")</th>
-                        <th style="cursor:pointer" @onclick='() => Sort("ClosedBy")'>Closed By @SortArrow("ClosedBy")</th>
-                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("MissQty")'>Missing Qty @SortArrow("MissQty")</th>
-                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("ExcessQty")'>Excess Qty @SortArrow("ExcessQty")</th>
+                        <td>@r.Month</td>
+                        <td style="text-align:right">@r.BoxCount</td>
+                        <td style="text-align:right">@r.MissQty</td>
+                        <td style="text-align:right">@r.ExcessQty</td>
                     </tr>
-                </thead>
-                <tbody>
-                    @foreach (var r in SortedBoxSummary)
-                    {
-                        <tr>
-                            <td>@r.BoxNo</td>
-                            <td>@(r.ClosedDt?.ToString("yyyy-MM-dd"))</td>
-                            <td>@r.ClosedBy</td>
-                            <td style="text-align:right">@r.MissQty</td>
-                            <td style="text-align:right">@r.ExcessQty</td>
-                        </tr>
-                    }
-                </tbody>
-            </table>
-        }
-        else if (_view == "BoxMissing" || _view == "BoxExcess")
-        {
-            var label = _view == "BoxMissing" ? "Missing" : "Excess";
-            <table class="aiwms-table aiwms-table-dense">
-                <thead>
+                }
+                <tr style="font-weight:700; background:#fff7e0;">
+                    <td>TOTAL</td>
+                    <td style="text-align:right">@_boxMonths.Sum(r => r.BoxCount)</td>
+                    <td style="text-align:right">@_boxMonths.Sum(r => r.MissQty)</td>
+                    <td style="text-align:right">@_boxMonths.Sum(r => r.ExcessQty)</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+}
+else if (_loaded && _view == "ItemSummary")
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between">
+            <span>Item Summary by Division × Department — @_itemDivDept.Count rows</span>
+            <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportItemDetailsAsync" disabled="@_busy">Item Details Export</button>
+        </div>
+        <table class="aiwms-table aiwms-table-dense">
+            <thead>
+                <tr>
+                    <th style="cursor:pointer" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
+                    <th style="cursor:pointer" @onclick='() => Sort("Department")'>Department @SortArrow("Department")</th>
+                    <th style="cursor:pointer; text-align:right" @onclick='() => Sort("MissingQty")'>Missing Qty @SortArrow("MissingQty")</th>
+                    <th style="cursor:pointer; text-align:right" @onclick='() => Sort("ExcessQty")'>Excess Qty @SortArrow("ExcessQty")</th>
+                    <th style="cursor:pointer; text-align:right" @onclick='() => Sort("HOStock")'>HO Stock @SortArrow("HOStock")</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in SortedItemDivDept)
+                {
                     <tr>
-                        <th style="cursor:pointer" @onclick='() => Sort("BoxNo")'>Box No @SortArrow("BoxNo")</th>
-                        <th style="cursor:pointer" @onclick='() => Sort("PreparedBy")'>Prepared By @SortArrow("PreparedBy")</th>
-                        <th style="cursor:pointer" @onclick='() => Sort("ItemCode")'>Item Code @SortArrow("ItemCode")</th>
-                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("Qty")'>Qty @SortArrow("Qty")</th>
-                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("QtyIssued")'>Qty Issued @SortArrow("QtyIssued")</th>
-                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("Diff")'>@label Qty @SortArrow("Diff")</th>
+                        <td>@r.Division</td>
+                        <td>@r.Department</td>
+                        <td style="text-align:right">@r.MissingQty</td>
+                        <td style="text-align:right">@r.ExcessQty</td>
+                        <td style="text-align:right">@r.HOStock</td>
                     </tr>
-                </thead>
-                <tbody>
-                    @foreach (var r in SortedBoxDetail)
-                    {
-                        <tr>
-                            <td>@r.BoxNo</td>
-                            <td>@r.PreparedBy</td>
-                            <td>@r.ItemCode</td>
-                            <td style="text-align:right">@r.Qty</td>
-                            <td style="text-align:right">@r.QtyIssued</td>
-                            <td style="text-align:right">@r.Diff</td>
-                        </tr>
-                    }
-                </tbody>
-            </table>
-        }
-        else if (_view == "ItemSummary")
-        {
-            <table class="aiwms-table aiwms-table-dense">
-                <thead>
-                    <tr>
-                        <th style="cursor:pointer" @onclick='() => Sort("ItemCode")'>Item Code @SortArrow("ItemCode")</th>
-                        <th style="cursor:pointer" @onclick='() => Sort("ItemName")'>Item Name @SortArrow("ItemName")</th>
-                        <th style="cursor:pointer" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
-                        <th style="cursor:pointer" @onclick='() => Sort("Department")'>Department @SortArrow("Department")</th>
-                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("MissingQty")'>Missing Qty @SortArrow("MissingQty")</th>
-                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("ExcessQty")'>Excess Qty @SortArrow("ExcessQty")</th>
-                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("HOStock")'>HO Stock @SortArrow("HOStock")</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @foreach (var r in SortedItemSummary)
-                    {
-                        <tr>
-                            <td>@r.ItemCode</td>
-                            <td>@r.ItemName</td>
-                            <td>@r.Division</td>
-                            <td>@r.Department</td>
-                            <td style="text-align:right">@r.MissingQty</td>
-                            <td style="text-align:right">@r.ExcessQty</td>
-                            <td style="text-align:right">@r.HOStock</td>
-                        </tr>
-                    }
-                </tbody>
-            </table>
-        }
+                }
+                <tr style="font-weight:700; background:#fff7e0;">
+                    <td colspan="2">TOTAL</td>
+                    <td style="text-align:right">@_itemDivDept.Sum(r => r.MissingQty)</td>
+                    <td style="text-align:right">@_itemDivDept.Sum(r => r.ExcessQty)</td>
+                    <td style="text-align:right">@_itemDivDept.Sum(r => r.HOStock)</td>
+                </tr>
+            </tbody>
+        </table>
     </div>
 }
 
 @code {
     private List<string> _countries = new();
-    private List<BoxSummaryRow>          _boxSummary = new();
-    private List<BoxDetailRow>           _boxDetail  = new();
-    private List<ItemSummaryReportRow>   _itemSummary = new();
+    private List<BoxSummaryMonthRow>     _boxMonths   = new();
+    private List<ItemSummaryByDivDeptRow> _itemDivDept = new();
 
     private string   _country = "";
     private DateTime _fromDt  = new DateTime(2026, 2, 21);
     private DateTime _toDt    = DateTime.Today;
     private string   _view    = "BoxSummary";
     private bool     _busy;
+    private string?  _busyMsg;
     private bool     _loaded;
     private string   _message = "";
     private bool     _messageIsError;
@@ -170,15 +161,6 @@
                          && _fromDt >= new DateTime(2026, 2, 21)
                          && _toDt   >= _fromDt;
 
-    private int ResultCount => _view switch
-    {
-        "BoxSummary"  => _boxSummary.Count,
-        "BoxMissing"  => _boxDetail.Count,
-        "BoxExcess"   => _boxDetail.Count,
-        "ItemSummary" => _itemSummary.Count,
-        _ => 0,
-    };
-
     protected override async Task OnInitializedAsync()
     {
         try { _countries = await Svc.GetCountriesAsync(); }
@@ -188,27 +170,26 @@
     private async Task LoadAsync()
     {
         if (!CanLoad) return;
-        _busy = true; _message = ""; _loaded = false; _sortKey = null;
+        _busy = true; _busyMsg = "Loading…"; _message = ""; _loaded = false; _sortKey = null;
         try
         {
             switch (_view)
             {
-                case "BoxSummary":  _boxSummary  = await Svc.BoxSummaryAsync(_country, _fromDt, _toDt); break;
-                case "BoxMissing":  _boxDetail   = await Svc.BoxDetailMissingAsync(_country, _fromDt, _toDt); break;
-                case "BoxExcess":   _boxDetail   = await Svc.BoxDetailExcessAsync(_country, _fromDt, _toDt); break;
-                case "ItemSummary": _itemSummary = await Svc.ItemSummaryAsync(_country, _fromDt, _toDt); break;
+                case "BoxSummary":  _boxMonths   = await Svc.BoxSummaryByMonthAsync(_country, _fromDt, _toDt); break;
+                case "ItemSummary": _itemDivDept = await Svc.ItemSummaryByDivDeptAsync(_country, _fromDt, _toDt); break;
+                case "BoxDetail":   /* no UI — Export does the work */ break;
             }
             _loaded = true;
-            ShowInfo($"Loaded {ResultCount} rows.");
+            var count = _view == "BoxSummary" ? _boxMonths.Count
+                      : _view == "ItemSummary" ? _itemDivDept.Count
+                      : 0;
+            ShowInfo(_view == "BoxDetail" ? "Ready — click Export to Excel." : $"Loaded {count} rows.");
         }
         catch (Exception ex) { ShowError($"Load failed: {ex.Message}"); }
-        finally { _busy = false; }
+        finally { _busy = false; _busyMsg = null; }
     }
 
-    private void SetView(string v)
-    {
-        _view = v; _sortKey = null; _loaded = false;
-    }
+    private void SetView(string v) { _view = v; _sortKey = null; _loaded = false; _message = ""; }
     private void Sort(string key)
     {
         if (_sortKey == key) _sortAsc = !_sortAsc;
@@ -216,72 +197,90 @@
     }
     private string SortArrow(string key) => _sortKey == key ? (_sortAsc ? "▲" : "▼") : "";
 
-    private IEnumerable<BoxSummaryRow> SortedBoxSummary
+    private IEnumerable<BoxSummaryMonthRow> SortedBoxMonths
     {
         get
         {
-            if (_sortKey is null) return _boxSummary.OrderByDescending(r => r.ClosedDt);
-            Func<BoxSummaryRow, object?> k = _sortKey switch {
-                "BoxNo" => r => r.BoxNo, "ClosedDt" => r => r.ClosedDt, "ClosedBy" => r => r.ClosedBy,
+            if (_sortKey is null) return _boxMonths.OrderBy(r => r.Month);
+            Func<BoxSummaryMonthRow, object?> k = _sortKey switch {
+                "Month" => r => r.Month, "BoxCount" => r => r.BoxCount,
                 "MissQty" => r => r.MissQty, "ExcessQty" => r => r.ExcessQty,
-                _ => r => r.BoxNo,
+                _ => r => r.Month,
             };
-            return _sortAsc ? _boxSummary.OrderBy(k) : _boxSummary.OrderByDescending(k);
-        }
-    }
-    private IEnumerable<BoxDetailRow> SortedBoxDetail
-    {
-        get
-        {
-            if (_sortKey is null) return _boxDetail.OrderBy(r => r.BoxNo).ThenBy(r => r.ItemCode);
-            Func<BoxDetailRow, object?> k = _sortKey switch {
-                "BoxNo" => r => r.BoxNo, "PreparedBy" => r => r.PreparedBy, "ItemCode" => r => r.ItemCode,
-                "Qty" => r => r.Qty, "QtyIssued" => r => r.QtyIssued, "Diff" => r => r.Diff,
-                _ => r => r.BoxNo,
-            };
-            return _sortAsc ? _boxDetail.OrderBy(k) : _boxDetail.OrderByDescending(k);
-        }
-    }
-    private IEnumerable<ItemSummaryReportRow> SortedItemSummary
-    {
-        get
-        {
-            if (_sortKey is null) return _itemSummary.OrderBy(r => r.ItemCode);
-            Func<ItemSummaryReportRow, object?> k = _sortKey switch {
-                "ItemCode" => r => r.ItemCode, "ItemName" => r => r.ItemName,
-                "Division" => r => r.Division, "Department" => r => r.Department,
-                "MissingQty" => r => r.MissingQty, "ExcessQty" => r => r.ExcessQty, "HOStock" => r => r.HOStock,
-                _ => r => r.ItemCode,
-            };
-            return _sortAsc ? _itemSummary.OrderBy(k) : _itemSummary.OrderByDescending(k);
+            return _sortAsc ? _boxMonths.OrderBy(k) : _boxMonths.OrderByDescending(k);
         }
     }
 
-    private async Task ExportCsvAsync()
+    private IEnumerable<ItemSummaryByDivDeptRow> SortedItemDivDept
     {
-        var sb = new StringBuilder();
-        switch (_view)
+        get
         {
-            case "BoxSummary":
-                sb.AppendLine("BoxNo,ClosedDt,ClosedBy,MissingQty,ExcessQty");
-                foreach (var r in SortedBoxSummary)
-                    sb.AppendLine($"{Csv(r.BoxNo)},{r.ClosedDt:yyyy-MM-dd},{Csv(r.ClosedBy)},{r.MissQty},{r.ExcessQty}");
-                break;
-            case "BoxMissing":
-            case "BoxExcess":
-                var label = _view == "BoxMissing" ? "MissingQty" : "ExcessQty";
-                sb.AppendLine($"BoxNo,PreparedBy,ItemCode,Qty,QtyIssued,{label}");
-                foreach (var r in SortedBoxDetail)
-                    sb.AppendLine($"{Csv(r.BoxNo)},{Csv(r.PreparedBy)},{Csv(r.ItemCode)},{r.Qty},{r.QtyIssued},{r.Diff}");
-                break;
-            case "ItemSummary":
-                sb.AppendLine("ItemCode,ItemName,Division,Department,MissingQty,ExcessQty,HOStock");
-                foreach (var r in SortedItemSummary)
-                    sb.AppendLine($"{Csv(r.ItemCode)},{Csv(r.ItemName)},{Csv(r.Division)},{Csv(r.Department)},{r.MissingQty},{r.ExcessQty},{r.HOStock}");
-                break;
+            if (_sortKey is null) return _itemDivDept.OrderBy(r => r.Division).ThenBy(r => r.Department);
+            Func<ItemSummaryByDivDeptRow, object?> k = _sortKey switch {
+                "Division" => r => r.Division, "Department" => r => r.Department,
+                "MissingQty" => r => r.MissingQty, "ExcessQty" => r => r.ExcessQty, "HOStock" => r => r.HOStock,
+                _ => r => r.Division,
+            };
+            return _sortAsc ? _itemDivDept.OrderBy(k) : _itemDivDept.OrderByDescending(k);
         }
-        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(sb.ToString()));
-        var filename = $"missing_excess_{_country}_{_view}_{_fromDt:yyyyMMdd}_{_toDt:yyyyMMdd}.csv";
+    }
+
+    private async Task ExportBoxSummaryAsync()
+    {
+        _busy = true; _busyMsg = "Building Box Summary export…"; await InvokeAsync(StateHasChanged);
+        try
+        {
+            var rows = await Svc.BoxSummaryAsync(_country, _fromDt, _toDt);
+            var sb = new StringBuilder();
+            sb.AppendLine("BoxNo,ClosedDt,ClosedBy,MissingQty,ExcessQty");
+            foreach (var r in rows)
+                sb.AppendLine($"{Csv(r.BoxNo)},{r.ClosedDt:yyyy-MM-dd},{Csv(r.ClosedBy)},{r.MissQty},{r.ExcessQty}");
+            await DownloadCsv(sb.ToString(), "BoxSummary");
+            ShowInfo($"Exported {rows.Count} rows.");
+        }
+        catch (Exception ex) { ShowError($"Export failed: {ex.Message}"); }
+        finally { _busy = false; _busyMsg = null; }
+    }
+
+    private async Task ExportBoxDetailAsync()
+    {
+        if (!CanLoad) return;
+        _busy = true; _busyMsg = "Building Box Detail export…"; await InvokeAsync(StateHasChanged);
+        try
+        {
+            var rows = await Svc.BoxDetailCombinedAsync(_country, _fromDt, _toDt);
+            var sb = new StringBuilder();
+            sb.AppendLine("Type,BoxNo,PreparedBy,ItemCode,Qty,QtyIssued,Diff");
+            foreach (var r in rows)
+                sb.AppendLine($"{r.Type},{Csv(r.BoxNo)},{Csv(r.PreparedBy)},{Csv(r.ItemCode)},{r.Qty},{r.QtyIssued},{r.Diff}");
+            await DownloadCsv(sb.ToString(), "BoxDetail");
+            ShowInfo($"Exported {rows.Count} rows.");
+        }
+        catch (Exception ex) { ShowError($"Export failed: {ex.Message}"); }
+        finally { _busy = false; _busyMsg = null; }
+    }
+
+    private async Task ExportItemDetailsAsync()
+    {
+        _busy = true; _busyMsg = "Building Item Details export…"; await InvokeAsync(StateHasChanged);
+        try
+        {
+            var rows = await Svc.ItemSummaryAsync(_country, _fromDt, _toDt);
+            var sb = new StringBuilder();
+            sb.AppendLine("ItemCode,ItemName,Division,Department,MissingQty,ExcessQty,HOStock");
+            foreach (var r in rows)
+                sb.AppendLine($"{Csv(r.ItemCode)},{Csv(r.ItemName)},{Csv(r.Division)},{Csv(r.Department)},{r.MissingQty},{r.ExcessQty},{r.HOStock}");
+            await DownloadCsv(sb.ToString(), "ItemDetails");
+            ShowInfo($"Exported {rows.Count} rows.");
+        }
+        catch (Exception ex) { ShowError($"Export failed: {ex.Message}"); }
+        finally { _busy = false; _busyMsg = null; }
+    }
+
+    private async Task DownloadCsv(string csv, string viewName)
+    {
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(csv));
+        var filename = $"missing_excess_{_country}_{viewName}_{_fromDt:yyyyMMdd}_{_toDt:yyyyMMdd}.csv";
         await JS.InvokeVoidAsync("eval", $"(function(){{var a=document.createElement('a');a.href='data:text/csv;base64,{b64}';a.download='{filename}';document.body.appendChild(a);a.click();document.body.removeChild(a);}})();");
     }
 
