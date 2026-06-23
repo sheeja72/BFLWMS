@@ -552,21 +552,24 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     // Atomic-ish: INSERT...SELECT from draft into final, then DELETE drafts.
     // If a draft exists, prefers that (single SQL copy). Falls back to inserting
     // the in-memory rows if no draft exists yet.
-    public async Task<int> SaveAllocationAsync(IReadOnlyList<AllocationRow> rows, CancellationToken ct = default)
+    public async Task<int> SaveAllocationAsync(IReadOnlyList<AllocationRow> rows,
+        IProgress<AllocationProgress>? progress = null, CancellationToken ct = default)
     {
         if (rows.Count == 0) return 0;
         var country = rows[0].Country;
         var contno  = rows[0].Contno;
 
+        progress?.Report(new AllocationProgress(0, rows.Count, "Confirming: checking draft"));
         await using var c = OpenOnPremBackup();
 
         // Is there a saved draft for this (Country, ContNo)? If yes, copy and delete.
         var draftRows = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
             "SELECT COUNT(*) FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail WHERE Country = @ct AND ContNo = @c",
-            new { ct = country, c = contno }, cancellationToken: ct)) ?? 0;
+            new { ct = country, c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)) ?? 0;
 
         if (draftRows > 0)
         {
+            progress?.Report(new AllocationProgress(0, draftRows, $"Confirming: copying {draftRows} rows draft → final"));
             var copySql = @"
                 INSERT INTO LPMSIM.dbo.WMS_ContAllocationData
                   (ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode, Season, Department, Division,
@@ -585,7 +588,9 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
                 DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail WHERE Country = @ct AND ContNo = @c;
                 DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftHeader WHERE Country = @ct AND ContNo = @c;";
-            await c.ExecuteAsync(new CommandDefinition(copySql, new { ct = country, c = contno }, cancellationToken: ct));
+            await c.ExecuteAsync(new CommandDefinition(copySql, new { ct = country, c = contno },
+                commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            progress?.Report(new AllocationProgress(draftRows, draftRows, "Confirming: done"));
             return draftRows;
         }
 

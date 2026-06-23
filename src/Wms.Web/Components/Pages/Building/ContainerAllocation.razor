@@ -463,14 +463,22 @@
     private async Task ConfirmSaveAsync()
     {
         _busy = true; _message = "";
+        // Clear any stale banner text from the prior Process/Save phase.
+        _progressCurrent = 0; _progressTotal = 0;
+        _progressItem = "Confirming: copying draft → WMS_ContAllocationData";
+        await InvokeAsync(StateHasChanged);
         try
         {
-            var n = await Svc.SaveAllocationAsync(_allocation);
+            var progress = new Progress<AllocationProgress>(async p => {
+                _progressCurrent = p.Current; _progressTotal = p.Total; _progressItem = p.CurrentItem;
+                await InvokeAsync(StateHasChanged);
+            });
+            var n = await Svc.SaveAllocationAsync(_allocation, progress);
             await RefreshStatusAsync();
             ShowInfo($"Saved {n} rows to LPMSIM.WMS_ContAllocationData.");
         }
         catch (Exception ex) { ShowError($"Save failed: {ex.Message}"); }
-        finally { _busy = false; }
+        finally { _busy = false; _progressItem = null; }
     }
 
     private async Task ExportCsvAsync()
