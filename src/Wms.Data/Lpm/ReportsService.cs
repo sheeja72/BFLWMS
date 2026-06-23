@@ -43,43 +43,42 @@ public class ReportsService(IOnPremConnectionResolver resolver)
         return rows.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
     }
 
-    // Build the #BadBoxes temp table that all four detail queries share.
-    // One round-trip, one scan of CloseR1pallet + AMEChecking, then later
-    // queries JOIN to it as an indexed seek instead of nested IN-subqueries.
-    private static async Task BuildBadBoxesAsync(Microsoft.Data.SqlClient.SqlConnection c, DateTime fromDt, DateTime toDt, CancellationToken ct)
-    {
-        await c.ExecuteAsync(new CommandDefinition(@"
-            IF OBJECT_ID('tempdb..#BadBoxes') IS NOT NULL DROP TABLE #BadBoxes;
-            SELECT DISTINCT
-                cr.Palletno  AS BoxNo,
-                cr.Trndate   AS ClosedDt,
-                cr.closedby  AS ClosedBy,
-                ISNULL(cr.missqty,0) AS MissQty,
-                ISNULL(cr.zeroqty,0) AS ExcessQty
-              INTO #BadBoxes
-              FROM bfldata.dbo.CloseR1pallet cr WITH (NOLOCK)
-             WHERE cr.Trndate >= @from AND cr.Trndate <= @to
-               AND ISNULL(cr.missqty,0) + ISNULL(cr.zeroqty,0) > 0
-               AND EXISTS (
-                   SELECT 1 FROM usa.dbo.AMEChecking a WITH (NOLOCK)
-                    WHERE a.contno = cr.Palletno AND a.Trndate >= @from);
-            CREATE CLUSTERED INDEX IX_BadBoxes ON #BadBoxes (BoxNo);",
-            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
-    }
+    // SQL prefix that materialises #BadBoxes — must be prepended to whatever
+    // query references the temp table, so the build + read happen in the
+    // SAME Dapper command (= same SQL Server session). Splitting it across
+    // two ExecuteAsync calls dropped the temp table between commands in
+    // testing ("Invalid object name '#BadBoxes'").
+    private const string BadBoxesPrefix = @"
+        SET NOCOUNT ON;
+        IF OBJECT_ID('tempdb..#BadBoxes') IS NOT NULL DROP TABLE #BadBoxes;
+        SELECT DISTINCT
+            cr.Palletno  AS BoxNo,
+            cr.Trndate   AS ClosedDt,
+            cr.closedby  AS ClosedBy,
+            ISNULL(cr.missqty,0) AS MissQty,
+            ISNULL(cr.zeroqty,0) AS ExcessQty
+          INTO #BadBoxes
+          FROM bfldata.dbo.CloseR1pallet cr WITH (NOLOCK)
+         WHERE cr.Trndate >= @from AND cr.Trndate <= @to
+           AND ISNULL(cr.missqty,0) + ISNULL(cr.zeroqty,0) > 0
+           AND EXISTS (
+               SELECT 1 FROM usa.dbo.AMEChecking a WITH (NOLOCK)
+                WHERE a.contno = cr.Palletno AND a.Trndate >= @from);
+        CREATE CLUSTERED INDEX IX_BadBoxes ON #BadBoxes (BoxNo);
+        ";
 
     /// <summary>Box Summary — one row per (BoxNo, ClosedDt, ClosedBy).</summary>
     public async Task<List<BoxSummaryRow>> BoxSummaryAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
     {
         await using var c = OpenCountry(country);
-        await BuildBadBoxesAsync(c, fromDt, toDt, ct);
-        var rows = await c.QueryAsync<BoxSummaryRow>(new CommandDefinition(@"
+        var rows = await c.QueryAsync<BoxSummaryRow>(new CommandDefinition(BadBoxesPrefix + @"
             SELECT BoxNo, ClosedDt, ClosedBy,
                    SUM(MissQty)   AS MissQty,
                    SUM(ExcessQty) AS ExcessQty
               FROM #BadBoxes
              GROUP BY BoxNo, ClosedDt, ClosedBy
              ORDER BY ClosedBy DESC, ClosedDt DESC",
-            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 
@@ -87,8 +86,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
     public async Task<List<BoxSummaryMonthRow>> BoxSummaryByMonthAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
     {
         await using var c = OpenCountry(country);
-        await BuildBadBoxesAsync(c, fromDt, toDt, ct);
-        var rows = await c.QueryAsync<BoxSummaryMonthRow>(new CommandDefinition(@"
+        var rows = await c.QueryAsync<BoxSummaryMonthRow>(new CommandDefinition(BadBoxesPrefix + @"
             SELECT CONVERT(varchar(7), ClosedDt, 120)  AS [Month],
                    COUNT(DISTINCT BoxNo)               AS BoxCount,
                    SUM(MissQty)                        AS MissQty,
@@ -96,7 +94,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
               FROM #BadBoxes
              GROUP BY CONVERT(varchar(7), ClosedDt, 120)
              ORDER BY [Month]",
-            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 
@@ -104,8 +102,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
     public async Task<List<BoxDetailCombinedRow>> BoxDetailCombinedAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
     {
         await using var c = OpenCountry(country);
-        await BuildBadBoxesAsync(c, fromDt, toDt, ct);
-        var rows = await c.QueryAsync<BoxDetailCombinedRow>(new CommandDefinition(@"
+        var rows = await c.QueryAsync<BoxDetailCombinedRow>(new CommandDefinition(BadBoxesPrefix + @"
             SELECT 'Missing' AS [Type],
                    d.BoxNo, d.preparedby AS PreparedBy, d.itemcode AS ItemCode,
                    d.qty AS Qty, d.QtyIssued AS QtyIssued, (d.qty - d.QtyIssued) AS Diff
@@ -120,7 +117,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
               INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
              WHERE ISNULL(d.Status,'') <> ''
              ORDER BY BoxNo, ItemCode",
-            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 
@@ -128,8 +125,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
     public async Task<List<ItemSummaryByDivDeptRow>> ItemSummaryByDivDeptAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
     {
         await using var c = OpenCountry(country);
-        await BuildBadBoxesAsync(c, fromDt, toDt, ct);
-        var rows = await c.QueryAsync<ItemSummaryByDivDeptRow>(new CommandDefinition(@"
+        var rows = await c.QueryAsync<ItemSummaryByDivDeptRow>(new CommandDefinition(BadBoxesPrefix + @"
             ;WITH base AS (
                 SELECT d.itemcode,
                        CASE WHEN ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty
@@ -159,7 +155,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
               LEFT JOIN soh s                                              ON s.itemcode  = a.itemcode
              GROUP BY sub.Division, sub.Department
              ORDER BY sub.Division, sub.Department",
-            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 
@@ -243,8 +239,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
     public async Task<List<ItemSummaryReportRow>> ItemSummaryAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
     {
         await using var c = OpenCountry(country);
-        await BuildBadBoxesAsync(c, fromDt, toDt, ct);
-        var rows = await c.QueryAsync<ItemSummaryReportRow>(new CommandDefinition(@"
+        var rows = await c.QueryAsync<ItemSummaryReportRow>(new CommandDefinition(BadBoxesPrefix + @"
             ;WITH base AS (
                 SELECT d.itemcode,
                        CASE WHEN ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty
@@ -279,7 +274,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
               LEFT JOIN datareporting.dbo.vupc_subclass sub WITH (NOLOCK) ON sub.itemcode = a.itemcode
               LEFT JOIN soh s                                              ON s.itemcode  = a.itemcode
              ORDER BY a.itemcode",
-            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 }
