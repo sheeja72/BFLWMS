@@ -123,7 +123,6 @@
                     <tr>
                         <th style="cursor:pointer" @onclick='() => Sort("ItemCode")'>Item Code @SortArrow("ItemCode")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("ItemName")'>Item Name @SortArrow("ItemName")</th>
-                        <th style="cursor:pointer" @onclick='() => Sort("Hierarchy")'>Hierarchy @SortArrow("Hierarchy")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("Department")'>Department @SortArrow("Department")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("MissingQty")'>Missing Qty @SortArrow("MissingQty")</th>
@@ -137,7 +136,6 @@
                         <tr>
                             <td>@r.ItemCode</td>
                             <td>@r.ItemName</td>
-                            <td>@r.Hierarchy</td>
                             <td>@r.Division</td>
                             <td>@r.Department</td>
                             <td style="text-align:right">@r.MissingQty</td>
@@ -250,7 +248,7 @@
         {
             if (_sortKey is null) return _itemSummary.OrderBy(r => r.ItemCode);
             Func<ItemSummaryReportRow, object?> k = _sortKey switch {
-                "ItemCode" => r => r.ItemCode, "ItemName" => r => r.ItemName, "Hierarchy" => r => r.Hierarchy,
+                "ItemCode" => r => r.ItemCode, "ItemName" => r => r.ItemName,
                 "Division" => r => r.Division, "Department" => r => r.Department,
                 "MissingQty" => r => r.MissingQty, "ExcessQty" => r => r.ExcessQty, "HOStock" => r => r.HOStock,
                 _ => r => r.ItemCode,
@@ -277,9 +275,9 @@
                     sb.AppendLine($"{Csv(r.BoxNo)},{Csv(r.PreparedBy)},{Csv(r.ItemCode)},{r.Qty},{r.QtyIssued},{r.Diff}");
                 break;
             case "ItemSummary":
-                sb.AppendLine("ItemCode,ItemName,Hierarchy,Division,Department,MissingQty,ExcessQty,HOStock");
+                sb.AppendLine("ItemCode,ItemName,Division,Department,MissingQty,ExcessQty,HOStock");
                 foreach (var r in SortedItemSummary)
-                    sb.AppendLine($"{Csv(r.ItemCode)},{Csv(r.ItemName)},{Csv(r.Hierarchy)},{Csv(r.Division)},{Csv(r.Department)},{r.MissingQty},{r.ExcessQty},{r.HOStock}");
+                    sb.AppendLine($"{Csv(r.ItemCode)},{Csv(r.ItemName)},{Csv(r.Division)},{Csv(r.Department)},{r.MissingQty},{r.ExcessQty},{r.HOStock}");
                 break;
         }
         var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(sb.ToString()));

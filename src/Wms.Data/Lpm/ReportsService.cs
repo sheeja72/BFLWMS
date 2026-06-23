@@ -122,6 +122,78 @@ public class ReportsService(IOnPremConnectionResolver resolver)
     /// (hodata.itemmaster), hierarchy/division/department (datareporting.vupc_subclass),
     /// and HO stock (racks.lpm_locstock).
     /// </summary>
+    // ===================== Non-LPM WH Stock report (ported from LPMSIM) =====================
+    /// <summary>
+    /// Ported from LPMSIM (WhHoStockService.GetNonLpmWhStockAsync). For every
+    /// configured country (UAE, KSA, Kuwait, Qatar, Bahrain, MALAYSIA), sums
+    /// Non-LPM eligible WH stock per Division × Season into one row per
+    /// (Country, Division). Filter: LPMDt IS NULL, ShopEligible != 'E',
+    /// PalletCategory = 'ELIGIBLE'. Season from whboxitems.Season.
+    /// A misconfigured / unreadable country is skipped (not fatal).
+    /// </summary>
+    public async Task<List<NonLpmWhStockRow>> GetNonLpmWhStockAsync(CancellationToken ct = default)
+    {
+        await using var conn = OpenOnPremBackup();
+
+        // 1) item → division map ONCE (global master tables)
+        await using (var ddl = conn.CreateCommand())
+        {
+            ddl.CommandText = @"
+                IF OBJECT_ID('tempdb..#NlItemDiv') IS NOT NULL DROP TABLE #NlItemDiv;
+                SELECT u.itemcode, Division = MIN(sm.Division)
+                  INTO #NlItemDiv
+                  FROM Datareporting.dbo.upc_subclass    u
+                  INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+                 WHERE u.itemcode IS NOT NULL AND u.itemcode <> ''
+                 GROUP BY u.itemcode;
+                CREATE CLUSTERED INDEX IX_NlItemDiv ON #NlItemDiv (itemcode);";
+            ddl.CommandTimeout = 120;
+            await ddl.ExecuteNonQueryAsync(ct);
+        }
+
+        // 2) Fixed country set (per spec — excludes ECOM / virtual pseudo-countries).
+        var countries = new List<string> { "UAE", "KSA", "Kuwait", "Qatar", "Bahrain", "MALAYSIA" };
+
+        var rows = new List<NonLpmWhStockRow>();
+        foreach (var country in countries)
+        {
+            string whSrc;
+            try { whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct); }
+            catch { continue; }   // no DataName / unreadable → skip
+
+            try
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+                    SELECT Division = ISNULL(id.Division, '(no division)'),
+                           Summer = SUM(CASE WHEN UPPER(ISNULL(w.Season,'')) <> 'W'
+                                             THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END),
+                           Winter = SUM(CASE WHEN UPPER(ISNULL(w.Season,'')) =  'W'
+                                             THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END)
+                      FROM {whSrc} w
+                      LEFT JOIN #NlItemDiv id ON id.itemcode = w.ItemCode
+                     WHERE w.LPMDt IS NULL
+                       AND ISNULL(w.ShopEligible,'') <> 'E'
+                       AND UPPER(ISNULL(w.PalletCategory,'')) = 'ELIGIBLE'
+                     GROUP BY ISNULL(id.Division, '(no division)')
+                    HAVING SUM(CAST(ISNULL(w.Qty,0) AS bigint)) <> 0
+                     ORDER BY Division;";
+                cmd.CommandTimeout = 300;
+                await using var rdr = await cmd.ExecuteReaderAsync(ct);
+                while (await rdr.ReadAsync(ct))
+                {
+                    rows.Add(new NonLpmWhStockRow(
+                        Country:  country,
+                        Division: rdr.IsDBNull(0) ? "" : rdr.GetString(0),
+                        Summer:   rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1),
+                        Winter:   rdr.IsDBNull(2) ? 0L : rdr.GetInt64(2)));
+                }
+            }
+            catch { /* one country's WH table missing/unreadable — skip it */ }
+        }
+        return rows;
+    }
+
     public async Task<List<ItemSummaryReportRow>> ItemSummaryAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
     {
         await using var c = OpenCountry(country);
@@ -150,7 +222,6 @@ public class ReportsService(IOnPremConnectionResolver resolver)
             SELECT
                 a.itemcode                             AS ItemCode,
                 im.description                         AS ItemName,
-                sub.Hierarchy                          AS Hierarchy,
                 sub.Division                           AS Division,
                 sub.Department                         AS Department,
                 a.MissingQty                           AS MissingQty,
