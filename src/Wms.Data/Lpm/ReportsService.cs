@@ -43,77 +43,123 @@ public class ReportsService(IOnPremConnectionResolver resolver)
         return rows.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
     }
 
-    /// <summary>Box Summary — one row per (Palletno, Trndate, closedby) with miss + excess totals.</summary>
+    // Build the #BadBoxes temp table that all four detail queries share.
+    // One round-trip, one scan of CloseR1pallet + AMEChecking, then later
+    // queries JOIN to it as an indexed seek instead of nested IN-subqueries.
+    private static async Task BuildBadBoxesAsync(Microsoft.Data.SqlClient.SqlConnection c, DateTime fromDt, DateTime toDt, CancellationToken ct)
+    {
+        await c.ExecuteAsync(new CommandDefinition(@"
+            IF OBJECT_ID('tempdb..#BadBoxes') IS NOT NULL DROP TABLE #BadBoxes;
+            SELECT DISTINCT
+                cr.Palletno  AS BoxNo,
+                cr.Trndate   AS ClosedDt,
+                cr.closedby  AS ClosedBy,
+                ISNULL(cr.missqty,0) AS MissQty,
+                ISNULL(cr.zeroqty,0) AS ExcessQty
+              INTO #BadBoxes
+              FROM bfldata.dbo.CloseR1pallet cr WITH (NOLOCK)
+             WHERE cr.Trndate >= @from AND cr.Trndate <= @to
+               AND ISNULL(cr.missqty,0) + ISNULL(cr.zeroqty,0) > 0
+               AND EXISTS (
+                   SELECT 1 FROM usa.dbo.AMEChecking a WITH (NOLOCK)
+                    WHERE a.contno = cr.Palletno AND a.Trndate >= @from);
+            CREATE CLUSTERED INDEX IX_BadBoxes ON #BadBoxes (BoxNo);",
+            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+    }
+
+    /// <summary>Box Summary — one row per (BoxNo, ClosedDt, ClosedBy).</summary>
     public async Task<List<BoxSummaryRow>> BoxSummaryAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
     {
         await using var c = OpenCountry(country);
+        await BuildBadBoxesAsync(c, fromDt, toDt, ct);
         var rows = await c.QueryAsync<BoxSummaryRow>(new CommandDefinition(@"
-            SELECT
-                Palletno   AS BoxNo,
-                Trndate    AS ClosedDt,
-                closedby   AS ClosedBy,
-                ISNULL(SUM(missqty), 0) AS MissQty,
-                ISNULL(SUM(zeroqty), 0) AS ExcessQty
-            FROM bfldata.dbo.CloseR1pallet WITH (NOLOCK)
-            WHERE Trndate >= @from AND Trndate <= @to
-              AND ISNULL(missqty,0) + ISNULL(zeroqty,0) > 0
-              AND Palletno IN (
-                  SELECT contno FROM usa.dbo.AMEChecking WITH (NOLOCK) WHERE Trndate >= @from
-              )
-            GROUP BY Palletno, Trndate, closedby
-            ORDER BY closedby DESC, Trndate DESC",
-            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            SELECT BoxNo, ClosedDt, ClosedBy,
+                   SUM(MissQty)   AS MissQty,
+                   SUM(ExcessQty) AS ExcessQty
+              FROM #BadBoxes
+             GROUP BY BoxNo, ClosedDt, ClosedBy
+             ORDER BY ClosedBy DESC, ClosedDt DESC",
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 
-    /// <summary>Box Detail Missing — items where QtyIssued &lt; Qty and Status is blank.</summary>
-    public async Task<List<BoxDetailRow>> BoxDetailMissingAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
+    /// <summary>Box Summary aggregated by month (yyyy-MM) — UI table.</summary>
+    public async Task<List<BoxSummaryMonthRow>> BoxSummaryByMonthAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
     {
         await using var c = OpenCountry(country);
-        var rows = await c.QueryAsync<BoxDetailRow>(new CommandDefinition(@"
-            SELECT
-                d.BoxNo       AS BoxNo,
-                d.preparedby  AS PreparedBy,
-                d.itemcode    AS ItemCode,
-                d.qty         AS Qty,
-                d.QtyIssued   AS QtyIssued,
-                (d.qty - d.QtyIssued) AS Diff
-            FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
-            WHERE d.BoxNo IN (
-                SELECT Palletno FROM bfldata.dbo.CloseR1pallet WITH (NOLOCK)
-                WHERE Trndate >= @from AND Trndate <= @to
-                  AND ISNULL(missqty,0) + ISNULL(zeroqty,0) > 0
-                  AND Palletno IN (SELECT contno FROM usa.dbo.AMEChecking WITH (NOLOCK) WHERE Trndate >= @from)
-            )
-              AND d.QtyIssued < d.qty
-              AND ISNULL(d.Status, '') = ''
-            ORDER BY d.BoxNo, d.itemcode",
-            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        await BuildBadBoxesAsync(c, fromDt, toDt, ct);
+        var rows = await c.QueryAsync<BoxSummaryMonthRow>(new CommandDefinition(@"
+            SELECT CONVERT(varchar(7), ClosedDt, 120)  AS [Month],
+                   COUNT(DISTINCT BoxNo)               AS BoxCount,
+                   SUM(MissQty)                        AS MissQty,
+                   SUM(ExcessQty)                      AS ExcessQty
+              FROM #BadBoxes
+             GROUP BY CONVERT(varchar(7), ClosedDt, 120)
+             ORDER BY [Month]",
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 
-    /// <summary>Box Detail Excess — items where QtyIssued differs from Qty and Status is non-blank.</summary>
-    public async Task<List<BoxDetailRow>> BoxDetailExcessAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
+    /// <summary>Box Detail combined — Missing + Excess rows tagged with a Type column.</summary>
+    public async Task<List<BoxDetailCombinedRow>> BoxDetailCombinedAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
     {
         await using var c = OpenCountry(country);
-        var rows = await c.QueryAsync<BoxDetailRow>(new CommandDefinition(@"
-            SELECT
-                d.BoxNo       AS BoxNo,
-                d.preparedby  AS PreparedBy,
-                d.itemcode    AS ItemCode,
-                d.qty         AS Qty,
-                d.QtyIssued   AS QtyIssued,
-                (d.QtyIssued - d.qty) AS Diff
-            FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
-            WHERE d.BoxNo IN (
-                SELECT Palletno FROM bfldata.dbo.CloseR1pallet WITH (NOLOCK)
-                WHERE Trndate >= @from AND Trndate <= @to
-                  AND ISNULL(missqty,0) + ISNULL(zeroqty,0) > 0
-                  AND Palletno IN (SELECT contno FROM usa.dbo.AMEChecking WITH (NOLOCK) WHERE Trndate >= @from)
+        await BuildBadBoxesAsync(c, fromDt, toDt, ct);
+        var rows = await c.QueryAsync<BoxDetailCombinedRow>(new CommandDefinition(@"
+            SELECT 'Missing' AS [Type],
+                   d.BoxNo, d.preparedby AS PreparedBy, d.itemcode AS ItemCode,
+                   d.qty AS Qty, d.QtyIssued AS QtyIssued, (d.qty - d.QtyIssued) AS Diff
+              FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
+              INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
+             WHERE d.QtyIssued < d.qty AND ISNULL(d.Status,'') = ''
+            UNION ALL
+            SELECT 'Excess' AS [Type],
+                   d.BoxNo, d.preparedby AS PreparedBy, d.itemcode AS ItemCode,
+                   d.qty AS Qty, d.QtyIssued AS QtyIssued, (d.QtyIssued - d.qty) AS Diff
+              FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
+              INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
+             WHERE ISNULL(d.Status,'') <> ''
+             ORDER BY BoxNo, ItemCode",
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    /// <summary>Item Summary aggregated by (Division, Department) — UI table.</summary>
+    public async Task<List<ItemSummaryByDivDeptRow>> ItemSummaryByDivDeptAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
+    {
+        await using var c = OpenCountry(country);
+        await BuildBadBoxesAsync(c, fromDt, toDt, ct);
+        var rows = await c.QueryAsync<ItemSummaryByDivDeptRow>(new CommandDefinition(@"
+            ;WITH base AS (
+                SELECT d.itemcode,
+                       CASE WHEN ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty
+                            THEN (d.qty - d.QtyIssued) ELSE 0 END AS MissingQty,
+                       CASE WHEN ISNULL(d.Status,'') <> ''
+                            THEN (d.QtyIssued - d.qty) ELSE 0 END AS ExcessQty
+                  FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
+                  INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
+            ), agg AS (
+                SELECT itemcode, SUM(MissingQty) AS MissingQty, SUM(ExcessQty) AS ExcessQty
+                  FROM base
+                 GROUP BY itemcode
+                HAVING SUM(MissingQty) + SUM(ExcessQty) > 0
+            ), soh AS (
+                SELECT itemcode, SUM(soh) AS HOStock
+                  FROM racks.dbo.lpm_locstock WITH (NOLOCK)
+                 WHERE itemcode IN (SELECT itemcode FROM agg)
+                 GROUP BY itemcode
             )
-              AND ISNULL(d.Status, '') <> ''
-            ORDER BY d.BoxNo, d.itemcode",
-            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            SELECT sub.Division                AS Division,
+                   sub.Department              AS Department,
+                   SUM(a.MissingQty)           AS MissingQty,
+                   SUM(a.ExcessQty)            AS ExcessQty,
+                   SUM(ISNULL(s.HOStock, 0))   AS HOStock
+              FROM agg a
+              LEFT JOIN datareporting.dbo.vupc_subclass sub WITH (NOLOCK) ON sub.itemcode = a.itemcode
+              LEFT JOIN soh s                                              ON s.itemcode  = a.itemcode
+             GROUP BY sub.Division, sub.Department
+             ORDER BY sub.Division, sub.Department",
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 
@@ -197,6 +243,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
     public async Task<List<ItemSummaryReportRow>> ItemSummaryAsync(string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
     {
         await using var c = OpenCountry(country);
+        await BuildBadBoxesAsync(c, fromDt, toDt, ct);
         var rows = await c.QueryAsync<ItemSummaryReportRow>(new CommandDefinition(@"
             ;WITH base AS (
                 SELECT d.itemcode,
@@ -204,34 +251,35 @@ public class ReportsService(IOnPremConnectionResolver resolver)
                             THEN (d.qty - d.QtyIssued) ELSE 0 END AS MissingQty,
                        CASE WHEN ISNULL(d.Status,'') <> ''
                             THEN (d.QtyIssued - d.qty) ELSE 0 END AS ExcessQty
-                FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
-                WHERE d.BoxNo IN (
-                    SELECT Palletno FROM bfldata.dbo.CloseR1pallet WITH (NOLOCK)
-                    WHERE Trndate >= @from AND Trndate <= @to
-                      AND ISNULL(missqty,0) + ISNULL(zeroqty,0) > 0
-                      AND Palletno IN (SELECT contno FROM usa.dbo.AMEChecking WITH (NOLOCK) WHERE Trndate >= @from)
-                )
+                  FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
+                  INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
             ), agg AS (
                 SELECT itemcode,
                        SUM(MissingQty) AS MissingQty,
                        SUM(ExcessQty)  AS ExcessQty
-                FROM base
-                GROUP BY itemcode
+                  FROM base
+                 GROUP BY itemcode
                 HAVING SUM(MissingQty) + SUM(ExcessQty) > 0
+            ), soh AS (
+                SELECT itemcode, SUM(soh) AS HOStock
+                  FROM racks.dbo.lpm_locstock WITH (NOLOCK)
+                 WHERE itemcode IN (SELECT itemcode FROM agg)
+                 GROUP BY itemcode
             )
             SELECT
-                a.itemcode                             AS ItemCode,
-                im.description                         AS ItemName,
-                sub.Division                           AS Division,
-                sub.Department                         AS Department,
-                a.MissingQty                           AS MissingQty,
-                a.ExcessQty                            AS ExcessQty,
-                ISNULL((SELECT SUM(soh) FROM racks.dbo.lpm_locstock WITH (NOLOCK) WHERE itemcode = a.itemcode), 0) AS HOStock
-            FROM agg a
-            LEFT JOIN hodata.dbo.itemmaster              im  WITH (NOLOCK) ON im.itemcode  = a.itemcode
-            LEFT JOIN datareporting.dbo.vupc_subclass    sub WITH (NOLOCK) ON sub.itemcode = a.itemcode
-            ORDER BY a.itemcode",
-            new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+                a.itemcode                AS ItemCode,
+                im.description            AS ItemName,
+                sub.Division              AS Division,
+                sub.Department            AS Department,
+                a.MissingQty              AS MissingQty,
+                a.ExcessQty               AS ExcessQty,
+                ISNULL(s.HOStock, 0)      AS HOStock
+              FROM agg a
+              LEFT JOIN hodata.dbo.itemmaster           im  WITH (NOLOCK) ON im.itemcode  = a.itemcode
+              LEFT JOIN datareporting.dbo.vupc_subclass sub WITH (NOLOCK) ON sub.itemcode = a.itemcode
+              LEFT JOIN soh s                                              ON s.itemcode  = a.itemcode
+             ORDER BY a.itemcode",
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 }
