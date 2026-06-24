@@ -40,16 +40,18 @@ CREATE TABLE dbo.WmsRptJobRun (
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WmsRptJobRun_Name_TS' AND object_id=OBJECT_ID('dbo.WmsRptJobRun'))
     CREATE INDEX IX_WmsRptJobRun_Name_TS ON dbo.WmsRptJobRun (JobName, StartTS DESC);
 
+-- IDENTITY PK + helper index: a box can be closed multiple times in a day
+-- (different ClosedBy users), so (Country, BoxNo, ClosedDt) isn't unique.
 IF OBJECT_ID('dbo.WmsRptMissingExcess_BoxSummary','U') IS NULL
 CREATE TABLE dbo.WmsRptMissingExcess_BoxSummary (
+    Id          BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
     Country     NVARCHAR(20)  NOT NULL,
     BoxNo       NVARCHAR(50)  NOT NULL,
     ClosedDt    DATE          NOT NULL,
     ClosedBy    NVARCHAR(100) NULL,
     MissQty     INT           NOT NULL,
     ExcessQty   INT           NOT NULL,
-    SnapshotTS  DATETIME2(0)  NOT NULL CONSTRAINT DF_WmsRpt_BoxSummary_TS DEFAULT(SYSDATETIME()),
-    CONSTRAINT PK_WmsRpt_BoxSummary PRIMARY KEY (Country, BoxNo, ClosedDt)
+    SnapshotTS  DATETIME2(0)  NOT NULL CONSTRAINT DF_WmsRpt_BoxSummary_TS DEFAULT(SYSDATETIME())
 );
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WmsRpt_BoxSummary_CtryDt' AND object_id=OBJECT_ID('dbo.WmsRptMissingExcess_BoxSummary'))
     CREATE INDEX IX_WmsRpt_BoxSummary_CtryDt ON dbo.WmsRptMissingExcess_BoxSummary (Country, ClosedDt);
