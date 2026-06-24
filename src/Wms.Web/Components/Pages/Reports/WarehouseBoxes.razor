@@ -138,6 +138,7 @@
     <div style="display:flex; gap:10px; margin-top:14px">
         <button class="aiwms-btn aiwms-btn-primary" @onclick="LoadAsync" disabled="@_loading">@(_loading ? "Loading…" : "Load")</button>
         <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@(_loading || !HasResult)">Export to Excel</button>
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="ToggleCountrySummaryAsync" disabled="@_loading">@(_showCountrySummary ? "Hide" : "Country Summary")</button>
         <span style="font-size:12px; color:var(--text-secondary); align-self:center">
             @(_groupBy == "Box" ? $"Top { _topN.ToString("N0") } rows" : "Aggregated")
         </span>
@@ -149,32 +150,92 @@
     }
 </div>
 
-@if (_groupBy == "Box" && _boxes.Count > 0)
+@if (_showCountrySummary)
 {
     <div class="aiwms-section">
-        <div class="aiwms-card-header">Box Detail — @_boxes.Count rows · Total Qty @_boxes.Sum(b => b.Qty).ToString("N0")</div>
+        <div class="aiwms-card-header">Country Summary — ELIGIBLE + purchased stock per Country × Season</div>
+        @if (_loadingCountrySummary)
+        {
+            <div style="padding:14px; font-style:italic; color:var(--text-secondary)">Loading…</div>
+        }
+        else if (_countrySummary.Count == 0)
+        {
+            <div class="aiwms-alert info">No data.</div>
+        }
+        else
+        {
+            <table class="aiwms-table aiwms-table-dense">
+                <thead><tr><th>Country</th><th>Season</th><th style="text-align:right">LPM Current</th><th style="text-align:right">LPM Future</th><th style="text-align:right">Non-LPM</th><th style="text-align:right">Total</th></tr></thead>
+                <tbody>
+                    @foreach (var r in _countrySummary)
+                    {
+                        <tr>
+                            <td><strong>@r.Country</strong></td>
+                            <td>@r.Season</td>
+                            <td style="text-align:right">@r.LPMCurrentQty.ToString("N0")</td>
+                            <td style="text-align:right">@r.LPMFutureQty.ToString("N0")</td>
+                            <td style="text-align:right">@r.NonLPMQty.ToString("N0")</td>
+                            <td style="text-align:right; font-weight:600">@r.TotalQty.ToString("N0")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+    </div>
+}
+
+@if (_groupBy == "Box" && _boxes.Count > 0)
+{
+    var distBox = DistinctCounts();
+    <div class="aiwms-section">
+        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:12px; padding:6px 0 14px 0">
+            @MetricCard("BOXES",      _boxes.Count.ToString("N0"),                    "#fbbf24")
+            @MetricCard("PALLETS",    distBox["PalletNo"].ToString("N0"),             "#a78bfa")
+            @MetricCard("WAREHOUSES", distBox["Warehouse"].ToString("N0"),            "#34d399")
+            @MetricCard("TOTAL QTY",  _boxes.Sum(b => b.Qty).ToString("N0"),          "#f59e0b")
+        </div>
+
         <table class="aiwms-table aiwms-table-dense">
             <thead>
-                <tr>
-                    <th>Country</th><th>Warehouse</th><th>PalletNo</th><th>BoxNo</th><th>OraPoNo</th>
-                    <th>PalletType</th><th>TypeName</th><th>PalletCategory</th>
-                    <th style="text-align:right">Qty</th><th style="text-align:right">Summer</th><th style="text-align:right">Winter</th>
-                    <th>LPM</th><th>Division</th><th>Department</th><th>Brand</th><th>Rack</th>
-                    <th>Purchased</th><th>ContNo</th><th>TrnDate</th><th>CurrDate</th>
+                <tr style="background:#f5c543">
+                    <th>Country<div style="font-size:10px;font-weight:400;color:#444">@distBox["Country"] DISTINCT</div></th>
+                    <th>Warehouse<div style="font-size:10px;font-weight:400;color:#444">@distBox["Warehouse"] DISTINCT</div></th>
+                    <th>ContNo<div style="font-size:10px;font-weight:400;color:#444">@distBox["ContNo"] DISTINCT</div></th>
+                    <th>LPM<div style="font-size:10px;font-weight:400;color:#444">@distBox["LPM"] DISTINCT</div></th>
+                    <th>Pallet No<div style="font-size:10px;font-weight:400;color:#444">@distBox["PalletNo"] DISTINCT</div></th>
+                    <th>Box No<div style="font-size:10px;font-weight:400;color:#444">@distBox["BoxNo"] DISTINCT</div></th>
+                    <th>PONO<div style="font-size:10px;font-weight:400;color:#444">@distBox["OraPoNo"] DISTINCT</div></th>
+                    <th style="text-align:right">Qty</th>
+                    <th>Pallet Type<div style="font-size:10px;font-weight:400;color:#444">@distBox["PalletType"] DISTINCT</div></th>
+                    <th>Type Name<div style="font-size:10px;font-weight:400;color:#444">@distBox["TypeName"] DISTINCT</div></th>
+                    <th>Pallet Category<div style="font-size:10px;font-weight:400;color:#444">@distBox["PalletCategory"] DISTINCT</div></th>
+                    <th>Division<div style="font-size:10px;font-weight:400;color:#444">@distBox["Division"] DISTINCT</div></th>
+                    <th>Department<div style="font-size:10px;font-weight:400;color:#444">@distBox["Department"] DISTINCT</div></th>
+                    <th>Brand<div style="font-size:10px;font-weight:400;color:#444">@distBox["Brand"] DISTINCT</div></th>
+                    <th>Rack<div style="font-size:10px;font-weight:400;color:#444">@distBox["Rack"] DISTINCT</div></th>
+                    <th>Purchased<div style="font-size:10px;font-weight:400;color:#444">@distBox["Purchased"] = N</div></th>
                 </tr>
             </thead>
             <tbody>
                 @foreach (var b in _boxes)
                 {
                     <tr>
-                        <td>@b.Country</td><td>@b.Warehouse</td><td>@b.PalletNo</td><td>@b.BoxNo</td><td>@b.OraPoNo</td>
-                        <td>@b.PalletType</td><td>@b.TypeName</td><td>@b.PalletCategory</td>
+                        <td>@b.Country</td>
+                        <td>@b.Warehouse</td>
+                        <td>@b.ContNo</td>
+                        <td>@b.LPM</td>
+                        <td>@b.PalletNo</td>
+                        <td>@b.BoxNo</td>
+                        <td>@b.OraPoNo</td>
                         <td style="text-align:right">@b.Qty.ToString("N0")</td>
-                        <td style="text-align:right">@b.SummerQty.ToString("N0")</td>
-                        <td style="text-align:right">@b.WinterQty.ToString("N0")</td>
-                        <td>@b.LPM</td><td>@b.Division</td><td>@b.Department</td><td>@b.Brand</td><td>@b.Rack</td>
-                        <td>@b.Purchased</td><td>@b.ContNo</td>
-                        <td>@(b.TrnDate?.ToString("yyyy-MM-dd"))</td><td>@(b.CurrDate?.ToString("yyyy-MM-dd HH:mm"))</td>
+                        <td>@b.PalletType</td>
+                        <td>@b.TypeName</td>
+                        <td>@b.PalletCategory</td>
+                        <td>@b.Division</td>
+                        <td>@b.Department</td>
+                        <td>@b.Brand</td>
+                        <td>@b.Rack</td>
+                        <td>@b.Purchased</td>
                     </tr>
                 }
             </tbody>
@@ -301,9 +362,54 @@ else if (_groupBy == "Brand" && _brandRows.Count > 0)
     private List<WhDivisionRow>   _divisionRows = new();
     private List<WhDepartmentRow> _deptRows = new();
     private List<WhBrandRow>      _brandRows = new();
+    private List<CountrySummaryRow> _countrySummary = new();
+    private bool _showCountrySummary;
+    private bool _loadingCountrySummary;
     private bool _loading;
     private string _message = "";
     private bool _isError;
+
+    // Counts distinct values per column in the loaded Box rows — drives the
+    // small "N DISTINCT" subheader under each column.
+    private Dictionary<string, int> DistinctCounts() => new()
+    {
+        ["Country"]        = _boxes.Select(b => b.Country).Distinct().Count(),
+        ["Warehouse"]      = _boxes.Select(b => b.Warehouse ?? "").Distinct().Count(),
+        ["ContNo"]         = _boxes.Where(b => !string.IsNullOrEmpty(b.ContNo)).Select(b => b.ContNo!).Distinct().Count(),
+        ["LPM"]            = _boxes.Where(b => !string.IsNullOrEmpty(b.LPM)).Select(b => b.LPM!).Distinct().Count(),
+        ["PalletNo"]       = _boxes.Select(b => b.PalletNo).Distinct().Count(),
+        ["BoxNo"]          = _boxes.Select(b => b.BoxNo).Distinct().Count(),
+        ["OraPoNo"]        = _boxes.Where(b => !string.IsNullOrEmpty(b.OraPoNo)).Select(b => b.OraPoNo!).Distinct().Count(),
+        ["PalletType"]     = _boxes.Select(b => b.PalletType).Distinct().Count(),
+        ["TypeName"]       = _boxes.Where(b => !string.IsNullOrEmpty(b.TypeName)).Select(b => b.TypeName!).Distinct().Count(),
+        ["PalletCategory"] = _boxes.Where(b => !string.IsNullOrEmpty(b.PalletCategory)).Select(b => b.PalletCategory!).Distinct().Count(),
+        ["Division"]       = _boxes.Where(b => !string.IsNullOrEmpty(b.Division)).Select(b => b.Division!).Distinct().Count(),
+        ["Department"]     = _boxes.Where(b => !string.IsNullOrEmpty(b.Department)).Select(b => b.Department!).Distinct().Count(),
+        ["Brand"]          = _boxes.Where(b => !string.IsNullOrEmpty(b.Brand)).Select(b => b.Brand!).Distinct().Count(),
+        ["Rack"]           = _boxes.Where(b => !string.IsNullOrEmpty(b.Rack)).Select(b => b.Rack!).Distinct().Count(),
+        ["Purchased"]      = _boxes.Count(b => b.Purchased == "N"),
+    };
+
+    private RenderFragment MetricCard(string label, string value, string accent) => __builder =>
+    {
+        <div style="background:white; border:1px solid #00000010; border-left:4px solid @accent; padding:10px 14px; border-radius:var(--r-sm)">
+            <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:var(--text-secondary)">@label</div>
+            <div style="font-size:1.4rem; font-weight:800; color:#1f2937">@value</div>
+        </div>
+    };
+
+    private async Task ToggleCountrySummaryAsync()
+    {
+        if (_showCountrySummary) { _showCountrySummary = false; return; }
+        _showCountrySummary = true;
+        if (_countrySummary.Count == 0)
+        {
+            _loadingCountrySummary = true; await InvokeAsync(StateHasChanged);
+            try { _countrySummary = await Svc.GetCountrySummaryAsync(); }
+            catch (Exception ex) { ShowError($"Country Summary failed: {ex.Message}"); }
+            finally { _loadingCountrySummary = false; }
+        }
+    }
 
     private bool HasResult => _groupBy switch
     {
