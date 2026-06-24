@@ -275,6 +275,116 @@ public class ReportsService(IOnPremConnectionResolver resolver)
     /// (hodata.itemmaster), hierarchy/division/department (datareporting.vupc_subclass),
     /// and HO stock (racks.lpm_locstock).
     /// </summary>
+    // ===================== LPM WH Stock report (ported from LPMSIM) =====================
+    /// <summary>Distinct PalletCategory values from bfldata.dbo.pallettype.</summary>
+    public async Task<List<string>> GetPalletCategoriesAsync(CancellationToken ct = default)
+    {
+        await using var c = OpenOnPremBackup();
+        var rows = await c.QueryAsync<string>(new CommandDefinition(@"
+            SELECT DISTINCT PalletCategory
+              FROM bfldata.dbo.pallettype
+             WHERE PalletCategory IS NOT NULL AND PalletCategory <> ''
+             ORDER BY PalletCategory",
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    /// <summary>
+    /// Ported from LPMSIM (WhHoStockService.GetLpmWhStockAsync). For each SIM
+    /// country (or just the caller-selected ones), sums purchased LPM warehouse
+    /// stock (LPMDt IS NOT NULL AND ShopEligible &lt;&gt; 'E') by (Country,
+    /// Division, Season, LPMDt Year/Month) for the chosen PalletCategory
+    /// (default ELIGIBLE).
+    /// </summary>
+    public async Task<List<LpmWhStockCell>> GetLpmWhStockAsync(
+        string palletCategory, IEnumerable<string>? onlyCountries = null, CancellationToken ct = default)
+    {
+        var pc = string.IsNullOrWhiteSpace(palletCategory) ? "ELIGIBLE" : palletCategory.Trim();
+        await using var conn = OpenOnPremBackup();
+
+        // 1) item → division map ONCE (global master tables)
+        await using (var ddl = conn.CreateCommand())
+        {
+            ddl.CommandText = @"
+                IF OBJECT_ID('tempdb..#LpmItemDiv') IS NOT NULL DROP TABLE #LpmItemDiv;
+                SELECT u.itemcode, Division = MIN(sm.Division)
+                  INTO #LpmItemDiv
+                  FROM Datareporting.dbo.upc_subclass    u
+                  INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+                 WHERE u.itemcode IS NOT NULL AND u.itemcode <> ''
+                 GROUP BY u.itemcode;
+                CREATE CLUSTERED INDEX IX_LpmItemDiv ON #LpmItemDiv (itemcode);";
+            ddl.CommandTimeout = 120;
+            await ddl.ExecuteNonQueryAsync(ct);
+        }
+
+        // 2) Which SIM countries to process?
+        var countries = new List<string>();
+        await using (var cc = conn.CreateCommand())
+        {
+            cc.CommandText = @"
+                SELECT DISTINCT SIMCountry
+                  FROM bfldata.dbo.DataSettings
+                 WHERE SIMCountry IS NOT NULL AND LTRIM(RTRIM(SIMCountry)) <> ''
+                 ORDER BY SIMCountry;";
+            cc.CommandTimeout = 60;
+            await using var rdr = await cc.ExecuteReaderAsync(ct);
+            var only = onlyCountries?.Where(s => !string.IsNullOrWhiteSpace(s))
+                                     .Select(s => s.Trim())
+                                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            while (await rdr.ReadAsync(ct))
+            {
+                var ctry = rdr.GetString(0);
+                if (only is null || only.Count == 0 || only.Contains(ctry.Trim()))
+                    countries.Add(ctry);
+            }
+        }
+
+        // 3) per-country aggregation to (Division, Season, Year, Month)
+        var rows = new List<LpmWhStockCell>();
+        foreach (var country in countries)
+        {
+            string whSrc;
+            try { whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct); }
+            catch { continue; }
+
+            try
+            {
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+                    SELECT Division = ISNULL(id.Division, '(no division)'),
+                           Season   = CASE WHEN UPPER(ISNULL(w.Season,'')) = 'W' THEN 'Winter' ELSE 'Summer' END,
+                           Yr       = YEAR(w.LPMDt),
+                           Mo       = MONTH(w.LPMDt),
+                           Qty      = SUM(CAST(ISNULL(w.Qty,0) AS bigint))
+                      FROM {whSrc} w
+                      LEFT JOIN #LpmItemDiv id ON id.itemcode = w.ItemCode
+                     WHERE w.LPMDt IS NOT NULL
+                       AND ISNULL(w.ShopEligible,'') <> 'E'
+                       AND UPPER(ISNULL(w.PalletCategory,'')) = UPPER(@pc)
+                     GROUP BY ISNULL(id.Division, '(no division)'),
+                              CASE WHEN UPPER(ISNULL(w.Season,'')) = 'W' THEN 'Winter' ELSE 'Summer' END,
+                              YEAR(w.LPMDt), MONTH(w.LPMDt)
+                    HAVING SUM(CAST(ISNULL(w.Qty,0) AS bigint)) <> 0;";
+                cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@pc", pc));
+                cmd.CommandTimeout = 300;
+                await using var rdr = await cmd.ExecuteReaderAsync(ct);
+                while (await rdr.ReadAsync(ct))
+                {
+                    rows.Add(new LpmWhStockCell(
+                        Country:  country,
+                        Division: rdr.IsDBNull(0) ? "" : rdr.GetString(0),
+                        Season:   rdr.IsDBNull(1) ? "" : rdr.GetString(1),
+                        Year:     rdr.IsDBNull(2) ? 0  : rdr.GetInt32(2),
+                        Month:    rdr.IsDBNull(3) ? 0  : rdr.GetInt32(3),
+                        Qty:      rdr.IsDBNull(4) ? 0L : rdr.GetInt64(4)));
+                }
+            }
+            catch { /* one country unreadable — skip */ }
+        }
+        return rows;
+    }
+
     // ===================== Non-LPM WH Stock report (ported from LPMSIM) =====================
     /// <summary>
     /// Ported from LPMSIM (WhHoStockService.GetNonLpmWhStockAsync). For every

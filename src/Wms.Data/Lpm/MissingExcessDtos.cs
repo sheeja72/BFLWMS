@@ -31,6 +31,11 @@ public record ItemSummaryReportRow(
 /// (Country, Division) with Summer + Winter Non-LPM eligible qty.</summary>
 public record NonLpmWhStockRow(string Country, string Division, long Summer, long Winter);
 
+/// <summary>Ported from LPMSIM. One cell of the LPM WH Stock report:
+/// purchased LPM qty for (Country, Division, Season, LPMDt Year/Month).
+/// Razor rolls these into Allocation / Season / Month views.</summary>
+public record LpmWhStockCell(string Country, string Division, string Season, int Year, int Month, long Qty);
+
 /// <summary>Box Summary aggregated by month (yyyy-MM).</summary>
 public record BoxSummaryMonthRow(string Month, int BoxCount, int MissQty, int ExcessQty);
 
