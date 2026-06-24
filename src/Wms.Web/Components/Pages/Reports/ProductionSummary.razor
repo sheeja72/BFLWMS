@@ -3,7 +3,7 @@
 @using System.Text
 @using Wms.Core
 @using Wms.Data.Lpm
-@attribute [Authorize(Roles = "Admin,Reports")]
+@attribute [Authorize(Policy = MenuKeys.RPT_PRODUCTION_SUMMARY)]
 @inject ReportsService Svc
 @inject Microsoft.JSInterop.IJSRuntime JS
 

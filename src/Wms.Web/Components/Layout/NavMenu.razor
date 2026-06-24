@@ -1,84 +1,64 @@
+@using Wms.Core
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components.Authorization
+@inject AuthenticationStateProvider AuthProvider
+@inject IAuthorizationService AuthService
+
 <nav class="aiwms-nav">
     <NavLink class="aiwms-nav-link" ActiveClass="active" href="" Match="NavLinkMatch.All">
         <span class="aiwms-nav-icon">home</span>
         <span>Home</span>
     </NavLink>
 
-    <AuthorizeView Roles="Admin,WHAssociate,WHSupervisor,WHManager">
-        <Authorized>
-            <div class="aiwms-nav-section">Container Building</div>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="building/manual">
-                <span class="aiwms-nav-icon">inventory_2</span>
-                <span>LPM Manual Building</span>
+    @{
+        // Section header only renders if at least one menu inside is visible.
+        var grouped = MenuKeys.All
+            .Where(m => _visible.Contains(m.Key))
+            .GroupBy(m => m.Group)
+            .ToList();
+    }
+    @foreach (var grp in grouped)
+    {
+        <div class="aiwms-nav-section">@grp.Key</div>
+        @foreach (var menu in grp)
+        {
+            <NavLink class="aiwms-nav-link" ActiveClass="active" href="@menu.Url">
+                <span class="aiwms-nav-icon">@IconFor(menu.Key)</span>
+                <span>@menu.Label</span>
             </NavLink>
-            <AuthorizeView Roles="Admin,WHManager" Context="ctxAlloc">
-                <Authorized>
-                    <NavLink class="aiwms-nav-link" ActiveClass="active" href="building/container-allocation">
-                        <span class="aiwms-nav-icon">assignment_turned_in</span>
-                        <span>Container Allocation</span>
-                    </NavLink>
-                </Authorized>
-            </AuthorizeView>
-
-            <div class="aiwms-nav-section">Item Encoding</div>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="encoding">
-                <span class="aiwms-nav-icon">sell</span>
-                <span>Item Encoding</span>
-            </NavLink>
-
-            <div class="aiwms-nav-section">Production to Stores</div>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="production/lpm">
-                <span class="aiwms-nav-icon">local_shipping</span>
-                <span>LPM Production</span>
-            </NavLink>
-        </Authorized>
-    </AuthorizeView>
-
-    <AuthorizeView Roles="Admin,Reports">
-        <Authorized>
-            <div class="aiwms-nav-section">Reports</div>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="reports/missing-excess">
-                <span class="aiwms-nav-icon">assessment</span>
-                <span>Missing / Excess Items from Production</span>
-            </NavLink>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="reports/non-lpm-wh-stock">
-                <span class="aiwms-nav-icon">inventory_2</span>
-                <span>Non-LPM WH Stock Report</span>
-            </NavLink>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="reports/lpm-wh-stock">
-                <span class="aiwms-nav-icon">inventory</span>
-                <span>LPM WH Stock Report</span>
-            </NavLink>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="reports/production-summary">
-                <span class="aiwms-nav-icon">qr_code_scanner</span>
-                <span>Production Summary Report</span>
-            </NavLink>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="reports/warehouse-boxes">
-                <span class="aiwms-nav-icon">warehouse</span>
-                <span>Warehouse Boxes</span>
-            </NavLink>
-        </Authorized>
-    </AuthorizeView>
-
-    <AuthorizeView Roles="Admin">
-        <Authorized>
-            <div class="aiwms-nav-section">Admin</div>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="admin/users">
-                <span class="aiwms-nav-icon">group</span>
-                <span>Users &amp; Roles</span>
-            </NavLink>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="admin/wh-master">
-                <span class="aiwms-nav-icon">apartment</span>
-                <span>WH Master</span>
-            </NavLink>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="admin/audit">
-                <span class="aiwms-nav-icon">history</span>
-                <span>Audit Log</span>
-            </NavLink>
-            <NavLink class="aiwms-nav-link" ActiveClass="active" href="admin/nightly-batches">
-                <span class="aiwms-nav-icon">schedule</span>
-                <span>Nightly Batches Status</span>
-            </NavLink>
-        </Authorized>
-    </AuthorizeView>
+        }
+    }
 </nav>
+
+@code {
+    private HashSet<string> _visible = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        var auth = await AuthProvider.GetAuthenticationStateAsync();
+        var user = auth.User;
+        foreach (var menu in MenuKeys.All)
+        {
+            var result = await AuthService.AuthorizeAsync(user, null, menu.Key);
+            if (result.Succeeded) _visible.Add(menu.Key);
+        }
+    }
+
+    private static string IconFor(string key) => key switch
+    {
+        MenuKeys.LPM_MANUAL_BUILDING       => "inventory_2",
+        MenuKeys.CONTAINER_ALLOCATION      => "assignment_turned_in",
+        MenuKeys.ITEM_ENCODING             => "sell",
+        MenuKeys.LPM_PRODUCTION            => "local_shipping",
+        MenuKeys.RPT_MISSING_EXCESS        => "assessment",
+        MenuKeys.RPT_NON_LPM_WH_STOCK      => "inventory_2",
+        MenuKeys.RPT_LPM_WH_STOCK          => "inventory",
+        MenuKeys.RPT_PRODUCTION_SUMMARY    => "qr_code_scanner",
+        MenuKeys.RPT_WAREHOUSE_BOXES       => "warehouse",
+        MenuKeys.ADMIN_USERS               => "group",
+        MenuKeys.ADMIN_WH_MASTER           => "apartment",
+        MenuKeys.ADMIN_AUDIT_LOG           => "history",
+        MenuKeys.ADMIN_NIGHTLY_BATCHES     => "schedule",
+        _ => "circle",
+    };
+}

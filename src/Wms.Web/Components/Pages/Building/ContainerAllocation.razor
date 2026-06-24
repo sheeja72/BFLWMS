@@ -3,7 +3,7 @@
 @using System.Text
 @using Wms.Core
 @using Wms.Data.Lpm
-@attribute [Authorize(Roles = "Admin,WHManager")]
+@attribute [Authorize(Policy = MenuKeys.CONTAINER_ALLOCATION)]
 @inject ContainerAllocationService Svc
 @inject ICurrentUser CurrentUser
 @inject Microsoft.JSInterop.IJSRuntime JS

@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Wms.Core;
 using Wms.Core.Entities;
 using Wms.Data;
 using Microsoft.AspNetCore.Authentication;
@@ -80,6 +81,17 @@ public class WmsClaimsTransformer(
             {
                 if (!baseId.HasClaim(baseId.RoleClaimType, ur.RoleCode))
                     baseId.AddClaim(new Claim(baseId.RoleClaimType, ur.RoleCode));
+            }
+
+            // Per-user explicit menu grants (additive to role-default access).
+            var grants = await db.UserMenuAccess
+                .Where(g => g.Username == email)
+                .Select(g => g.MenuKey)
+                .ToListAsync(cts.Token);
+            foreach (var key in grants)
+            {
+                if (!baseId.HasClaim(MenuKeys.ClaimType, key))
+                    baseId.AddClaim(new Claim(MenuKeys.ClaimType, key));
             }
         }
         catch (Exception ex)

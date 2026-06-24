@@ -83,11 +83,21 @@ public class Program
 
         builder.Services.AddScoped<IClaimsTransformation, WmsClaimsTransformer>();
 
+        builder.Services.AddSingleton<Microsoft.AspNetCore.Authorization.IAuthorizationHandler, Wms.Web.Auth.MenuAccessHandler>();
         builder.Services.AddAuthorization(options =>
         {
             options.AddPolicy(AuthPolicies.RequireActiveUser, p => p
                 .RequireAuthenticatedUser()
                 .RequireClaim(WmsClaimsTransformer.ActiveClaim, "1"));
+
+            // One policy per menu key: Authorize(Policy = MenuKeys.X) on pages
+            // and AuthorizeView Policy="MenuKeys.X" in NavMenu both resolve here.
+            foreach (var menu in MenuKeys.All)
+            {
+                options.AddPolicy(menu.Key, p => p
+                    .RequireAuthenticatedUser()
+                    .AddRequirements(new Wms.Web.Auth.MenuAccessRequirement(menu.Key)));
+            }
 
             // All endpoints require auth by default. AllowAnonymous on the
             // OIDC sign-in/sign-out endpoints is set by Microsoft.Identity.Web.UI.

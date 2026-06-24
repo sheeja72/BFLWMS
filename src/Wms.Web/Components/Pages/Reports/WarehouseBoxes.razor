@@ -4,7 +4,7 @@
 @using Wms.Core
 @using Wms.Data.Lpm
 @using MudBlazor
-@attribute [Authorize(Roles = "Admin,Reports")]
+@attribute [Authorize(Policy = MenuKeys.RPT_WAREHOUSE_BOXES)]
 @inject WarehouseBoxesService Svc
 @inject Microsoft.JSInterop.IJSRuntime JS
 

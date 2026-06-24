@@ -1,5 +1,5 @@
 @page "/production/lpm"
-@attribute [Authorize(Roles = Wms.Core.Roles.AnyWarehouse)]
+@attribute [Authorize(Policy = Wms.Core.MenuKeys.LPM_PRODUCTION)]
 
 <PageTitle>WMS — LPM Production</PageTitle>
 

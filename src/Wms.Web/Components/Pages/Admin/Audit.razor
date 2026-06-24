@@ -1,6 +1,6 @@
 @page "/admin/audit"
 @rendermode RenderMode.InteractiveServer
-@attribute [Authorize(Roles = Wms.Core.Roles.Admin)]
+@attribute [Authorize(Policy = Wms.Core.MenuKeys.ADMIN_AUDIT_LOG)]
 @using Wms.Core.Entities
 @using Wms.Data
 @using Microsoft.EntityFrameworkCore
