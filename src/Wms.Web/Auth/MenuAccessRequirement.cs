@@ -25,13 +25,18 @@ public sealed class MenuAccessHandler : AuthorizationHandler<MenuAccessRequireme
         // 1) Admin bypass.
         if (user.IsInRole(Roles.Admin)) { ctx.Succeed(req); return Task.CompletedTask; }
 
-        // 2) Explicit menu grant via aiwms_menu claim.
-        if (user.HasClaim(c => c.Type == MenuKeys.ClaimType && c.Value == req.MenuKey))
+        // 2) Exact-list mode: if the user has ANY explicit menu grants, those
+        //    grants are the authoritative whitelist — role defaults no longer
+        //    apply. Lets admins use Menu Access to subtract from role defaults
+        //    (untick a menu to hide it for that user).
+        if (user.HasClaim(c => c.Type == MenuKeys.ClaimType))
         {
-            ctx.Succeed(req); return Task.CompletedTask;
+            if (user.HasClaim(c => c.Type == MenuKeys.ClaimType && c.Value == req.MenuKey))
+                ctx.Succeed(req);
+            return Task.CompletedTask;
         }
 
-        // 3) Default-role match (current pre-grant behaviour).
+        // 3) No grants configured → fall back to role defaults.
         var entry = MenuKeys.All.FirstOrDefault(m => m.Key == req.MenuKey);
         if (entry is not null && entry.DefaultRoles.Any(user.IsInRole))
             ctx.Succeed(req);
