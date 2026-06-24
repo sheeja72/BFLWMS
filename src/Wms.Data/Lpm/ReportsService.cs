@@ -29,10 +29,121 @@ public class ReportsService(IOnPremConnectionResolver resolver)
         return c;
     }
 
+    private SqlConnection OpenWms()
+    {
+        var c = new SqlConnection(WithConnectTimeout(resolver.GetWmsAzureConnectionString()));
+        c.Open();
+        return c;
+    }
+
     // All report queries currently hit OnPremBackup (UAE master) via 3-part naming —
     // same as ContainerAllocationService — since per-country connection strings
     // aren't configured. Wire to GetCountryConnectionString later if needed.
     private SqlConnection OpenCountry(string country) => OpenOnPremBackup();
+
+    // ===================== Snapshot-backed reads (Azure WMS DB) =====================
+    // These are the methods the Missing/Excess page calls on Load. They read
+    // pre-computed snapshot tables populated by MissingExcessSnapshotService.
+
+    public async Task<List<BoxSummaryMonthRow>> BoxSummaryByMonthFromSnapshotAsync(
+        string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
+    {
+        await using var c = OpenWms();
+        var rows = await c.QueryAsync<BoxSummaryMonthRow>(new CommandDefinition(@"
+            SELECT CONVERT(varchar(7), ClosedDt, 120)  AS [Month],
+                   COUNT(DISTINCT BoxNo)                AS BoxCount,
+                   SUM(MissQty)                         AS MissQty,
+                   SUM(ExcessQty)                       AS ExcessQty
+              FROM dbo.WmsRptMissingExcess_BoxSummary
+             WHERE Country = @c AND ClosedDt BETWEEN @from AND @to
+             GROUP BY CONVERT(varchar(7), ClosedDt, 120)
+             ORDER BY [Month]",
+            new { c = country, from = fromDt.Date, to = toDt.Date },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task<List<BoxSummaryRow>> BoxSummaryFromSnapshotAsync(
+        string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
+    {
+        await using var c = OpenWms();
+        var rows = await c.QueryAsync<BoxSummaryRow>(new CommandDefinition(@"
+            SELECT BoxNo, ClosedDt, ClosedBy, MissQty, ExcessQty
+              FROM dbo.WmsRptMissingExcess_BoxSummary
+             WHERE Country = @c AND ClosedDt BETWEEN @from AND @to
+             ORDER BY ClosedBy DESC, ClosedDt DESC",
+            new { c = country, from = fromDt.Date, to = toDt.Date },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task<List<BoxDetailCombinedRow>> BoxDetailCombinedFromSnapshotAsync(
+        string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
+    {
+        await using var c = OpenWms();
+        var rows = await c.QueryAsync<BoxDetailCombinedRow>(new CommandDefinition(@"
+            SELECT [Type], BoxNo, PreparedBy, ItemCode, Qty, QtyIssued, Diff
+              FROM dbo.WmsRptMissingExcess_BoxDetail
+             WHERE Country = @c AND ClosedDt BETWEEN @from AND @to
+             ORDER BY BoxNo, ItemCode",
+            new { c = country, from = fromDt.Date, to = toDt.Date },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task<List<ItemSummaryByDivDeptRow>> ItemSummaryByDivDeptFromSnapshotAsync(
+        string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
+    {
+        await using var c = OpenWms();
+        // HOStock is point-in-time at snapshot run. For the (Division, Department)
+        // aggregate we take MAX HOStock per item then SUM across the items in
+        // the group so an item's stock isn't double-counted across multiple days.
+        var rows = await c.QueryAsync<ItemSummaryByDivDeptRow>(new CommandDefinition(@"
+            ;WITH itemAgg AS (
+                SELECT Country, ItemCode, MAX(Division) AS Division, MAX(Department) AS Department,
+                       SUM(MissingQty) AS MissingQty, SUM(ExcessQty) AS ExcessQty,
+                       MAX(HOStock)    AS HOStock
+                  FROM dbo.WmsRptMissingExcess_ItemSummary
+                 WHERE Country = @c AND ClosedDt BETWEEN @from AND @to
+                 GROUP BY Country, ItemCode
+            )
+            SELECT Division, Department,
+                   SUM(MissingQty) AS MissingQty,
+                   SUM(ExcessQty)  AS ExcessQty,
+                   SUM(HOStock)    AS HOStock
+              FROM itemAgg
+             GROUP BY Division, Department
+             ORDER BY Division, Department",
+            new { c = country, from = fromDt.Date, to = toDt.Date },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    public async Task<List<ItemSummaryReportRow>> ItemSummaryFromSnapshotAsync(
+        string country, DateTime fromDt, DateTime toDt, CancellationToken ct = default)
+    {
+        await using var c = OpenWms();
+        var rows = await c.QueryAsync<ItemSummaryReportRow>(new CommandDefinition(@"
+            ;WITH itemAgg AS (
+                SELECT Country, ItemCode,
+                       MAX(ItemName)   AS ItemName,
+                       MAX(Division)   AS Division,
+                       MAX(Department) AS Department,
+                       SUM(MissingQty) AS MissingQty,
+                       SUM(ExcessQty)  AS ExcessQty,
+                       MAX(HOStock)    AS HOStock
+                  FROM dbo.WmsRptMissingExcess_ItemSummary
+                 WHERE Country = @c AND ClosedDt BETWEEN @from AND @to
+                 GROUP BY Country, ItemCode
+            )
+            SELECT ItemCode, ItemName, Division, Department,
+                   MissingQty, ExcessQty, HOStock
+              FROM itemAgg
+             ORDER BY ItemCode",
+            new { c = country, from = fromDt.Date, to = toDt.Date },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return rows.AsList();
+    }
 
     public async Task<List<string>> GetCountriesAsync(CancellationToken ct = default)
     {

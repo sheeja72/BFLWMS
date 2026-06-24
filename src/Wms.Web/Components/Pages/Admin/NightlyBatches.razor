@@ -1,0 +1,205 @@
+@page "/admin/nightly-batches"
+@rendermode RenderMode.InteractiveServer
+@using Wms.Core
+@using Wms.Data.Lpm
+@attribute [Authorize(Roles = "Admin")]
+@inject MissingExcessSnapshotService Snap
+@inject ICurrentUser CurrentUser
+
+<PageTitle>WMS — Nightly Batches Status</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Nightly Batches Status</h2>
+    <p>Country toggles for the 06:00 GST job, recent run log, and on-demand Refresh / Backfill.</p>
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">Country Activation</div>
+    <table class="aiwms-table aiwms-table-dense" style="max-width:720px">
+        <thead>
+            <tr>
+                <th>Country</th>
+                <th>Active</th>
+                <th>Last updated</th>
+                <th>By</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var c in _config)
+            {
+                <tr>
+                    <td><strong>@c.Country</strong></td>
+                    <td>
+                        <input type="checkbox" checked="@c.IsActive"
+                               @onchange="@(e => ToggleAsync(c.Country, (bool)e.Value!))" />
+                    </td>
+                    <td>@c.UpdatedTS.ToString("yyyy-MM-dd HH:mm")</td>
+                    <td>@c.UpdatedBy</td>
+                    <td>
+                        <button class="aiwms-btn aiwms-btn-secondary" style="font-size:11px; padding:4px 8px"
+                                @onclick="() => RefreshYesterdayAsync(c.Country)" disabled="@_busy">Refresh Now (T-1)</button>
+                        <button class="aiwms-btn aiwms-btn-secondary" style="font-size:11px; padding:4px 8px"
+                                @onclick="() => BackfillAsync(c.Country)" disabled="@_busy">Backfill from 2026-02-21</button>
+                    </td>
+                </tr>
+            }
+            @if (_config.Count == 0)
+            {
+                <tr><td colspan="5" style="font-style:italic; color:var(--text-secondary)">No countries configured yet. Add one with the form below.</td></tr>
+            }
+        </tbody>
+    </table>
+
+    <div style="display:flex; gap:8px; align-items:end; margin-top:14px">
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">ADD COUNTRY</label>
+            <input @bind="_newCountry" placeholder="e.g. KSA" style="padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white;" />
+        </div>
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="AddCountryAsync" disabled="@(_busy || string.IsNullOrWhiteSpace(_newCountry))">Add (inactive)</button>
+    </div>
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="aiwms-alert @(_isError ? "error" : "info")" style="margin-top:12px">@_message</div>
+    }
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between">
+        <span>Recent runs — last @_runs.Count</span>
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="RefreshLogAsync" disabled="@_busy">Reload</button>
+    </div>
+    <table class="aiwms-table aiwms-table-dense">
+        <thead>
+            <tr>
+                <th>RunId</th><th>Country</th><th>Mode</th><th>Started</th><th>Ended</th>
+                <th>Status</th><th style="text-align:right">Rows</th>
+                <th style="text-align:right">Days</th><th>Triggered By</th><th>Error</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var r in _runs)
+            {
+                <tr>
+                    <td>@r.RunId</td>
+                    <td>@r.Country</td>
+                    <td>@r.Mode</td>
+                    <td>@r.StartTS.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                    <td>@(r.EndTS?.ToString("yyyy-MM-dd HH:mm:ss"))</td>
+                    <td><span class="aiwms-pill @StatusPill(r.Status)">@r.Status</span></td>
+                    <td style="text-align:right">@r.RowsProcessed</td>
+                    <td style="text-align:right">@r.DatesProcessed</td>
+                    <td>@r.TriggeredBy</td>
+                    <td style="max-width:380px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title="@r.ErrorMessage">@r.ErrorMessage</td>
+                </tr>
+            }
+            @if (_runs.Count == 0)
+            {
+                <tr><td colspan="10" style="font-style:italic; color:var(--text-secondary)">No runs yet.</td></tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    private List<RptCountryConfigRow> _config = new();
+    private List<RptJobRunRow> _runs = new();
+    private string _newCountry = "";
+    private bool _busy;
+    private string _message = "";
+    private bool _isError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await CurrentUser.EnsureLoadedAsync();
+        await ReloadConfigAsync();
+        await RefreshLogAsync();
+    }
+
+    private async Task ReloadConfigAsync()
+    {
+        try { _config = await Snap.GetCountryConfigAsync(); }
+        catch (Exception ex) { Show($"Failed to load config: {ex.Message}", true); }
+    }
+
+    private async Task RefreshLogAsync()
+    {
+        try { _runs = await Snap.GetRecentRunsAsync(50); }
+        catch (Exception ex) { Show($"Failed to load runs: {ex.Message}", true); }
+    }
+
+    private async Task ToggleAsync(string country, bool active)
+    {
+        try
+        {
+            await Snap.SetCountryActiveAsync(country, active);
+            Show($"{country} → {(active ? "ACTIVE" : "INACTIVE")}.", false);
+            await ReloadConfigAsync();
+        }
+        catch (Exception ex) { Show($"Toggle failed: {ex.Message}", true); }
+    }
+
+    private async Task AddCountryAsync()
+    {
+        var name = _newCountry?.Trim();
+        if (string.IsNullOrEmpty(name)) return;
+        try
+        {
+            await Snap.SetCountryActiveAsync(name, false);
+            _newCountry = "";
+            Show($"Added {name} (inactive).", false);
+            await ReloadConfigAsync();
+        }
+        catch (Exception ex) { Show($"Add failed: {ex.Message}", true); }
+    }
+
+    private async Task RefreshYesterdayAsync(string country)
+    {
+        _busy = true; Show($"Refreshing {country} for T-1…", false); await InvokeAsync(StateHasChanged);
+        var runId = await Snap.StartJobRunAsync("OnDemand", country, CurrentUser.Name);
+        try
+        {
+            var yesterday = DateTime.UtcNow.AddDays(-1).Date;
+            var rows = await Snap.RefreshDayAsync(country, yesterday);
+            await Snap.FinishJobRunAsync(runId, "Success", rows, 1, null);
+            Show($"{country} T-1 done — {rows} rows.", false);
+        }
+        catch (Exception ex)
+        {
+            await Snap.FinishJobRunAsync(runId, "Failed", null, 0, ex.Message);
+            Show($"Refresh failed: {ex.Message}", true);
+        }
+        finally { _busy = false; await RefreshLogAsync(); }
+    }
+
+    private async Task BackfillAsync(string country)
+    {
+        _busy = true;
+        Show($"Backfilling {country} from 2026-02-21 — this may take several minutes.", false);
+        await InvokeAsync(StateHasChanged);
+        var runId = await Snap.StartJobRunAsync("Backfill", country, CurrentUser.Name);
+        try
+        {
+            var (days, rows) = await Snap.BackfillRangeAsync(country, MissingExcessSnapshotService.BackfillFloor, DateTime.UtcNow.Date);
+            await Snap.FinishJobRunAsync(runId, "Success", rows, days, null);
+            Show($"{country} backfill done — {days} days, {rows} rows.", false);
+        }
+        catch (Exception ex)
+        {
+            await Snap.FinishJobRunAsync(runId, "Failed", null, 0, ex.Message);
+            Show($"Backfill failed: {ex.Message}", true);
+        }
+        finally { _busy = false; await RefreshLogAsync(); }
+    }
+
+    private static string StatusPill(string s) => s switch
+    {
+        "Success" => "tier1",
+        "Running" => "tier3",
+        "Failed"  => "tier4",
+        _         => "tier2",
+    };
+
+    private void Show(string msg, bool isError) { _message = msg; _isError = isError; }
+}

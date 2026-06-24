@@ -58,6 +58,8 @@ public class Program
         builder.Services.AddScoped<BuildingService>();
         builder.Services.AddScoped<ContainerAllocationService>();
         builder.Services.AddScoped<ReportsService>();
+        builder.Services.AddScoped<MissingExcessSnapshotService>();
+        builder.Services.AddHostedService<Wms.Web.Hosting.NightlyBatchService>();
 
         // WMS DbContext — Azure SQL via AAD (Managed Identity in App Service,
         // AAD Default locally via `az login`). NO password in code.
