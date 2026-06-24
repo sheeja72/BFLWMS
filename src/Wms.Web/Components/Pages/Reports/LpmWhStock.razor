@@ -1,0 +1,314 @@
+@page "/reports/lpm-wh-stock"
+@rendermode RenderMode.InteractiveServer
+@using System.Text
+@using Wms.Core
+@using Wms.Data.Lpm
+@using MudBlazor
+@attribute [Authorize(Roles = "Admin,Reports")]
+@inject ReportsService Svc
+@inject Microsoft.JSInterop.IJSRuntime JS
+
+<PageTitle>WMS — LPM WH Stock Report</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>LPM WH Stock Report</h2>
+    <p>Purchased LPM warehouse stock (<code>LPMDt IS NOT NULL</code> AND <code>ShopEligible != 'E'</code>) per Division × Country across every SIM country. Pick a Pallet Category and a report view. Live stock — no period.</p>
+</div>
+
+<div class="aiwms-section">
+    <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:end">
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">PALLET CATEGORY</label>
+            <select @bind="_palletCat" style="padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white; min-width:180px;">
+                @foreach (var c in _palletCats) { <option value="@c">@c</option> }
+            </select>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">REPORT OPTION</label>
+            <select @bind="_view" style="padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white; min-width:240px;">
+                <option value="Allocation">LPM Allocation Summary</option>
+                <option value="Season">LPM Season Summary</option>
+                <option value="Month">LPM Month Summary</option>
+            </select>
+        </div>
+        <div style="min-width:240px">
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">COUNTRY (empty = all)</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true"
+                       SelectedValues="_countryFilter" SelectedValuesChanged="@(v => _countryFilter = v.ToHashSet())"
+                       Placeholder="All countries" Variant="Variant.Outlined" Margin="Margin.Dense"
+                       MultiSelectionTextFunc="@(ss => ss.Count == 0 ? "(all countries)" : string.Join(", ", ss))">
+                @foreach (var c in _allCountries) { <MudSelectItem T="string" Value="@c">@c</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="LoadAsync" disabled="@_loading">@(_loading ? "Loading…" : "Load")</button>
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@(_cells.Count == 0)">Export to Excel</button>
+        @if (_loadedOnce && _cells.Count > 0)
+        {
+            <span style="font-size:12px; color:var(--text-secondary)">@RowKeys.Count rows · @CountriesInData.Count countries · pallet @_palletCat</span>
+        }
+    </div>
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="aiwms-alert @(_isError ? "error" : "info")" style="margin-top:12px">@_message</div>
+    }
+</div>
+
+@if (_loading)
+{
+    <div class="aiwms-section"><div style="padding:14px; font-style:italic; color:var(--text-secondary)">Loading…</div></div>
+}
+else if (_loadedOnce && _cells.Count == 0)
+{
+    <div class="aiwms-section"><div class="aiwms-alert info">No purchased LPM stock found for pallet category '@_palletCat'.</div></div>
+}
+else if (_cells.Count > 0)
+{
+    <div class="aiwms-section" style="overflow:auto; max-height:72vh; padding:0;">
+        @if (_view == "Season")
+        {
+            <table style="@TblStyle">
+                <thead>
+                    <tr>
+                        <th style="@Th text-align:left">Country</th>
+                        <th style="@Th text-align:left">Division</th>
+                        <th style="@Th text-align:right">LPM Summer Qty</th>
+                        <th style="@Th text-align:right">LPM Winter Qty</th>
+                        <th style="@Th text-align:right">Total Qty</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var k in RowKeys)
+                    {
+                        <tr>
+                            <td style="@Td text-align:left"><strong>@k.Country</strong></td>
+                            <td style="@Td text-align:left">@k.Division</td>
+                            <td style="@Td text-align:right">@Fmt(SumCells(k, c => c.Season == "Summer"))</td>
+                            <td style="@Td text-align:right">@Fmt(SumCells(k, c => c.Season == "Winter"))</td>
+                            <td style="@Td text-align:right"><strong>@RowTotal(k).ToString("N0")</strong></td>
+                        </tr>
+                    }
+                    <tr style="@TotRow">
+                        <td style="@Td text-align:left" colspan="2">TOTAL</td>
+                        <td style="@Td text-align:right">@Filtered.Where(c => c.Season == "Summer").Sum(c => c.Qty).ToString("N0")</td>
+                        <td style="@Td text-align:right">@Filtered.Where(c => c.Season == "Winter").Sum(c => c.Qty).ToString("N0")</td>
+                        <td style="@Td text-align:right">@Filtered.Sum(c => c.Qty).ToString("N0")</td>
+                    </tr>
+                </tbody>
+            </table>
+        }
+        else if (_view == "Month")
+        {
+            var months = MonthsInData;
+            <table style="@TblStyle">
+                <thead>
+                    <tr>
+                        <th style="@Th text-align:left" rowspan="2">Country</th>
+                        <th style="@Th text-align:left" rowspan="2">Division</th>
+                        @if (months.Count > 0)
+                        {
+                            <th style="@Th text-align:center" colspan="@months.Count">SUMMER QTY</th>
+                            <th style="@Th text-align:center" colspan="@months.Count">WINTER QTY</th>
+                        }
+                        <th style="@Th text-align:right" rowspan="2">Total Qty</th>
+                    </tr>
+                    <tr>
+                        @foreach (var m in months) { <th style="@Th2 text-align:right">@MonthLabel(m)</th> }
+                        @foreach (var m in months) { <th style="@Th2 text-align:right">@MonthLabel(m)</th> }
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var k in RowKeys)
+                    {
+                        <tr>
+                            <td style="@Td text-align:left"><strong>@k.Country</strong></td>
+                            <td style="@Td text-align:left">@k.Division</td>
+                            @foreach (var m in months) { <td style="@Td text-align:right">@Fmt(MonthQty(k, "Summer", m))</td> }
+                            @foreach (var m in months) { <td style="@Td text-align:right">@Fmt(MonthQty(k, "Winter", m))</td> }
+                            <td style="@Td text-align:right"><strong>@RowTotal(k).ToString("N0")</strong></td>
+                        </tr>
+                    }
+                    <tr style="@TotRow">
+                        <td style="@Td text-align:left" colspan="2">TOTAL</td>
+                        @foreach (var m in months) { <td style="@Td text-align:right">@Filtered.Where(c => c.Season == "Summer" && c.Year == m.Year && c.Month == m.Month).Sum(c => c.Qty).ToString("N0")</td> }
+                        @foreach (var m in months) { <td style="@Td text-align:right">@Filtered.Where(c => c.Season == "Winter" && c.Year == m.Year && c.Month == m.Month).Sum(c => c.Qty).ToString("N0")</td> }
+                        <td style="@Td text-align:right">@Filtered.Sum(c => c.Qty).ToString("N0")</td>
+                    </tr>
+                </tbody>
+            </table>
+        }
+        else  @* Allocation *@
+        {
+            <table style="@TblStyle">
+                <thead>
+                    <tr>
+                        <th style="@Th text-align:left">Country</th>
+                        <th style="@Th text-align:left">Division</th>
+                        <th style="@Th text-align:right">LPM Current Qty</th>
+                        <th style="@Th text-align:right">LPM Future Qty</th>
+                        <th style="@Th text-align:right">Total Qty</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var k in RowKeys)
+                    {
+                        <tr>
+                            <td style="@Td text-align:left"><strong>@k.Country</strong></td>
+                            <td style="@Td text-align:left">@k.Division</td>
+                            <td style="@Td text-align:right">@Fmt(SumCells(k, c => IsCurrent(c.Year, c.Month)))</td>
+                            <td style="@Td text-align:right">@Fmt(SumCells(k, c => !IsCurrent(c.Year, c.Month)))</td>
+                            <td style="@Td text-align:right"><strong>@RowTotal(k).ToString("N0")</strong></td>
+                        </tr>
+                    }
+                    <tr style="@TotRow">
+                        <td style="@Td text-align:left" colspan="2">TOTAL</td>
+                        <td style="@Td text-align:right">@Filtered.Where(c => IsCurrent(c.Year, c.Month)).Sum(c => c.Qty).ToString("N0")</td>
+                        <td style="@Td text-align:right">@Filtered.Where(c => !IsCurrent(c.Year, c.Month)).Sum(c => c.Qty).ToString("N0")</td>
+                        <td style="@Td text-align:right">@Filtered.Sum(c => c.Qty).ToString("N0")</td>
+                    </tr>
+                </tbody>
+            </table>
+        }
+    </div>
+}
+
+@code {
+    private List<LpmWhStockCell> _cells = new();
+    private List<string> _palletCats = new() { "ELIGIBLE" };
+    private List<string> _allCountries = new();
+    private string _palletCat = "ELIGIBLE";
+    private string _view = "Allocation";
+    private HashSet<string> _countryFilter = new();
+    private bool _loading;
+    private bool _loadedOnce;
+    private string _message = "";
+    private bool _isError;
+
+    private const string TblStyle = "border-collapse:collapse; width:100%; white-space:nowrap; font-size:13px;";
+    private const string Th  = "border:1px solid #d8a400; padding:5px 12px; background:#f5c543; font-weight:700; position:sticky; top:0; z-index:3;";
+    private const string Th2 = "border:1px solid #d8a400; padding:5px 10px; background:#f5c543; font-weight:700; position:sticky; top:30px; z-index:3;";
+    private const string Td  = "border:1px solid #e8e8e8; padding:3px 10px;";
+    private const string TotRow = "font-weight:700; background:#fff7e0;";
+
+    private static string Fmt(long v) => v == 0 ? "" : v.ToString("N0");
+    private static string MonthLabel((int Year, int Month) m) => new DateTime(m.Year, m.Month, 1).ToString("MMM-yy");
+
+    private bool IsCurrent(int year, int month)
+    {
+        var now = DateTime.UtcNow.AddHours(4);   // GST = UTC+4
+        return year < now.Year || (year == now.Year && month <= now.Month);
+    }
+
+    private List<LpmWhStockCell> Filtered =>
+        _countryFilter.Count == 0 ? _cells
+            : _cells.Where(c => _countryFilter.Contains(c.Country)).ToList();
+
+    private List<string> CountriesInData =>
+        _cells.Select(c => c.Country).Distinct()
+              .OrderBy(c => c, StringComparer.OrdinalIgnoreCase).ToList();
+
+    private List<(string Country, string Division)> RowKeys =>
+        Filtered.Select(c => (c.Country, c.Division)).Distinct()
+                .OrderBy(k => k.Country, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(k => k.Division, StringComparer.OrdinalIgnoreCase).ToList();
+
+    private List<(int Year, int Month)> MonthsInData =>
+        Filtered.Select(c => (c.Year, c.Month)).Distinct()
+                .OrderBy(m => m.Year).ThenBy(m => m.Month).ToList();
+
+    private long SumCells((string Country, string Division) k, Func<LpmWhStockCell, bool> pred) =>
+        Filtered.Where(c => c.Country == k.Country && c.Division == k.Division && pred(c)).Sum(c => c.Qty);
+
+    private long RowTotal((string Country, string Division) k) =>
+        Filtered.Where(c => c.Country == k.Country && c.Division == k.Division).Sum(c => c.Qty);
+
+    private long MonthQty((string Country, string Division) k, string season, (int Year, int Month) m) =>
+        Filtered.Where(c => c.Country == k.Country && c.Division == k.Division
+                         && c.Season == season && c.Year == m.Year && c.Month == m.Month)
+                .Sum(c => c.Qty);
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _palletCats = await Svc.GetPalletCategoriesAsync();
+            if (!_palletCats.Contains("ELIGIBLE", StringComparer.OrdinalIgnoreCase))
+                _palletCats.Insert(0, "ELIGIBLE");
+            _palletCat = _palletCats.FirstOrDefault(c => string.Equals(c, "ELIGIBLE", StringComparison.OrdinalIgnoreCase)) ?? "ELIGIBLE";
+        }
+        catch { _palletCats = new() { "ELIGIBLE" }; }
+
+        try { _allCountries = await Svc.GetCountriesAsync(); }
+        catch { _allCountries = new(); }
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true; _message = ""; StateHasChanged();
+        try
+        {
+            _cells = await Svc.GetLpmWhStockAsync(_palletCat, _countryFilter);
+            var present = _cells.Select(c => c.Country).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            _countryFilter = _countryFilter.Where(present.Contains).ToHashSet();
+            _loadedOnce = true;
+            ShowInfo($"Loaded {_cells.Count} cells, {RowKeys.Count} (Country, Division) rows.");
+        }
+        catch (Exception ex) { ShowError($"Load failed: {ex.Message}"); _cells = new(); }
+        finally { _loading = false; }
+    }
+
+    private async Task ExportCsvAsync()
+    {
+        if (_cells.Count == 0) return;
+        var sb = new StringBuilder();
+        if (_view == "Season")
+        {
+            sb.AppendLine("Country,Division,LpmSummerQty,LpmWinterQty,TotalQty");
+            foreach (var k in RowKeys)
+                sb.AppendLine($"{Csv(k.Country)},{Csv(k.Division)},{SumCells(k, c => c.Season == "Summer")},{SumCells(k, c => c.Season == "Winter")},{RowTotal(k)}");
+            sb.AppendLine($"TOTAL,,{Filtered.Where(c => c.Season == "Summer").Sum(c => c.Qty)},{Filtered.Where(c => c.Season == "Winter").Sum(c => c.Qty)},{Filtered.Sum(c => c.Qty)}");
+        }
+        else if (_view == "Month")
+        {
+            var months = MonthsInData;
+            var row1 = new StringBuilder("Country,Division");
+            var row2 = new StringBuilder(",");
+            foreach (var m in months) { row1.Append(",SUMMER QTY"); row2.Append(',').Append(MonthLabel(m)); }
+            foreach (var m in months) { row1.Append(",WINTER QTY"); row2.Append(',').Append(MonthLabel(m)); }
+            row1.Append(",Total Qty");
+            row2.Append(',');
+            sb.AppendLine(row1.ToString());
+            sb.AppendLine(row2.ToString());
+            foreach (var k in RowKeys)
+            {
+                sb.Append(Csv(k.Country)).Append(',').Append(Csv(k.Division));
+                foreach (var m in months) sb.Append(',').Append(MonthQty(k, "Summer", m));
+                foreach (var m in months) sb.Append(',').Append(MonthQty(k, "Winter", m));
+                sb.Append(',').Append(RowTotal(k));
+                sb.AppendLine();
+            }
+            sb.Append("TOTAL,");
+            foreach (var m in months) sb.Append(',').Append(Filtered.Where(c => c.Season == "Summer" && c.Year == m.Year && c.Month == m.Month).Sum(c => c.Qty));
+            foreach (var m in months) sb.Append(',').Append(Filtered.Where(c => c.Season == "Winter" && c.Year == m.Year && c.Month == m.Month).Sum(c => c.Qty));
+            sb.Append(',').Append(Filtered.Sum(c => c.Qty));
+            sb.AppendLine();
+        }
+        else  // Allocation
+        {
+            sb.AppendLine("Country,Division,LpmCurrentQty,LpmFutureQty,TotalQty");
+            foreach (var k in RowKeys)
+                sb.AppendLine($"{Csv(k.Country)},{Csv(k.Division)},{SumCells(k, c => IsCurrent(c.Year, c.Month))},{SumCells(k, c => !IsCurrent(c.Year, c.Month))},{RowTotal(k)}");
+            sb.AppendLine($"TOTAL,,{Filtered.Where(c => IsCurrent(c.Year, c.Month)).Sum(c => c.Qty)},{Filtered.Where(c => !IsCurrent(c.Year, c.Month)).Sum(c => c.Qty)},{Filtered.Sum(c => c.Qty)}");
+        }
+
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(sb.ToString()));
+        var filename = $"LpmWhStock_{_view}_{DateTime.Now:yyyyMMdd_HHmm}.csv";
+        await JS.InvokeVoidAsync("eval", $"(function(){{var a=document.createElement('a');a.href='data:text/csv;base64,{b64}';a.download='{filename}';document.body.appendChild(a);a.click();document.body.removeChild(a);}})();");
+    }
+
+    private static string Csv(string? s) => s is null ? ""
+        : (s.Contains(',') || s.Contains('"') || s.Contains('\n')) ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
+
+    private void ShowError(string msg) { _message = msg; _isError = true; }
+    private void ShowInfo(string msg)  { _message = msg; _isError = false; }
+}
