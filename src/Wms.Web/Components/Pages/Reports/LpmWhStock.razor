@@ -4,7 +4,7 @@
 @using Wms.Core
 @using Wms.Data.Lpm
 @using MudBlazor
-@attribute [Authorize(Roles = "Admin,Reports")]
+@attribute [Authorize(Policy = MenuKeys.RPT_LPM_WH_STOCK)]
 @inject ReportsService Svc
 @inject Microsoft.JSInterop.IJSRuntime JS
 

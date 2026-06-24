@@ -1,12 +1,13 @@
 @page "/admin/users"
 @rendermode RenderMode.InteractiveServer
-@attribute [Authorize(Roles = Wms.Core.Roles.Admin)]
+@attribute [Authorize(Policy = Wms.Core.MenuKeys.ADMIN_USERS)]
 @using Wms.Core.Entities
 @using Wms.Data
 @using Wms.Data.Lpm
 @using Wms.Web.Auth
 @using Microsoft.EntityFrameworkCore
 @using Microsoft.Extensions.Caching.Memory
+@using Wms.Core
 @inject IDbContextFactory<WmsDbContext> DbFactory
 @inject BuildingService Build
 @inject ICurrentUser Me
@@ -111,6 +112,52 @@
             }
         </tbody>
     </table>
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">Menu Access — explicit per-user grants (additive to role defaults)</div>
+    <div style="display:flex; gap:10px; align-items:end; margin-bottom:12px">
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">USER</label>
+            <select @bind="_menuUser" @bind:after="LoadMenuGrantsAsync" style="padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white; min-width:280px">
+                <option value="">-- Select user --</option>
+                @foreach (var u in _users) { <option value="@u.Username">@u.Username</option> }
+            </select>
+        </div>
+        @if (!string.IsNullOrEmpty(_menuUser))
+        {
+            <button class="aiwms-btn aiwms-btn-primary" @onclick="SaveMenuGrantsAsync">Save Menu Access</button>
+            <span style="font-size:12px; color:var(--text-secondary)">@_menuGrants.Count grants</span>
+        }
+    </div>
+
+    @if (!string.IsNullOrEmpty(_menuUser))
+    {
+        @foreach (var grp in MenuKeys.All.GroupBy(m => m.Group))
+        {
+            var groupKeys = grp.Select(m => m.Key).ToList();
+            var allOn = groupKeys.All(k => _menuGrants.Contains(k));
+            <div style="border:1px solid var(--border-default); border-radius:var(--r-sm); padding:10px 14px; margin-bottom:10px">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px">
+                    <strong style="font-size:13px">@grp.Key</strong>
+                    <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer">
+                        <input type="checkbox" checked="@allOn" @onchange="@(e => ToggleGroup(groupKeys, (bool)e.Value!))" /> Select all
+                    </label>
+                </div>
+                <div style="display:grid; grid-template-columns: repeat(2, 1fr); gap:6px 14px">
+                    @foreach (var menu in grp)
+                    {
+                        var key = menu.Key;
+                        <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer">
+                            <input type="checkbox" checked="@_menuGrants.Contains(key)" @onchange="@(e => ToggleMenu(key, (bool)e.Value!))" />
+                            <span>@menu.Label</span>
+                            <span style="font-size:10px; color:var(--text-secondary)">(@string.Join("/", menu.DefaultRoles))</span>
+                        </label>
+                    }
+                </div>
+            </div>
+        }
+    }
 </div>
 
 @code {
@@ -232,5 +279,50 @@
         Snack.Add($"{_editingUser} updated.", Severity.Success);
         _editingUser = null;
         await Reload();
+    }
+
+    // ---------------- Menu access ----------------
+    private string _menuUser = "";
+    private HashSet<string> _menuGrants = new();
+
+    private async Task LoadMenuGrantsAsync()
+    {
+        _menuGrants = new();
+        if (string.IsNullOrEmpty(_menuUser)) return;
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var keys = await db.UserMenuAccess.AsNoTracking()
+            .Where(g => g.Username == _menuUser)
+            .Select(g => g.MenuKey).ToListAsync();
+        _menuGrants = keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private void ToggleMenu(string key, bool on)
+    {
+        if (on) _menuGrants.Add(key); else _menuGrants.Remove(key);
+    }
+
+    private void ToggleGroup(List<string> keys, bool on)
+    {
+        if (on) foreach (var k in keys) _menuGrants.Add(k);
+        else    foreach (var k in keys) _menuGrants.Remove(k);
+    }
+
+    private async Task SaveMenuGrantsAsync()
+    {
+        if (string.IsNullOrEmpty(_menuUser)) return;
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var existing = await db.UserMenuAccess.Where(g => g.Username == _menuUser).ToListAsync();
+        var existingKeys = existing.Select(e => e.MenuKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Add new grants
+        foreach (var k in _menuGrants.Where(k => !existingKeys.Contains(k)))
+            db.UserMenuAccess.Add(new WmsUserMenuAccess {
+                Username = _menuUser, MenuKey = k,
+                GrantedTS = DateTime.Now, GrantedBy = Me.Name });
+        // Remove revoked grants
+        foreach (var e in existing.Where(e => !_menuGrants.Contains(e.MenuKey)))
+            db.UserMenuAccess.Remove(e);
+        await db.SaveChangesAsync();
+        Cache.Remove(AuthStateCurrentUser.ProfileCacheKey(_menuUser));
+        Snack.Add($"Menu access saved for {_menuUser} ({_menuGrants.Count} grants).", Severity.Success);
     }
 }

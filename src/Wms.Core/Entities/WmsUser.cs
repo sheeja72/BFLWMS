@@ -37,3 +37,11 @@ public class WmsUserRole
     public WmsUser? User { get; set; }
     public WmsRole? Role { get; set; }
 }
+
+public class WmsUserMenuAccess
+{
+    public string   Username  { get; set; } = "";
+    public string   MenuKey   { get; set; } = "";
+    public DateTime GrantedTS { get; set; }
+    public string   GrantedBy { get; set; } = "";
+}

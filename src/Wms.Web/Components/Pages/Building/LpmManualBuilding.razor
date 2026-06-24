@@ -1,6 +1,6 @@
 @page "/building/manual"
 @rendermode RenderMode.InteractiveServer
-@attribute [Authorize(Roles = Wms.Core.Roles.AnyWarehouse)]
+@attribute [Authorize(Policy = Wms.Core.MenuKeys.LPM_MANUAL_BUILDING)]
 @using Wms.Core
 @using Wms.Core.Validation
 @using Wms.Data.Auditing
