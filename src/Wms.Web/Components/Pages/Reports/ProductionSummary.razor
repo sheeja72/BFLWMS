@@ -1,0 +1,307 @@
+@page "/reports/production-summary"
+@rendermode RenderMode.InteractiveServer
+@using System.Text
+@using Wms.Core
+@using Wms.Data.Lpm
+@attribute [Authorize(Roles = "Admin,Reports")]
+@inject ReportsService Svc
+@inject Microsoft.JSInterop.IJSRuntime JS
+
+<PageTitle>WMS — Production Summary Report</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Production Summary Report</h2>
+    <p>Per-batch view of items scanned through QC (<code>usa.dbo.amechecking</code>), split by LPM vs Non-LPM via <code>LPMSIM_Batch.Sources</code>. Each picked date is one WH production day: <strong>06:00 GST → 06:00 GST next day</strong>.</p>
+</div>
+
+<div class="aiwms-section">
+    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr auto auto; gap:12px; align-items:end;">
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">COUNTRY *</label>
+            <select @bind="_country" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white;">
+                <option value="UAE">UAE</option>
+            </select>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">FROM</label>
+            <input type="date" @bind="_from" max="@DateTime.Today.ToString("yyyy-MM-dd")" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white;" />
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">TO</label>
+            <input type="date" @bind="_to" max="@DateTime.Today.ToString("yyyy-MM-dd")" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white;" />
+        </div>
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="LoadAsync" disabled="@(_loading || !CanLoad)">@(_loading ? "Loading…" : "Load")</button>
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@(_rows.Count == 0 || _loading)">Export to Excel</button>
+    </div>
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="aiwms-alert @(_isError ? "error" : "info")" style="margin-top:12px">@_message</div>
+    }
+</div>
+
+@if (_loading)
+{
+    <div class="aiwms-section"><div style="padding:14px; font-style:italic; color:var(--text-secondary)">Loading…</div></div>
+}
+else if (_rows.Count > 0)
+{
+    var totScanned = _rows.Sum(r => r.TotalScanned);
+    var lpmQty     = _rows.Where(r => r.Kind == "LPM").Sum(r => r.TotalScanned);
+    var nonLpmQty  = _rows.Where(r => r.Kind == "Non-LPM").Sum(r => r.TotalScanned);
+    var mixedQty   = _rows.Where(r => r.Kind == "Mixed").Sum(r => r.TotalScanned);
+    var unkQty     = _rows.Where(r => r.Kind == "Unknown").Sum(r => r.TotalScanned);
+
+    <div class="aiwms-section">
+        <div style="display:grid; grid-template-columns: 2fr 1fr 1fr 1fr 1fr 1fr; gap:12px;">
+            @MetricCard("Store Qty",      _overallStoreQty.ToString("N0"), "#fdf2f8", "#9d174d", true)
+            @if (_transferQty > 0)
+            {
+                @MetricCard("Transfer Qty",   _transferQty.ToString("N0"),     "#ccfbf1", "#0f766e", false)
+            }
+            @MetricCard("Total Scanned", totScanned.ToString("N0"),       "#dbeafe", "#1e40af", false)
+            @MetricCard("LPM",           lpmQty.ToString("N0"),           "#dcfce7", "#166534", false)
+            @MetricCard("Non-LPM",       nonLpmQty.ToString("N0"),        "#f3e8ff", "#6b21a8", false)
+            @MetricCard("Unknown",       unkQty.ToString("N0"),           "#fef3c7", "#92400e", false)
+        </div>
+    </div>
+
+    <div class="aiwms-section">
+        <div style="display:flex; gap:14px; align-items:center; margin-bottom:10px">
+            <strong style="font-size:11px; text-transform:uppercase; letter-spacing:1px; color:var(--text-secondary)">View:</strong>
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="vw" value="Summary"  checked="@(_view == "Summary")"  @onchange="@(_ => _view = "Summary")" /> Summary</label>
+            <label style="display:flex; align-items:center; gap:4px; cursor:pointer"><input type="radio" name="vw" value="Detailed" checked="@(_view == "Detailed")" @onchange="@(_ => _view = "Detailed")" /> Detailed</label>
+        </div>
+
+        @if (_view == "Summary")
+        {
+            var pivot = _summary
+                .GroupBy(s => new { s.ProductionDay, s.Division })
+                .Select(g => new DivisionPivotRow(
+                    g.Key.ProductionDay,
+                    g.Key.Division,
+                    g.Where(x => x.Kind == "LPM").Sum(x => x.TotalScanned),
+                    g.Where(x => x.Kind == "Non-LPM").Sum(x => x.TotalScanned),
+                    g.Where(x => x.Kind == "Mixed").Sum(x => x.TotalScanned),
+                    g.Where(x => x.Kind == "Unknown").Sum(x => x.TotalScanned),
+                    g.Sum(x => x.TotalScanned),
+                    g.Sum(x => x.StoreQty),
+                    g.Sum(x => x.UaeStoreQty),
+                    g.Sum(x => x.OmanStoreQty),
+                    g.Sum(x => x.Ex2StoreQty)))
+                .OrderByDescending(x => x.ProductionDay)
+                .ThenBy(x => x.Division)
+                .ToList();
+            var hasMixed = pivot.Sum(x => x.Mixed) > 0;
+            var isUae = string.Equals(_country, "UAE", StringComparison.OrdinalIgnoreCase);
+
+            <table class="aiwms-table aiwms-table-dense">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Division</th>
+                        <th style="text-align:right">LPM</th>
+                        <th style="text-align:right">Non-LPM</th>
+                        @if (hasMixed) { <th style="text-align:right">Mixed</th> }
+                        <th style="text-align:right">Unknown</th>
+                        <th style="text-align:right">Scanned Qty</th>
+                        <th style="text-align:right">Stores Qty</th>
+                        @if (isUae)
+                        {
+                            <th style="text-align:right">UAE Qty</th>
+                            <th style="text-align:right">Oman Qty</th>
+                            <th style="text-align:right">Ex2 Qty</th>
+                        }
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var p in pivot)
+                    {
+                        <tr>
+                            <td>@p.ProductionDay.ToString("dd-MMM-yyyy")</td>
+                            <td>@p.Division</td>
+                            <td style="text-align:right">@p.Lpm.ToString("N0")</td>
+                            <td style="text-align:right">@p.NonLpm.ToString("N0")</td>
+                            @if (hasMixed) { <td style="text-align:right">@p.Mixed.ToString("N0")</td> }
+                            <td style="text-align:right">@p.Unknown.ToString("N0")</td>
+                            <td style="text-align:right; font-weight:600">@p.ScannedQty.ToString("N0")</td>
+                            <td style="text-align:right; font-weight:600">@p.StoresQty.ToString("N0")</td>
+                            @if (isUae)
+                            {
+                                <td style="text-align:right">@p.UaeQty.ToString("N0")</td>
+                                <td style="text-align:right">@p.OmanQty.ToString("N0")</td>
+                                <td style="text-align:right">@p.Ex2Qty.ToString("N0")</td>
+                            }
+                        </tr>
+                    }
+                    <tr style="font-weight:700; background:#fff7e0">
+                        <td colspan="2">TOTAL</td>
+                        <td style="text-align:right">@pivot.Sum(x => x.Lpm).ToString("N0")</td>
+                        <td style="text-align:right">@pivot.Sum(x => x.NonLpm).ToString("N0")</td>
+                        @if (hasMixed) { <td style="text-align:right">@pivot.Sum(x => x.Mixed).ToString("N0")</td> }
+                        <td style="text-align:right">@pivot.Sum(x => x.Unknown).ToString("N0")</td>
+                        <td style="text-align:right">@pivot.Sum(x => x.ScannedQty).ToString("N0")</td>
+                        <td style="text-align:right">@pivot.Sum(x => x.StoresQty).ToString("N0")</td>
+                        @if (isUae)
+                        {
+                            <td style="text-align:right">@pivot.Sum(x => x.UaeQty).ToString("N0")</td>
+                            <td style="text-align:right">@pivot.Sum(x => x.OmanQty).ToString("N0")</td>
+                            <td style="text-align:right">@pivot.Sum(x => x.Ex2Qty).ToString("N0")</td>
+                        }
+                    </tr>
+                </tbody>
+            </table>
+        }
+        else
+        {
+            <table class="aiwms-table aiwms-table-dense">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>BatchNo</th>
+                        <th>Kind</th>
+                        <th>Division</th>
+                        <th style="text-align:right">Total Scanned</th>
+                        <th style="text-align:right">Store Qty</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in _rows)
+                    {
+                        <tr>
+                            <td>@r.ProductionDay.ToString("dd-MMM-yyyy")</td>
+                            <td>@(r.BatchNo?.ToString() ?? "Unknown")</td>
+                            <td>@r.Kind</td>
+                            <td>@r.Division</td>
+                            <td style="text-align:right">@r.TotalScanned.ToString("N0")</td>
+                            <td style="text-align:right">@r.StoreQty.ToString("N0")</td>
+                        </tr>
+                    }
+                    <tr style="font-weight:700; background:#fff7e0">
+                        <td colspan="4">TOTAL</td>
+                        <td style="text-align:right">@_rows.Sum(r => r.TotalScanned).ToString("N0")</td>
+                        <td style="text-align:right">@_rows.Sum(r => r.StoreQty).ToString("N0")</td>
+                    </tr>
+                </tbody>
+            </table>
+        }
+    </div>
+}
+else if (_loadedOnce && _rows.Count == 0)
+{
+    <div class="aiwms-section"><div class="aiwms-alert info">No scans found for the selected range.</div></div>
+}
+
+@code {
+    private string _country = "UAE";
+    private DateTime _from = CurrentProductionDayGst();
+    private DateTime _to   = CurrentProductionDayGst();
+    private string _view = "Summary";
+    private bool _loading;
+    private bool _loadedOnce;
+    private string _message = "";
+    private bool _isError;
+
+    private List<ProductionCheckingRow>        _rows = new();
+    private List<ProductionCheckingSummaryRow> _summary = new();
+    private int  _overallStoreQty;
+    private long _transferQty;
+
+    private bool CanLoad => !string.IsNullOrWhiteSpace(_country) && _from <= _to;
+
+    private sealed record DivisionPivotRow(
+        DateTime ProductionDay, string Division,
+        long Lpm, long NonLpm, long Mixed, long Unknown,
+        long ScannedQty, int StoresQty, int UaeQty, int OmanQty, int Ex2Qty);
+
+    // Current WH production day in GST (UTC+4). If "now" is before 06:00 GST,
+    // the production day is yesterday.
+    private static DateTime CurrentProductionDayGst()
+    {
+        var nowGst = DateTime.UtcNow.AddHours(4);
+        return nowGst.Hour < 6 ? nowGst.Date.AddDays(-1) : nowGst.Date;
+    }
+
+    private async Task LoadAsync()
+    {
+        if (!CanLoad) return;
+        _loading = true; _message = ""; _loadedOnce = false;
+        _rows.Clear(); _summary.Clear(); _overallStoreQty = 0; _transferQty = 0;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Svc.GetProductionCheckingAsync(_country, _from, _to);
+            _rows            = result.Rows;
+            _summary         = result.Summary;
+            _overallStoreQty = result.OverallStoreQty;
+            _transferQty     = result.TransferQty;
+            _loadedOnce = true;
+            ShowInfo($"Loaded {_rows.Count} detailed rows, {_summary.Count} summary rows.");
+        }
+        catch (Exception ex) { ShowError($"Load failed: {ex.Message}"); }
+        finally { _loading = false; }
+    }
+
+    private async Task ExportCsvAsync()
+    {
+        if (_rows.Count == 0) return;
+        var sb = new StringBuilder();
+        if (_view == "Summary")
+        {
+            var pivot = _summary
+                .GroupBy(s => new { s.ProductionDay, s.Division })
+                .Select(g => new DivisionPivotRow(
+                    g.Key.ProductionDay, g.Key.Division,
+                    g.Where(x => x.Kind == "LPM").Sum(x => x.TotalScanned),
+                    g.Where(x => x.Kind == "Non-LPM").Sum(x => x.TotalScanned),
+                    g.Where(x => x.Kind == "Mixed").Sum(x => x.TotalScanned),
+                    g.Where(x => x.Kind == "Unknown").Sum(x => x.TotalScanned),
+                    g.Sum(x => x.TotalScanned), g.Sum(x => x.StoreQty),
+                    g.Sum(x => x.UaeStoreQty), g.Sum(x => x.OmanStoreQty), g.Sum(x => x.Ex2StoreQty)))
+                .OrderByDescending(x => x.ProductionDay).ThenBy(x => x.Division).ToList();
+            var isUae = string.Equals(_country, "UAE", StringComparison.OrdinalIgnoreCase);
+            sb.Append("Date,Division,LPM,Non-LPM,Mixed,Unknown,Scanned Qty,Stores Qty");
+            if (isUae) sb.Append(",UAE Qty,Oman Qty,Ex2 Qty");
+            sb.AppendLine();
+            foreach (var p in pivot)
+            {
+                sb.Append(p.ProductionDay.ToString("yyyy-MM-dd")).Append(',')
+                  .Append(Csv(p.Division)).Append(',')
+                  .Append(p.Lpm).Append(',').Append(p.NonLpm).Append(',')
+                  .Append(p.Mixed).Append(',').Append(p.Unknown).Append(',')
+                  .Append(p.ScannedQty).Append(',').Append(p.StoresQty);
+                if (isUae) sb.Append(',').Append(p.UaeQty).Append(',').Append(p.OmanQty).Append(',').Append(p.Ex2Qty);
+                sb.AppendLine();
+            }
+            sb.Append("TOTAL,,").Append(pivot.Sum(x => x.Lpm)).Append(',').Append(pivot.Sum(x => x.NonLpm)).Append(',')
+              .Append(pivot.Sum(x => x.Mixed)).Append(',').Append(pivot.Sum(x => x.Unknown)).Append(',')
+              .Append(pivot.Sum(x => x.ScannedQty)).Append(',').Append(pivot.Sum(x => x.StoresQty));
+            if (isUae) sb.Append(',').Append(pivot.Sum(x => x.UaeQty)).Append(',').Append(pivot.Sum(x => x.OmanQty)).Append(',').Append(pivot.Sum(x => x.Ex2Qty));
+            sb.AppendLine();
+        }
+        else
+        {
+            sb.AppendLine("Date,BatchNo,Kind,Division,Total Scanned,Store Qty");
+            foreach (var r in _rows)
+                sb.AppendLine($"{r.ProductionDay:yyyy-MM-dd},{r.BatchNo?.ToString() ?? "Unknown"},{Csv(r.Kind)},{Csv(r.Division)},{r.TotalScanned},{r.StoreQty}");
+            sb.AppendLine($"TOTAL,,,,{_rows.Sum(r => r.TotalScanned)},{_rows.Sum(r => r.StoreQty)}");
+        }
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(sb.ToString()));
+        var filename = $"ProductionSummary_{_country}_{_view}_{_from:yyyyMMdd}_{_to:yyyyMMdd}.csv";
+        await JS.InvokeVoidAsync("eval", $"(function(){{var a=document.createElement('a');a.href='data:text/csv;base64,{b64}';a.download='{filename}';document.body.appendChild(a);a.click();document.body.removeChild(a);}})();");
+    }
+
+    private static string Csv(string? s) => s is null ? ""
+        : (s.Contains(',') || s.Contains('"') || s.Contains('\n')) ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
+
+    private RenderFragment MetricCard(string label, string value, string bg, string fg, bool big) => __builder =>
+    {
+        <div style="background:@bg; color:@fg; padding:12px 16px; border-radius:var(--r-sm); border:1px solid #00000010">
+            <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:1px">@label</div>
+            <div style="font-size:@(big ? "1.6rem" : "1.2rem"); font-weight:@(big ? "900" : "700")">@value</div>
+        </div>
+    };
+
+    private void ShowError(string msg) { _message = msg; _isError = true; }
+    private void ShowInfo(string msg)  { _message = msg; _isError = false; }
+}
