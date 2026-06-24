@@ -60,7 +60,7 @@
     protected override async Task OnInitializedAsync()
     {
         await Me.EnsureLoadedAsync();
-        try { _countries = await Build.GetCountriesAsync(); } catch { _countries = new(); }
+        try { _countries = await Build.GetAllSimCountriesAsync(); } catch { _countries = new(); }
         await Reload();
     }
 

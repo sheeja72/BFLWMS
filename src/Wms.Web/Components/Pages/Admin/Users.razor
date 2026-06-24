@@ -174,7 +174,7 @@
         await using var db = await DbFactory.CreateDbContextAsync();
         _roles = await db.Roles.AsNoTracking().OrderBy(r => r.RoleName).ToListAsync();
         _whs   = await db.WHMasters.AsNoTracking().Where(w => w.Active).OrderBy(w => w.Country).ThenBy(w => w.Warehouse).ToListAsync();
-        try { _countries = await Build.GetCountriesAsync(); }
+        try { _countries = await Build.GetAllSimCountriesAsync(); }
         catch { _countries = _whs.Select(w => w.Country).Distinct().OrderBy(c => c).ToList(); }
         await Reload();
     }
