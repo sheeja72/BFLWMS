@@ -29,7 +29,7 @@
     </div>
     <div class="aiwms-form-row">
         <label>Country</label>
-        <select @bind="_newCountry">
+        <select @bind="_newCountry" @bind:after="OnNewCountryChanged">
             <option value="">-- Select --</option>
             @foreach (var c in _countries) { <option value="@c">@c</option> }
         </select>
@@ -65,7 +65,7 @@
                     @if (_editingUser == u.Username)
                     {
                         <td>
-                            <select @bind="_editCountry" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px">
+                            <select @bind="_editCountry" @bind:after="OnEditCountryChanged" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px">
                                 <option value="">--</option>
                                 @foreach (var c in _countries) { <option value="@c">@c</option> }
                             </select>
@@ -182,6 +182,19 @@
     private IEnumerable<WmsWHMaster> WHForCountry(string c) =>
         string.IsNullOrEmpty(c) ? Enumerable.Empty<WmsWHMaster>()
                                 : _whs.Where(w => w.Country == c);
+
+    // Snap warehouse selections to empty when their parent country changes,
+    // so a stale (Country, Warehouse) pair never sneaks past validation.
+    private void OnNewCountryChanged()
+    {
+        if (!WHForCountry(_newCountry).Any(w => w.Warehouse == _newWarehouse))
+            _newWarehouse = "";
+    }
+    private void OnEditCountryChanged()
+    {
+        if (!WHForCountry(_editCountry).Any(w => w.Warehouse == _editWarehouse))
+            _editWarehouse = "";
+    }
 
     private async Task Reload()
     {
