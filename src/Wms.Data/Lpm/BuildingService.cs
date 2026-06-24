@@ -818,4 +818,18 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
               WHERE Active = 1 ORDER BY Country", cancellationToken: ct));
         return list.AsList();
     }
+
+    /// <summary>All SIM countries from bfldata.dbo.DataSettings via OnPremBackup —
+    /// used by admin pages (WH Master, Users) that need the full list before
+    /// any warehouse has been registered for a country.</summary>
+    public async Task<List<string>> GetAllSimCountriesAsync(CancellationToken ct = default)
+    {
+        await using var c = OpenOnPremBackup();
+        var list = await c.QueryAsync<string>(new CommandDefinition(
+            @"SELECT DISTINCT SIMCountry
+                FROM bfldata.dbo.DataSettings
+               WHERE SIMCountry IS NOT NULL AND LTRIM(RTRIM(SIMCountry)) <> ''
+               ORDER BY SIMCountry", cancellationToken: ct));
+        return list.AsList();
+    }
 }
