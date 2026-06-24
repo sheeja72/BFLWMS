@@ -25,7 +25,7 @@
         </div>
         <div>
             <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">REPORT OPTION</label>
-            <select @bind="_view" style="padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white; min-width:240px;">
+            <select @bind="_view" @bind:after="() => _sortKey = null" style="padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white; min-width:240px;">
                 <option value="Allocation">LPM Allocation Summary</option>
                 <option value="Season">LPM Season Summary</option>
                 <option value="Month">LPM Month Summary</option>
@@ -70,11 +70,11 @@ else if (_cells.Count > 0)
             <table style="@TblStyle">
                 <thead>
                     <tr>
-                        <th style="@Th text-align:left">Country</th>
-                        <th style="@Th text-align:left">Division</th>
-                        <th style="@Th text-align:right">LPM Summer Qty</th>
-                        <th style="@Th text-align:right">LPM Winter Qty</th>
-                        <th style="@Th text-align:right">Total Qty</th>
+                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Country")'>Country@SortArrow("Country")</th>
+                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Division")'>Division@SortArrow("Division")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Summer")'>LPM Summer Qty@SortArrow("Summer")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Winter")'>LPM Winter Qty@SortArrow("Winter")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Total")'>Total Qty@SortArrow("Total")</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -103,18 +103,26 @@ else if (_cells.Count > 0)
             <table style="@TblStyle">
                 <thead>
                     <tr>
-                        <th style="@Th text-align:left" rowspan="2">Country</th>
-                        <th style="@Th text-align:left" rowspan="2">Division</th>
+                        <th style="@Th text-align:left; cursor:pointer" rowspan="2" @onclick='() => Sort("Country")'>Country@SortArrow("Country")</th>
+                        <th style="@Th text-align:left; cursor:pointer" rowspan="2" @onclick='() => Sort("Division")'>Division@SortArrow("Division")</th>
                         @if (months.Count > 0)
                         {
                             <th style="@Th text-align:center" colspan="@months.Count">SUMMER QTY</th>
                             <th style="@Th text-align:center" colspan="@months.Count">WINTER QTY</th>
                         }
-                        <th style="@Th text-align:right" rowspan="2">Total Qty</th>
+                        <th style="@Th text-align:right; cursor:pointer" rowspan="2" @onclick='() => Sort("Total")'>Total Qty@SortArrow("Total")</th>
                     </tr>
                     <tr>
-                        @foreach (var m in months) { <th style="@Th2 text-align:right">@MonthLabel(m)</th> }
-                        @foreach (var m in months) { <th style="@Th2 text-align:right">@MonthLabel(m)</th> }
+                        @foreach (var m in months)
+                        {
+                            var key = $"M_Summer_{m.Year}_{m.Month}";
+                            <th style="@Th2 text-align:right; cursor:pointer" @onclick="@(() => Sort(key))">@MonthLabel(m)@SortArrow(key)</th>
+                        }
+                        @foreach (var m in months)
+                        {
+                            var key = $"M_Winter_{m.Year}_{m.Month}";
+                            <th style="@Th2 text-align:right; cursor:pointer" @onclick="@(() => Sort(key))">@MonthLabel(m)@SortArrow(key)</th>
+                        }
                     </tr>
                 </thead>
                 <tbody>
@@ -142,11 +150,11 @@ else if (_cells.Count > 0)
             <table style="@TblStyle">
                 <thead>
                     <tr>
-                        <th style="@Th text-align:left">Country</th>
-                        <th style="@Th text-align:left">Division</th>
-                        <th style="@Th text-align:right">LPM Current Qty</th>
-                        <th style="@Th text-align:right">LPM Future Qty</th>
-                        <th style="@Th text-align:right">Total Qty</th>
+                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Country")'>Country@SortArrow("Country")</th>
+                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Division")'>Division@SortArrow("Division")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Current")'>LPM Current Qty@SortArrow("Current")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Future")'>LPM Future Qty@SortArrow("Future")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Total")'>Total Qty@SortArrow("Total")</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -183,6 +191,8 @@ else if (_cells.Count > 0)
     private bool _loadedOnce;
     private string _message = "";
     private bool _isError;
+    private string? _sortKey;     // null = default (Country, Division)
+    private bool _sortAsc = true;
 
     private const string TblStyle = "border-collapse:collapse; width:100%; white-space:nowrap; font-size:13px;";
     private const string Th  = "border:1px solid #d8a400; padding:5px 12px; background:#f5c543; font-weight:700; position:sticky; top:0; z-index:3;";
@@ -207,10 +217,49 @@ else if (_cells.Count > 0)
         _cells.Select(c => c.Country).Distinct()
               .OrderBy(c => c, StringComparer.OrdinalIgnoreCase).ToList();
 
-    private List<(string Country, string Division)> RowKeys =>
-        Filtered.Select(c => (c.Country, c.Division)).Distinct()
-                .OrderBy(k => k.Country, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(k => k.Division, StringComparer.OrdinalIgnoreCase).ToList();
+    private List<(string Country, string Division)> RowKeys
+    {
+        get
+        {
+            var keys = Filtered.Select(c => (c.Country, c.Division)).Distinct().ToList();
+            if (_sortKey is null)
+                return keys.OrderBy(k => k.Country, StringComparer.OrdinalIgnoreCase)
+                           .ThenBy(k => k.Division, StringComparer.OrdinalIgnoreCase).ToList();
+
+            // Pick a value function based on _sortKey + active view.
+            Func<(string Country, string Division), object?> v = _sortKey switch
+            {
+                "Country"  => k => k.Country,
+                "Division" => k => k.Division,
+                "Total"    => k => RowTotal(k),
+                "Summer"   => k => SumCells(k, c => c.Season == "Summer"),
+                "Winter"   => k => SumCells(k, c => c.Season == "Winter"),
+                "Current"  => k => SumCells(k, c => IsCurrent(c.Year, c.Month)),
+                "Future"   => k => SumCells(k, c => !IsCurrent(c.Year, c.Month)),
+                _ when _sortKey.StartsWith("M_") => k => MonthSortValue(k, _sortKey!),
+                _          => k => k.Country,
+            };
+            return (_sortAsc ? keys.OrderBy(v) : keys.OrderByDescending(v)).ToList();
+        }
+    }
+
+    // Month column key encoded as "M_Summer_YYYY_MM" or "M_Winter_YYYY_MM".
+    private long MonthSortValue((string Country, string Division) k, string key)
+    {
+        var parts = key.Split('_');
+        if (parts.Length != 4) return 0;
+        var season = parts[1];
+        if (!int.TryParse(parts[2], out var yr)) return 0;
+        if (!int.TryParse(parts[3], out var mo)) return 0;
+        return MonthQty(k, season, (yr, mo));
+    }
+
+    private void Sort(string key)
+    {
+        if (_sortKey == key) _sortAsc = !_sortAsc;
+        else { _sortKey = key; _sortAsc = true; }
+    }
+    private string SortArrow(string key) => _sortKey == key ? (_sortAsc ? " ▲" : " ▼") : "";
 
     private List<(int Year, int Month)> MonthsInData =>
         Filtered.Select(c => (c.Year, c.Month)).Distinct()
@@ -244,7 +293,7 @@ else if (_cells.Count > 0)
 
     private async Task LoadAsync()
     {
-        _loading = true; _message = ""; StateHasChanged();
+        _loading = true; _message = ""; _sortKey = null; StateHasChanged();
         try
         {
             _cells = await Svc.GetLpmWhStockAsync(_palletCat, _countryFilter);
