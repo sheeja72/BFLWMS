@@ -1,0 +1,434 @@
+@page "/reports/warehouse-boxes"
+@rendermode RenderMode.InteractiveServer
+@using System.Text
+@using Wms.Core
+@using Wms.Data.Lpm
+@using MudBlazor
+@attribute [Authorize(Roles = "Admin,Reports")]
+@inject WarehouseBoxesService Svc
+@inject Microsoft.JSInterop.IJSRuntime JS
+
+<PageTitle>WMS — Warehouse Box Details</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Warehouse Box Details</h2>
+    <p>Warehouse stock — UAE reads from <code>racks.dbo.whboxitems</code>; others from <code>[&lt;DataName&gt;].dbo.WHBoxItemsExport</code>. Use Group By to switch between box detail and Division / Department / Brand summaries.</p>
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">Filters</div>
+    <div style="display:grid; grid-template-columns: repeat(4, minmax(200px, 1fr)); gap:10px; align-items:end">
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">COUNTRY</label>
+            <select @bind="_country" @bind:after="OnCountryChangedAsync" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white">
+                @foreach (var c in _countries) { <option value="@c">@c</option> }
+            </select>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">WAREHOUSE</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true" Placeholder="All"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       SelectedValues="_fWarehouse" SelectedValuesChanged="@(v => _fWarehouse = v.ToHashSet())">
+                @foreach (var x in _warehouses) { <MudSelectItem T="string" Value="@x">@x</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">TYPE NAME</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true" Placeholder="All"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       SelectedValues="_fTypeName" SelectedValuesChanged="@(v => _fTypeName = v.ToHashSet())">
+                @foreach (var x in _typeNames) { <MudSelectItem T="string" Value="@x">@x</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">PALLET CATEGORY</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true" Placeholder="All"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       SelectedValues="_fPalletCategory" SelectedValuesChanged="@(v => _fPalletCategory = v.ToHashSet())">
+                @foreach (var x in _palletCategories) { <MudSelectItem T="string" Value="@x">@x</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">LPM STATUS</label>
+            <select @bind="_lpmStatus" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white">
+                <option value="Any">Any</option>
+                <option value="HasLpm">Has LPM</option>
+                <option value="NoLpm">No LPM (blank)</option>
+            </select>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">LPM (MONTH)</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true" Placeholder="All"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       SelectedValues="_fLpm" SelectedValuesChanged="@(v => _fLpm = v.ToHashSet())">
+                @foreach (var x in _lpms) { <MudSelectItem T="string" Value="@x">@x</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">PALLET / BOX</label>
+            <input @bind="_search" placeholder="contains…" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white" />
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">GROUP BY</label>
+            <select @bind="_groupBy" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white">
+                <option value="Box">Box (detail)</option>
+                <option value="Division">Division</option>
+                <option value="Department">Department</option>
+                <option value="Brand">Brand</option>
+            </select>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">DIVISION</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true" Placeholder="All"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       SelectedValues="_fDivision" SelectedValuesChanged="@(v => _fDivision = v.ToHashSet())">
+                @foreach (var x in _divisions) { <MudSelectItem T="string" Value="@x">@x</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">DEPARTMENT</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true" Placeholder="All"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       SelectedValues="_fDepartment" SelectedValuesChanged="@(v => _fDepartment = v.ToHashSet())">
+                @foreach (var x in _departments) { <MudSelectItem T="string" Value="@x">@x</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">BRAND</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true" Placeholder="All"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       SelectedValues="_fBrand" SelectedValuesChanged="@(v => _fBrand = v.ToHashSet())">
+                @foreach (var x in _brands) { <MudSelectItem T="string" Value="@x">@x</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">CONT NO</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true" Placeholder="All"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       SelectedValues="_fContNo" SelectedValuesChanged="@(v => _fContNo = v.ToHashSet())">
+                @foreach (var x in _contNos) { <MudSelectItem T="string" Value="@x">@x</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">SEASON (PALLET)</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true" Placeholder="All"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       SelectedValues="_fSeason" SelectedValuesChanged="@(v => _fSeason = v.ToHashSet())">
+                @foreach (var x in _seasons) { <MudSelectItem T="string" Value="@x">@x</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">TRN DATE FROM</label>
+            <input type="date" @bind="_trnFrom" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white" />
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">TRN DATE TO</label>
+            <input type="date" @bind="_trnTo" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white" />
+        </div>
+        <div style="display:flex; flex-direction:column; gap:4px">
+            <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer; margin-top:14px">
+                <input type="checkbox" @bind="_includeNonPurchased" /> Include Non-Purchased
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer">
+                <input type="checkbox" @bind="_mixedSeasonOnly" /> Mixed-season boxes only (Box mode)
+            </label>
+        </div>
+    </div>
+
+    <div style="display:flex; gap:10px; margin-top:14px">
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="LoadAsync" disabled="@_loading">@(_loading ? "Loading…" : "Load")</button>
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@(_loading || !HasResult)">Export to Excel</button>
+        <span style="font-size:12px; color:var(--text-secondary); align-self:center">
+            @(_groupBy == "Box" ? $"Top { _topN.ToString("N0") } rows" : "Aggregated")
+        </span>
+    </div>
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="aiwms-alert @(_isError ? "error" : "info")" style="margin-top:12px">@_message</div>
+    }
+</div>
+
+@if (_groupBy == "Box" && _boxes.Count > 0)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header">Box Detail — @_boxes.Count rows · Total Qty @_boxes.Sum(b => b.Qty).ToString("N0")</div>
+        <table class="aiwms-table aiwms-table-dense">
+            <thead>
+                <tr>
+                    <th>Country</th><th>Warehouse</th><th>PalletNo</th><th>BoxNo</th><th>OraPoNo</th>
+                    <th>PalletType</th><th>TypeName</th><th>PalletCategory</th>
+                    <th style="text-align:right">Qty</th><th style="text-align:right">Summer</th><th style="text-align:right">Winter</th>
+                    <th>LPM</th><th>Division</th><th>Department</th><th>Brand</th><th>Rack</th>
+                    <th>Purchased</th><th>ContNo</th><th>TrnDate</th><th>CurrDate</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var b in _boxes)
+                {
+                    <tr>
+                        <td>@b.Country</td><td>@b.Warehouse</td><td>@b.PalletNo</td><td>@b.BoxNo</td><td>@b.OraPoNo</td>
+                        <td>@b.PalletType</td><td>@b.TypeName</td><td>@b.PalletCategory</td>
+                        <td style="text-align:right">@b.Qty.ToString("N0")</td>
+                        <td style="text-align:right">@b.SummerQty.ToString("N0")</td>
+                        <td style="text-align:right">@b.WinterQty.ToString("N0")</td>
+                        <td>@b.LPM</td><td>@b.Division</td><td>@b.Department</td><td>@b.Brand</td><td>@b.Rack</td>
+                        <td>@b.Purchased</td><td>@b.ContNo</td>
+                        <td>@(b.TrnDate?.ToString("yyyy-MM-dd"))</td><td>@(b.CurrDate?.ToString("yyyy-MM-dd HH:mm"))</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+else if (_groupBy == "Division" && _divisionRows.Count > 0)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header">Division Summary — @_divisionRows.Count rows</div>
+        <table class="aiwms-table aiwms-table-dense">
+            <thead><tr><th>Division</th><th style="text-align:right">LPM Current Qty</th><th style="text-align:right">LPM Future Qty</th><th style="text-align:right">Non-LPM Qty</th><th style="text-align:right">Total</th></tr></thead>
+            <tbody>
+                @foreach (var r in _divisionRows)
+                {
+                    <tr>
+                        <td><strong>@r.Division</strong></td>
+                        <td style="text-align:right">@r.LPMCurrentQty.ToString("N0")</td>
+                        <td style="text-align:right">@r.LPMFutureQty.ToString("N0")</td>
+                        <td style="text-align:right">@r.NonLPMQty.ToString("N0")</td>
+                        <td style="text-align:right; font-weight:600">@(r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty)</td>
+                    </tr>
+                }
+                <tr style="font-weight:700; background:#fff7e0">
+                    <td>TOTAL</td>
+                    <td style="text-align:right">@_divisionRows.Sum(r => r.LPMCurrentQty).ToString("N0")</td>
+                    <td style="text-align:right">@_divisionRows.Sum(r => r.LPMFutureQty).ToString("N0")</td>
+                    <td style="text-align:right">@_divisionRows.Sum(r => r.NonLPMQty).ToString("N0")</td>
+                    <td style="text-align:right">@_divisionRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty).ToString("N0")</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+}
+else if (_groupBy == "Department" && _deptRows.Count > 0)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header">Department Summary — @_deptRows.Count rows</div>
+        <table class="aiwms-table aiwms-table-dense">
+            <thead><tr><th>Division</th><th>Department</th><th style="text-align:right">LPM Current Qty</th><th style="text-align:right">LPM Future Qty</th><th style="text-align:right">Non-LPM Qty</th><th style="text-align:right">Total</th></tr></thead>
+            <tbody>
+                @foreach (var r in _deptRows)
+                {
+                    <tr>
+                        <td>@r.Division</td><td>@r.Department</td>
+                        <td style="text-align:right">@r.LPMCurrentQty.ToString("N0")</td>
+                        <td style="text-align:right">@r.LPMFutureQty.ToString("N0")</td>
+                        <td style="text-align:right">@r.NonLPMQty.ToString("N0")</td>
+                        <td style="text-align:right; font-weight:600">@(r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty)</td>
+                    </tr>
+                }
+                <tr style="font-weight:700; background:#fff7e0">
+                    <td colspan="2">TOTAL</td>
+                    <td style="text-align:right">@_deptRows.Sum(r => r.LPMCurrentQty).ToString("N0")</td>
+                    <td style="text-align:right">@_deptRows.Sum(r => r.LPMFutureQty).ToString("N0")</td>
+                    <td style="text-align:right">@_deptRows.Sum(r => r.NonLPMQty).ToString("N0")</td>
+                    <td style="text-align:right">@_deptRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty).ToString("N0")</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+}
+else if (_groupBy == "Brand" && _brandRows.Count > 0)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header">Brand Summary — @_brandRows.Count rows</div>
+        <table class="aiwms-table aiwms-table-dense">
+            <thead><tr><th>Division</th><th>Department</th><th>Brand</th><th style="text-align:right">LPM Current Qty</th><th style="text-align:right">LPM Future Qty</th><th style="text-align:right">Non-LPM Qty</th><th style="text-align:right">Total</th></tr></thead>
+            <tbody>
+                @foreach (var r in _brandRows)
+                {
+                    <tr>
+                        <td>@r.Division</td><td>@r.Department</td><td>@r.Brand</td>
+                        <td style="text-align:right">@r.LPMCurrentQty.ToString("N0")</td>
+                        <td style="text-align:right">@r.LPMFutureQty.ToString("N0")</td>
+                        <td style="text-align:right">@r.NonLPMQty.ToString("N0")</td>
+                        <td style="text-align:right; font-weight:600">@(r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty)</td>
+                    </tr>
+                }
+                <tr style="font-weight:700; background:#fff7e0">
+                    <td colspan="3">TOTAL</td>
+                    <td style="text-align:right">@_brandRows.Sum(r => r.LPMCurrentQty).ToString("N0")</td>
+                    <td style="text-align:right">@_brandRows.Sum(r => r.LPMFutureQty).ToString("N0")</td>
+                    <td style="text-align:right">@_brandRows.Sum(r => r.NonLPMQty).ToString("N0")</td>
+                    <td style="text-align:right">@_brandRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty).ToString("N0")</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    private List<string> _countries = new();
+    private List<string> _warehouses = new();
+    private List<string> _typeNames = new();
+    private List<string> _palletCategories = new();
+    private List<string> _lpms = new();
+    private List<string> _divisions = new();
+    private List<string> _departments = new();
+    private List<string> _brands = new();
+    private List<string> _contNos = new();
+    private List<string> _seasons = new();
+
+    private string _country = "UAE";
+    private HashSet<string> _fWarehouse = new();
+    private HashSet<string> _fTypeName = new();
+    private HashSet<string> _fPalletCategory = new();
+    private HashSet<string> _fLpm = new();
+    private HashSet<string> _fDivision = new();
+    private HashSet<string> _fDepartment = new();
+    private HashSet<string> _fBrand = new();
+    private HashSet<string> _fContNo = new();
+    private HashSet<string> _fSeason = new();
+    private string _lpmStatus = "Any";
+    private string _search = "";
+    private string _groupBy = "Box";
+    private bool _includeNonPurchased;
+    private bool _mixedSeasonOnly;
+    private DateTime? _trnFrom;
+    private DateTime? _trnTo;
+    private const int _topN = 10000;
+
+    private List<WhBoxRow>        _boxes = new();
+    private List<WhDivisionRow>   _divisionRows = new();
+    private List<WhDepartmentRow> _deptRows = new();
+    private List<WhBrandRow>      _brandRows = new();
+    private bool _loading;
+    private string _message = "";
+    private bool _isError;
+
+    private bool HasResult => _groupBy switch
+    {
+        "Box"        => _boxes.Count > 0,
+        "Division"   => _divisionRows.Count > 0,
+        "Department" => _deptRows.Count > 0,
+        "Brand"      => _brandRows.Count > 0,
+        _ => false,
+    };
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _countries        = await Svc.GetCountriesAsync();
+            _typeNames        = await Svc.GetTypeNamesAsync();
+            _palletCategories = await Svc.GetPalletCategoriesAsync();
+            _divisions        = await Svc.GetDivisionsAsync();
+            _departments      = await Svc.GetDepartmentsAsync();
+            _seasons          = await Svc.GetSeasonsAsync();
+            await LoadCountryDropdownsAsync();
+        }
+        catch (Exception ex) { ShowError($"Init failed: {ex.Message}"); }
+    }
+
+    private async Task OnCountryChangedAsync()
+    {
+        // Country-dependent dropdowns reload; clear selections that may not exist in the new source.
+        _fWarehouse.Clear(); _fLpm.Clear(); _fBrand.Clear(); _fContNo.Clear();
+        await LoadCountryDropdownsAsync();
+    }
+
+    private async Task LoadCountryDropdownsAsync()
+    {
+        try
+        {
+            _warehouses = await Svc.GetWarehousesAsync(_country);
+            _lpms       = await Svc.GetLpmsAsync(_country);
+            _brands     = await Svc.GetBrandsAsync(_country);
+            _contNos    = await Svc.GetContNosAsync(_country);
+        }
+        catch (Exception ex) { ShowError($"Failed to load dropdowns for {_country}: {ex.Message}"); }
+    }
+
+    private WhBoxFilter BuildFilter() => new(
+        Warehouse:      _fWarehouse.Count == 0 ? null : _fWarehouse.ToList(),
+        TypeName:       _fTypeName.Count == 0 ? null : _fTypeName.ToList(),
+        PalletCategory: _fPalletCategory.Count == 0 ? null : _fPalletCategory.ToList(),
+        Lpm:            _fLpm.Count == 0 ? null : _fLpm.ToList(),
+        Search:         string.IsNullOrWhiteSpace(_search) ? null : _search.Trim(),
+        LpmStatus:      _lpmStatus switch { "HasLpm" => LpmPresence.HasLpm, "NoLpm" => LpmPresence.NoLpm, _ => LpmPresence.Any },
+        Division:       _fDivision.Count == 0 ? null : _fDivision.ToList(),
+        Department:     _fDepartment.Count == 0 ? null : _fDepartment.ToList(),
+        Brand:          _fBrand.Count == 0 ? null : _fBrand.ToList(),
+        IncludeNonPurchased: _includeNonPurchased,
+        ContNo:         _fContNo.Count == 0 ? null : _fContNo.ToList(),
+        Country:        _country,
+        TrnDateFrom:    _trnFrom,
+        TrnDateTo:      _trnTo,
+        MixedSeasonOnly: _mixedSeasonOnly,
+        Season:         _fSeason.Count == 0 ? null : _fSeason.ToList());
+
+    private async Task LoadAsync()
+    {
+        _loading = true; _message = "";
+        _boxes.Clear(); _divisionRows.Clear(); _deptRows.Clear(); _brandRows.Clear();
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var f = BuildFilter();
+            switch (_groupBy)
+            {
+                case "Box":        _boxes        = await Svc.GetBoxesAsync(f, _topN); break;
+                case "Division":   _divisionRows = await Svc.GetDivisionSummaryAsync(f); break;
+                case "Department": _deptRows     = await Svc.GetDepartmentSummaryAsync(f); break;
+                case "Brand":      _brandRows    = await Svc.GetBrandSummaryAsync(f); break;
+            }
+            var count = _groupBy switch
+            {
+                "Box"        => _boxes.Count,
+                "Division"   => _divisionRows.Count,
+                "Department" => _deptRows.Count,
+                "Brand"      => _brandRows.Count,
+                _ => 0,
+            };
+            ShowInfo($"Loaded {count} rows.");
+        }
+        catch (Exception ex) { ShowError($"Load failed: {ex.Message}"); }
+        finally { _loading = false; }
+    }
+
+    private async Task ExportCsvAsync()
+    {
+        var sb = new StringBuilder();
+        switch (_groupBy)
+        {
+            case "Box":
+                sb.AppendLine("Country,Warehouse,PalletNo,BoxNo,OraPoNo,PalletType,TypeName,PalletCategory,Qty,SummerQty,WinterQty,LPM,Division,Department,Brand,Rack,Purchased,ContNo,TrnDate,CurrDate");
+                foreach (var b in _boxes)
+                    sb.AppendLine($"{Csv(b.Country)},{Csv(b.Warehouse)},{Csv(b.PalletNo)},{Csv(b.BoxNo)},{Csv(b.OraPoNo)},{Csv(b.PalletType)},{Csv(b.TypeName)},{Csv(b.PalletCategory)},{b.Qty},{b.SummerQty},{b.WinterQty},{Csv(b.LPM)},{Csv(b.Division)},{Csv(b.Department)},{Csv(b.Brand)},{Csv(b.Rack)},{Csv(b.Purchased)},{Csv(b.ContNo)},{b.TrnDate:yyyy-MM-dd},{b.CurrDate:yyyy-MM-dd HH:mm}");
+                break;
+            case "Division":
+                sb.AppendLine("Division,LPMCurrentQty,LPMFutureQty,NonLPMQty,Total");
+                foreach (var r in _divisionRows)
+                    sb.AppendLine($"{Csv(r.Division)},{r.LPMCurrentQty},{r.LPMFutureQty},{r.NonLPMQty},{r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty}");
+                break;
+            case "Department":
+                sb.AppendLine("Division,Department,LPMCurrentQty,LPMFutureQty,NonLPMQty,Total");
+                foreach (var r in _deptRows)
+                    sb.AppendLine($"{Csv(r.Division)},{Csv(r.Department)},{r.LPMCurrentQty},{r.LPMFutureQty},{r.NonLPMQty},{r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty}");
+                break;
+            case "Brand":
+                sb.AppendLine("Division,Department,Brand,LPMCurrentQty,LPMFutureQty,NonLPMQty,Total");
+                foreach (var r in _brandRows)
+                    sb.AppendLine($"{Csv(r.Division)},{Csv(r.Department)},{Csv(r.Brand)},{r.LPMCurrentQty},{r.LPMFutureQty},{r.NonLPMQty},{r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty}");
+                break;
+        }
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(sb.ToString()));
+        var filename = $"WarehouseBoxes_{_country}_{_groupBy}_{DateTime.Now:yyyyMMdd_HHmm}.csv";
+        await JS.InvokeVoidAsync("eval", $"(function(){{var a=document.createElement('a');a.href='data:text/csv;base64,{b64}';a.download='{filename}';document.body.appendChild(a);a.click();document.body.removeChild(a);}})();");
+    }
+
+    private static string Csv(string? s) => s is null ? ""
+        : (s.Contains(',') || s.Contains('"') || s.Contains('\n')) ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
+
+    private void ShowError(string msg) { _message = msg; _isError = true; }
+    private void ShowInfo(string msg)  { _message = msg; _isError = false; }
+}
