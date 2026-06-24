@@ -58,6 +58,7 @@ public class Program
         builder.Services.AddScoped<BuildingService>();
         builder.Services.AddScoped<ContainerAllocationService>();
         builder.Services.AddScoped<ReportsService>();
+        builder.Services.AddScoped<WarehouseBoxesService>();
         builder.Services.AddScoped<MissingExcessSnapshotService>();
         builder.Services.AddHostedService<Wms.Web.Hosting.NightlyBatchService>();
 
