@@ -175,8 +175,8 @@ else if (_loaded && _view == "ItemSummary")
         {
             switch (_view)
             {
-                case "BoxSummary":  _boxMonths   = await Svc.BoxSummaryByMonthAsync(_country, _fromDt, _toDt); break;
-                case "ItemSummary": _itemDivDept = await Svc.ItemSummaryByDivDeptAsync(_country, _fromDt, _toDt); break;
+                case "BoxSummary":  _boxMonths   = await Svc.BoxSummaryByMonthFromSnapshotAsync(_country, _fromDt, _toDt); break;
+                case "ItemSummary": _itemDivDept = await Svc.ItemSummaryByDivDeptFromSnapshotAsync(_country, _fromDt, _toDt); break;
                 case "BoxDetail":   /* no UI — Export does the work */ break;
             }
             _loaded = true;
@@ -230,7 +230,7 @@ else if (_loaded && _view == "ItemSummary")
         _busy = true; _busyMsg = "Building Box Summary export…"; await InvokeAsync(StateHasChanged);
         try
         {
-            var rows = await Svc.BoxSummaryAsync(_country, _fromDt, _toDt);
+            var rows = await Svc.BoxSummaryFromSnapshotAsync(_country, _fromDt, _toDt);
             var sb = new StringBuilder();
             sb.AppendLine("BoxNo,ClosedDt,ClosedBy,MissingQty,ExcessQty");
             foreach (var r in rows)
@@ -248,7 +248,7 @@ else if (_loaded && _view == "ItemSummary")
         _busy = true; _busyMsg = "Building Box Detail export…"; await InvokeAsync(StateHasChanged);
         try
         {
-            var rows = await Svc.BoxDetailCombinedAsync(_country, _fromDt, _toDt);
+            var rows = await Svc.BoxDetailCombinedFromSnapshotAsync(_country, _fromDt, _toDt);
             var sb = new StringBuilder();
             sb.AppendLine("Type,BoxNo,PreparedBy,ItemCode,Qty,QtyIssued,Diff");
             foreach (var r in rows)
@@ -265,7 +265,7 @@ else if (_loaded && _view == "ItemSummary")
         _busy = true; _busyMsg = "Building Item Details export…"; await InvokeAsync(StateHasChanged);
         try
         {
-            var rows = await Svc.ItemSummaryAsync(_country, _fromDt, _toDt);
+            var rows = await Svc.ItemSummaryFromSnapshotAsync(_country, _fromDt, _toDt);
             var sb = new StringBuilder();
             sb.AppendLine("ItemCode,ItemName,Division,Department,MissingQty,ExcessQty,HOStock");
             foreach (var r in rows)
