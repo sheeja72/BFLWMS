@@ -533,6 +533,126 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     }
 
     /// <summary>
+    /// Bulk-write the allocation rows DIRECTLY to LPMSIM.dbo.WMS_ContAllocationData
+    /// (no draft round-trip). Used by the simplified Container Allocation flow where
+    /// Process always saves immediately.
+    /// </summary>
+    public async Task SaveFinalDirectAsync(string country, string contno, IReadOnlyList<AllocationRow> rows,
+        IProgress<AllocationProgress>? progress = null, CancellationToken ct = default)
+    {
+        if (rows.Count == 0) return;
+        await using var c = OpenOnPremBackup();
+
+        // Wipe any prior final rows for this Container (so re-Process replaces cleanly).
+        progress?.Report(new AllocationProgress(0, rows.Count, "Saving: cleaning prior data"));
+        await c.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
+            new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+
+        // Build a DataTable matching the columns we set on per-row fallback path.
+        progress?.Report(new AllocationProgress(0, rows.Count, "Saving: bulk insert"));
+        var dt = new System.Data.DataTable();
+        dt.Columns.Add("ContNo",           typeof(string));
+        dt.Columns.Add("TrnDate",          typeof(DateTime));
+        dt.Columns.Add("Time1",            typeof(TimeSpan));
+        dt.Columns.Add("UPC",              typeof(string));
+        dt.Columns.Add("Itemcode",         typeof(string));
+        dt.Columns.Add("GroupCode",        typeof(string));
+        dt.Columns.Add("Qty",              typeof(int));
+        dt.Columns.Add("QtyIssue",         typeof(int));
+        dt.Columns.Add("StoreID",          typeof(string));
+        dt.Columns.Add("TcmContno",        typeof(string));
+        dt.Columns.Add("Itemname",         typeof(string));
+        dt.Columns.Add("BuildingCategory", typeof(string));
+        dt.Columns.Add("LPMDt",            typeof(DateTime));
+        dt.Columns.Add("ORAPONo",          typeof(string));
+        dt.Columns.Add("Division",         typeof(string));
+        dt.Columns.Add("Remarks",          typeof(string));
+
+        var now = DateTime.Now;
+        var trnDate = now.Date;
+        var time1 = new TimeSpan(now.Hour, now.Minute, now.Second);
+
+        foreach (var r in rows)
+        {
+            dt.Rows.Add(
+                r.Contno, trnDate, time1, r.ItemCode, r.ItemCode, r.VolumeGroup,
+                r.AllocQty, 0, r.StoreID, r.Contno,
+                (object?)r.ItemName ?? DBNull.Value, country,
+                (object?)r.LPMDt ?? DBNull.Value, r.OraPONo,
+                (object?)r.Division ?? DBNull.Value,
+                (object?)(r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null) ?? DBNull.Value);
+        }
+
+        c.ChangeDatabase("LPMSIM");
+        using var bulk = new SqlBulkCopy(c)
+        {
+            DestinationTableName = "dbo.WMS_ContAllocationData",
+            BatchSize            = 1000,
+            BulkCopyTimeout      = CommandTimeoutSeconds,
+            NotifyAfter          = 500,
+        };
+        bulk.SqlRowsCopied += (_, e) =>
+            progress?.Report(new AllocationProgress((int)e.RowsCopied, rows.Count, "Saving to LPMSIM"));
+        foreach (System.Data.DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
+        await bulk.WriteToServerAsync(dt, ct);
+
+        progress?.Report(new AllocationProgress(rows.Count, rows.Count, "Saving: done"));
+    }
+
+    /// <summary>
+    /// Sum of orgqty in usa.dbo.usaorgfile_LPM for the container — drives the
+    /// 'Total PO Qty' card on the allocation page. Returns 0 when no rows match.
+    /// </summary>
+    public async Task<long> GetTotalPoQtyAsync(string contno, CancellationToken ct = default)
+    {
+        await using var c = OpenOnPremBackup();
+        return await c.ExecuteScalarAsync<long?>(new CommandDefinition(
+            "SELECT CAST(ISNULL(SUM(orgqty),0) AS BIGINT) FROM usa.dbo.usaorgfile_LPM WITH (NOLOCK) WHERE ContNo = @c",
+            new { c = contno }, commandTimeout: 60, cancellationToken: ct)) ?? 0;
+    }
+
+    /// <summary>
+    /// Load rows from LPMSIM.dbo.WMS_ContAllocationData and map back to AllocationRow.
+    /// Fields not stored in the final table (PoQty, SkuMax, VolumeGroup, etc.) come
+    /// back as defaults; UI still displays Allocated Qty, StoreID, Division, etc.
+    /// </summary>
+    public async Task<List<AllocationRow>> LoadFinalAsync(string country, string contno, CancellationToken ct = default)
+    {
+        await using var c = OpenOnPremBackup();
+        var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName,
+                                       int? Qty, string? StoreID, string? GroupCode, string? Division,
+                                       string? Remarks, DateTime? LPMDt)>(new CommandDefinition(@"
+            SELECT ContNo, ORAPONo, Itemcode, Itemname, Qty, StoreID, GroupCode, Division, Remarks, LPMDt
+            FROM LPMSIM.dbo.WMS_ContAllocationData WITH (NOLOCK)
+            WHERE ContNo = @c
+            ORDER BY IdNo",
+            new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+
+        return rows.Select(r => new AllocationRow(
+            Contno: r.ContNo,
+            OraPONo: r.OraPONo ?? "",
+            ItemCode: r.ItemCode ?? "",
+            ItemName: r.ItemName,
+            Brand: null,
+            PoQty: 0,
+            StoreID: r.StoreID ?? "",
+            StoreName: null,
+            Country: country,
+            Division: r.Division,
+            VolumeGroup: r.GroupCode ?? "",
+            SkuMax: 0,
+            AllocQty: r.Qty ?? 0,
+            MerchNeedMonth: 0,
+            DivCode: 0,
+            RoundRobinExtra: ParseRoundRobin(r.Remarks),
+            LPM: null,
+            LPMDt: r.LPMDt
+        )).ToList();
+    }
+
+    /// <summary>
     /// Reset Final: deletes all rows from LPMSIM.dbo.WMS_ContAllocationData for the
     /// given container so the page unlocks and Process can run again. Destructive —
     /// caller is responsible for confirming with the user. Returns rows deleted.

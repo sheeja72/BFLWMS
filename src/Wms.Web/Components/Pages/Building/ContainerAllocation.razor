@@ -44,25 +44,15 @@
             <input @bind="_contno" @bind:after="OnContnoChangedAsync" placeholder="e.g. AEINT6255" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-mono); font-size:13px; background:white;" />
         </div>
         <button class="aiwms-btn aiwms-btn-secondary" @onclick="LoadPoDataAsync" disabled="@(_busy || !CanLoad)">Load PO Data</button>
-        <button class="aiwms-btn aiwms-btn-primary" @onclick="ProcessAsync" disabled="@(_busy || !CanProcess || _status?.HasFinal == true)">
-            @(_status?.HasFinal == true ? "🔒 Locked" : "Process")
-        </button>
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="ProcessAsync" disabled="@(_busy || !CanProcess)">Process</button>
     </div>
     <div style="display:flex; gap:12px; margin-top:12px; flex-wrap:wrap; align-items:center">
         <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer">
             <input type="checkbox" @bind="_validate" /> Validate before Process
         </label>
-        @if (_allocation.Count > 0)
-        {
-            <button class="aiwms-btn aiwms-btn-success" @onclick="ConfirmSaveAsync" disabled="@_busy">Confirm &amp; Save</button>
-        }
-        @if (_status?.HasDraft == true)
-        {
-            <button class="aiwms-btn aiwms-btn-secondary" @onclick="ViewDraftAsync" disabled="@_busy">View Draft (@_status.DraftRows rows)</button>
-        }
         @if (_status?.HasFinal == true)
         {
-            <button class="aiwms-btn aiwms-btn-secondary" style="border-color:#D1435B; color:#D1435B" @onclick="ResetFinalAsync" disabled="@_busy">Reset Final (@_status.FinalRows rows)</button>
+            <button class="aiwms-btn aiwms-btn-secondary" style="border-color:#D1435B; color:#D1435B" @onclick="DeleteAsync" disabled="@_busy">Delete (@_status.FinalRows rows)</button>
         }
     </div>
 
@@ -111,12 +101,21 @@
 @if (_allocation.Count > 0)
 {
     <div class="aiwms-section">
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; padding:0 0 14px 0">
+            <div style="background:#dbeafe; color:#1e40af; padding:12px 16px; border-radius:var(--r-sm); border:1px solid #00000010">
+                <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:1px">Total PO Qty</div>
+                <div style="font-size:1.6rem; font-weight:900">@_totalPoQty.ToString("N0")</div>
+            </div>
+            <div style="background:#dcfce7; color:#166534; padding:12px 16px; border-radius:var(--r-sm); border:1px solid #00000010">
+                <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:1px">Total Allocated Qty</div>
+                <div style="font-size:1.6rem; font-weight:900">@_allocation.Sum(r => r.AllocQty).ToString("N0")</div>
+            </div>
+        </div>
         <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px">
             @{
                 var rendered = Filtered.ToList();
-                var capped = _filteredCount > MAX_RENDER_ROWS;
             }
-            <span>Allocation @(_status?.HasFinal == true ? "(FINAL)" : _status?.HasDraft == true ? "(Draft)" : "Preview") — @rendered.Count of @_filteredCount filtered (of @_allocation.Count total), total @rendered.Sum(r => r.AllocQty) pcs shown@(capped ? $" — capped at {MAX_RENDER_ROWS}, use filters to narrow" : "")</span>
+            <span>Allocation @(_status?.HasFinal == true ? "(SAVED)" : "Preview") — @rendered.Count of @_filteredCount filtered (of @_allocation.Count total), total @rendered.Sum(r => r.AllocQty) pcs shown</span>
             <span style="display:flex; gap:8px">
                 <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync">Export to Excel</button>
             </span>
@@ -331,6 +330,7 @@
     private string _contno = "";
     private string _runOption = "FillSKUMax";
     private bool _validate = true;
+    private long _totalPoQty;
     private bool _busy;
     private string _message = "";
     private bool _messageIsError;
@@ -423,6 +423,17 @@
                 _progressCurrent = p.Current; _progressTotal = p.Total; _progressItem = p.CurrentItem;
                 await InvokeAsync(StateHasChanged);
             });
+            // If allocations already exist for this container, just load and show them.
+            await RefreshStatusAsync();
+            if (_status?.HasFinal == true)
+            {
+                _allocation = await Svc.LoadFinalAsync(_country, _contno);
+                _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
+                ShowInfo($"Loaded existing allocation — {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
+                return;
+            }
+
+            // Otherwise: validate (if checked) → process → save direct.
             if (_validate)
             {
                 _validation = await Svc.ValidateAsync(_country, _contno, progress);
@@ -432,7 +443,6 @@
             {
                 _validation = null;
             }
-            // Reset progress for the Process phase so the bar starts fresh at 0/N.
             _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
             var ro = _runOption == "RoundRobin" ? RunOption.RoundRobin : RunOption.FillSKUMax;
             _allocation = await Svc.ProcessAllocationAsync(_contno, progress, ro);
@@ -442,72 +452,35 @@
             }
             else
             {
-                // Auto-save draft so the user doesn't have to click a separate button.
-                // Reset progress so the banner shows the save phase cleanly.
                 _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
                 await InvokeAsync(StateHasChanged);
-                await Svc.SaveDraftAsync(_country, _contno, _allocation, _warehouse, ro, progress);
+                await Svc.SaveFinalDirectAsync(_country, _contno, _allocation, progress);
                 await RefreshStatusAsync();
-                ShowInfo($"Allocation computed and draft saved: {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
+                _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
+                ShowInfo($"Allocation computed and saved: {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
             }
         }
         catch (Exception ex) { ShowError($"Process failed: {ex.Message}"); }
         finally { _busy = false; _progressTotal = 0; }
     }
 
-    private async Task ViewDraftAsync()
-    {
-        _busy = true; _message = ""; _allocation = new();
-        // Clear any stale filters / sort so the first render is small
-        _filterDivs = new(); _filterStores = new(); _filterPos = new(); _filterItemCode = "";
-        _sortKey = null;
-        await InvokeAsync(StateHasChanged);
-        try
-        {
-            var draft = await Svc.LoadDraftAsync(_country, _contno);
-            _allocation = draft;
-            ShowInfo($"Loaded draft — {_allocation.Count} rows (showing first {Math.Min(MAX_RENDER_ROWS, _allocation.Count)}; filter to narrow).");
-        }
-        catch (Exception ex) { ShowError($"Load draft failed: {ex.Message}"); }
-        finally { _busy = false; }
-    }
-
-    private async Task ResetFinalAsync()
+    private async Task DeleteAsync()
     {
         if (_status is null || !_status.HasFinal) return;
         var ok = await JS.InvokeAsync<bool>("confirm",
-            $"Delete {_status.FinalRows} confirmed rows for {_contno} from WMS_ContAllocationData?\n\nThis cannot be undone. Process will become available again.");
+            $"Delete {_status.FinalRows} allocation rows for {_contno} from WMS_ContAllocationData?\n\nThis cannot be undone.");
         if (!ok) return;
         _busy = true; _message = ""; await InvokeAsync(StateHasChanged);
         try
         {
             var n = await Svc.ResetFinalAsync(_contno);
+            _allocation = new();
+            _totalPoQty = 0;
             await RefreshStatusAsync();
-            ShowInfo($"Deleted {n} final rows for {_contno}.");
+            ShowInfo($"Deleted {n} rows for {_contno}.");
         }
-        catch (Exception ex) { ShowError($"Reset failed: {ex.Message}"); }
+        catch (Exception ex) { ShowError($"Delete failed: {ex.Message}"); }
         finally { _busy = false; }
-    }
-
-    private async Task ConfirmSaveAsync()
-    {
-        _busy = true; _message = "";
-        // Clear any stale banner text from the prior Process/Save phase.
-        _progressCurrent = 0; _progressTotal = 0;
-        _progressItem = "Confirming: copying draft → WMS_ContAllocationData";
-        await InvokeAsync(StateHasChanged);
-        try
-        {
-            var progress = new Progress<AllocationProgress>(async p => {
-                _progressCurrent = p.Current; _progressTotal = p.Total; _progressItem = p.CurrentItem;
-                await InvokeAsync(StateHasChanged);
-            });
-            var n = await Svc.SaveAllocationAsync(_allocation, progress);
-            await RefreshStatusAsync();
-            ShowInfo($"Saved {n} rows to LPMSIM.WMS_ContAllocationData.");
-        }
-        catch (Exception ex) { ShowError($"Save failed: {ex.Message}"); }
-        finally { _busy = false; _progressItem = null; }
     }
 
     private async Task ExportCsvAsync()
@@ -579,7 +552,7 @@
             }
             var list = q.ToList();
             _filteredCount = list.Count;
-            return list.Take(MAX_RENDER_ROWS);
+            return list;
         }
     }
 
