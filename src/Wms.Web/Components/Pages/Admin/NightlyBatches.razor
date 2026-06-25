@@ -73,7 +73,7 @@
     <table class="aiwms-table aiwms-table-dense">
         <thead>
             <tr>
-                <th>RunId</th><th>Country</th><th>Mode</th><th>Started</th><th>Ended</th>
+                <th>RunId</th><th>Job</th><th>Country</th><th>Mode</th><th>Started</th><th>Ended</th>
                 <th>Status</th><th style="text-align:right">Rows</th>
                 <th style="text-align:right">Days</th><th>Triggered By</th><th>Error</th>
             </tr>
@@ -83,6 +83,7 @@
             {
                 <tr>
                     <td>@r.RunId</td>
+                    <td>@r.JobName</td>
                     <td>@r.Country</td>
                     <td>@r.Mode</td>
                     <td>@r.StartTS.ToString("yyyy-MM-dd HH:mm:ss")</td>
@@ -96,7 +97,7 @@
             }
             @if (_runs.Count == 0)
             {
-                <tr><td colspan="10" style="font-style:italic; color:var(--text-secondary)">No runs yet.</td></tr>
+                <tr><td colspan="11" style="font-style:italic; color:var(--text-secondary)">No runs yet.</td></tr>
             }
         </tbody>
     </table>
