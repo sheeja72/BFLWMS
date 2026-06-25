@@ -46,8 +46,17 @@ public record AllocationRow(
     string? LPM,
     DateTime? LPMDt);
 
-/// <summary>State info shown above the buttons.</summary>
-public record AllocationStatus(bool HasDraft, bool HasFinal, int DraftRows, int FinalRows, DateTime? FinalAt, string? DraftRunOption);
+/// <summary>State info shown above the buttons. Now tracks per-RunOption final
+/// row counts so the page knows whether each algorithm has been run for this container.</summary>
+public record AllocationStatus(
+    bool HasDraft,
+    bool HasFinal,
+    int  DraftRows,
+    int  FinalRows,
+    DateTime? FinalAt,
+    string? DraftRunOption,
+    int  FillSkuMaxRows,
+    int  RoundRobinRows);
 
 /// <summary>How to distribute qty across eligible stores.</summary>
 public enum RunOption { FillSKUMax = 0, RoundRobin = 1 }

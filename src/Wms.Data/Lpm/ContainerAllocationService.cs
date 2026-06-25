@@ -538,16 +538,18 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     /// Process always saves immediately.
     /// </summary>
     public async Task SaveFinalDirectAsync(string country, string contno, IReadOnlyList<AllocationRow> rows,
-        IProgress<AllocationProgress>? progress = null, CancellationToken ct = default)
+        RunOption runOption, IProgress<AllocationProgress>? progress = null, CancellationToken ct = default)
     {
         if (rows.Count == 0) return;
+        var roTag = runOption.ToString();
         await using var c = OpenOnPremBackup();
 
-        // Wipe any prior final rows for this Container (so re-Process replaces cleanly).
+        // Wipe any prior rows for this Container + RunOption (so re-Process replaces
+        // the matching slice without touching the other algorithm's saved data).
         progress?.Report(new AllocationProgress(0, rows.Count, "Saving: cleaning prior data"));
         await c.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
-            new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c AND ISNULL(RunOption,'FillSKUMax') = @ro",
+            new { c = contno, ro = roTag }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
 
         // Build a DataTable matching the columns we set on per-row fallback path.
         progress?.Report(new AllocationProgress(0, rows.Count, "Saving: bulk insert"));
@@ -568,6 +570,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         dt.Columns.Add("ORAPONo",          typeof(string));
         dt.Columns.Add("Division",         typeof(string));
         dt.Columns.Add("Remarks",          typeof(string));
+        dt.Columns.Add("RunOption",        typeof(string));
 
         var now = DateTime.Now;
         var trnDate = now.Date;
@@ -581,7 +584,8 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 (object?)r.ItemName ?? DBNull.Value, country,
                 (object?)r.LPMDt ?? DBNull.Value, r.OraPONo,
                 (object?)r.Division ?? DBNull.Value,
-                (object?)(r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null) ?? DBNull.Value);
+                (object?)(r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null) ?? DBNull.Value,
+                roTag);
         }
 
         c.ChangeDatabase("LPMSIM");
@@ -618,17 +622,18 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     /// Fields not stored in the final table (PoQty, SkuMax, VolumeGroup, etc.) come
     /// back as defaults; UI still displays Allocated Qty, StoreID, Division, etc.
     /// </summary>
-    public async Task<List<AllocationRow>> LoadFinalAsync(string country, string contno, CancellationToken ct = default)
+    public async Task<List<AllocationRow>> LoadFinalAsync(string country, string contno, RunOption runOption, CancellationToken ct = default)
     {
+        var roTag = runOption.ToString();
         await using var c = OpenOnPremBackup();
         var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName,
                                        int? Qty, string? StoreID, string? GroupCode, string? Division,
                                        string? Remarks, DateTime? LPMDt)>(new CommandDefinition(@"
             SELECT ContNo, ORAPONo, Itemcode, Itemname, Qty, StoreID, GroupCode, Division, Remarks, LPMDt
             FROM LPMSIM.dbo.WMS_ContAllocationData WITH (NOLOCK)
-            WHERE ContNo = @c
+            WHERE ContNo = @c AND ISNULL(RunOption,'FillSKUMax') = @ro
             ORDER BY IdNo",
-            new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+            new { c = contno, ro = roTag }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
 
         return rows.Select(r => new AllocationRow(
             Contno: r.ContNo,
@@ -657,12 +662,13 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     /// given container so the page unlocks and Process can run again. Destructive —
     /// caller is responsible for confirming with the user. Returns rows deleted.
     /// </summary>
-    public async Task<int> ResetFinalAsync(string contno, CancellationToken ct = default)
+    public async Task<int> ResetFinalAsync(string contno, RunOption runOption, CancellationToken ct = default)
     {
+        var roTag = runOption.ToString();
         await using var c = OpenOnPremBackup();
         return await c.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
-            new { c = contno }, commandTimeout: 120, cancellationToken: ct));
+            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c AND ISNULL(RunOption,'FillSKUMax') = @ro",
+            new { c = contno, ro = roTag }, commandTimeout: 120, cancellationToken: ct));
     }
 
     public async Task<AllocationStatus> GetStatusAsync(string country, string contno, CancellationToken ct = default)
@@ -674,11 +680,17 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         var hasDraft = d.RowCount1 is not null;
         var draftRows = d.RowCount1 ?? 0;
 
-        var f = await c.QueryFirstOrDefaultAsync<(int Count1, DateTime? Max1)>(new CommandDefinition(
-            "SELECT COUNT(*) AS Count1, MAX(TrnDate) AS Max1 FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
+        // Per-RunOption final row counts (NULL RunOption maps to FillSKUMax — legacy rows).
+        var f = await c.QueryFirstOrDefaultAsync<(int Total, DateTime? Max1, int Fsm, int Rr)>(new CommandDefinition(@"
+            SELECT
+                Total = COUNT(*),
+                Max1  = MAX(TrnDate),
+                Fsm   = SUM(CASE WHEN ISNULL(RunOption,'FillSKUMax') = 'FillSKUMax' THEN 1 ELSE 0 END),
+                Rr    = SUM(CASE WHEN ISNULL(RunOption,'FillSKUMax') = 'RoundRobin' THEN 1 ELSE 0 END)
+            FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
             new { c = contno }, cancellationToken: ct));
-        var hasFinal = f.Count1 > 0;
-        return new AllocationStatus(hasDraft, hasFinal, draftRows, f.Count1, f.Max1, d.RunOption);
+        var hasFinal = f.Total > 0;
+        return new AllocationStatus(hasDraft, hasFinal, draftRows, f.Total, f.Max1, d.RunOption, f.Fsm, f.Rr);
     }
 
     // ===================== Confirm & Save (Draft -> WMS_ContAllocationData) =====================

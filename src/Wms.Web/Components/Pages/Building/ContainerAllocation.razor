@@ -34,7 +34,7 @@
         </div>
         <div>
             <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">RUN OPTION</label>
-            <select @bind="_runOption" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-body); font-size:13px; background:white;">
+            <select @bind="_runOption" @bind:after="OnRunOptionChangedAsync" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-body); font-size:13px; background:white;">
                 <option value="FillSKUMax">Fill SKUMax</option>
                 <option value="RoundRobin">Round Robin</option>
             </select>
@@ -50,9 +50,14 @@
         <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer">
             <input type="checkbox" @bind="_validate" /> Validate before Process
         </label>
-        @if (_status?.HasFinal == true)
+        @{
+            var currentRoRows = _runOption == "RoundRobin"
+                ? (_status?.RoundRobinRows ?? 0)
+                : (_status?.FillSkuMaxRows ?? 0);
+        }
+        @if (currentRoRows > 0)
         {
-            <button class="aiwms-btn aiwms-btn-secondary" style="border-color:#D1435B; color:#D1435B" @onclick="DeleteAsync" disabled="@_busy">Delete (@_status.FinalRows rows)</button>
+            <button class="aiwms-btn aiwms-btn-secondary" style="border-color:#D1435B; color:#D1435B" @onclick="DeleteAsync" disabled="@_busy">Delete @_runOption (@currentRoRows rows)</button>
         }
     </div>
 
@@ -423,13 +428,15 @@
                 _progressCurrent = p.Current; _progressTotal = p.Total; _progressItem = p.CurrentItem;
                 await InvokeAsync(StateHasChanged);
             });
-            // If allocations already exist for this container, just load and show them.
+            // If allocations already exist for THIS RunOption, just load and show.
             await RefreshStatusAsync();
-            if (_status?.HasFinal == true)
+            var ro = _runOption == "RoundRobin" ? RunOption.RoundRobin : RunOption.FillSKUMax;
+            var existing = ro == RunOption.RoundRobin ? (_status?.RoundRobinRows ?? 0) : (_status?.FillSkuMaxRows ?? 0);
+            if (existing > 0)
             {
-                _allocation = await Svc.LoadFinalAsync(_country, _contno);
+                _allocation = await Svc.LoadFinalAsync(_country, _contno, ro);
                 _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
-                ShowInfo($"Loaded existing allocation — {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
+                ShowInfo($"Loaded existing {_runOption} allocation — {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
                 return;
             }
 
@@ -444,7 +451,6 @@
                 _validation = null;
             }
             _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
-            var ro = _runOption == "RoundRobin" ? RunOption.RoundRobin : RunOption.FillSKUMax;
             _allocation = await Svc.ProcessAllocationAsync(_contno, progress, ro);
             if (_allocation.Count == 0)
             {
@@ -454,10 +460,10 @@
             {
                 _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
                 await InvokeAsync(StateHasChanged);
-                await Svc.SaveFinalDirectAsync(_country, _contno, _allocation, progress);
+                await Svc.SaveFinalDirectAsync(_country, _contno, _allocation, ro, progress);
                 await RefreshStatusAsync();
                 _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
-                ShowInfo($"Allocation computed and saved: {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
+                ShowInfo($"Allocation computed and saved ({_runOption}): {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
             }
         }
         catch (Exception ex) { ShowError($"Process failed: {ex.Message}"); }
@@ -466,21 +472,32 @@
 
     private async Task DeleteAsync()
     {
-        if (_status is null || !_status.HasFinal) return;
+        var ro = _runOption == "RoundRobin" ? RunOption.RoundRobin : RunOption.FillSKUMax;
+        var rowsForRo = ro == RunOption.RoundRobin ? (_status?.RoundRobinRows ?? 0) : (_status?.FillSkuMaxRows ?? 0);
+        if (rowsForRo == 0) return;
         var ok = await JS.InvokeAsync<bool>("confirm",
-            $"Delete {_status.FinalRows} allocation rows for {_contno} from WMS_ContAllocationData?\n\nThis cannot be undone.");
+            $"Delete {rowsForRo} {_runOption} allocation rows for {_contno}?\n\nThis cannot be undone.");
         if (!ok) return;
         _busy = true; _message = ""; await InvokeAsync(StateHasChanged);
         try
         {
-            var n = await Svc.ResetFinalAsync(_contno);
+            var n = await Svc.ResetFinalAsync(_contno, ro);
             _allocation = new();
             _totalPoQty = 0;
             await RefreshStatusAsync();
-            ShowInfo($"Deleted {n} rows for {_contno}.");
+            ShowInfo($"Deleted {n} {_runOption} rows for {_contno}.");
         }
         catch (Exception ex) { ShowError($"Delete failed: {ex.Message}"); }
         finally { _busy = false; }
+    }
+
+    // When user flips the Run Option dropdown, refresh status so the
+    // Delete button (and load-vs-process decision) reflects the new selection.
+    private async Task OnRunOptionChangedAsync()
+    {
+        await RefreshStatusAsync();
+        _allocation = new();
+        _totalPoQty = 0;
     }
 
     private async Task ExportCsvAsync()
