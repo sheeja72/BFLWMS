@@ -532,6 +532,19 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         return int.TryParse(remarks.AsSpan(3), out var n) ? n : 0;
     }
 
+    /// <summary>
+    /// Reset Final: deletes all rows from LPMSIM.dbo.WMS_ContAllocationData for the
+    /// given container so the page unlocks and Process can run again. Destructive —
+    /// caller is responsible for confirming with the user. Returns rows deleted.
+    /// </summary>
+    public async Task<int> ResetFinalAsync(string contno, CancellationToken ct = default)
+    {
+        await using var c = OpenOnPremBackup();
+        return await c.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
+            new { c = contno }, commandTimeout: 120, cancellationToken: ct));
+    }
+
     public async Task<AllocationStatus> GetStatusAsync(string country, string contno, CancellationToken ct = default)
     {
         await using var c = OpenOnPremBackup();

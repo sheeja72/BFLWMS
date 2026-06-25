@@ -48,19 +48,23 @@
             @(_status?.HasFinal == true ? "🔒 Locked" : "Process")
         </button>
     </div>
-    @if (_allocation.Count > 0 || _status?.HasDraft == true)
-    {
-        <div style="display:flex; gap:12px; margin-top:12px; flex-wrap:wrap">
-            @if (_allocation.Count > 0)
-            {
-                <button class="aiwms-btn aiwms-btn-success" @onclick="ConfirmSaveAsync" disabled="@_busy">Confirm &amp; Save</button>
-            }
-            @if (_status?.HasDraft == true)
-            {
-                <button class="aiwms-btn aiwms-btn-secondary" @onclick="ViewDraftAsync" disabled="@_busy">View Draft (@_status.DraftRows rows)</button>
-            }
-        </div>
-    }
+    <div style="display:flex; gap:12px; margin-top:12px; flex-wrap:wrap; align-items:center">
+        <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer">
+            <input type="checkbox" @bind="_validate" /> Validate before Process
+        </label>
+        @if (_allocation.Count > 0)
+        {
+            <button class="aiwms-btn aiwms-btn-success" @onclick="ConfirmSaveAsync" disabled="@_busy">Confirm &amp; Save</button>
+        }
+        @if (_status?.HasDraft == true)
+        {
+            <button class="aiwms-btn aiwms-btn-secondary" @onclick="ViewDraftAsync" disabled="@_busy">View Draft (@_status.DraftRows rows)</button>
+        }
+        @if (_status?.HasFinal == true)
+        {
+            <button class="aiwms-btn aiwms-btn-secondary" style="border-color:#D1435B; color:#D1435B" @onclick="ResetFinalAsync" disabled="@_busy">Reset Final (@_status.FinalRows rows)</button>
+        }
+    </div>
 
     @if (_progressTotal > 0 || _busy)
     {
@@ -326,6 +330,7 @@
     private string _warehouse = "";
     private string _contno = "";
     private string _runOption = "FillSKUMax";
+    private bool _validate = true;
     private bool _busy;
     private string _message = "";
     private bool _messageIsError;
@@ -418,8 +423,15 @@
                 _progressCurrent = p.Current; _progressTotal = p.Total; _progressItem = p.CurrentItem;
                 await InvokeAsync(StateHasChanged);
             });
-            _validation = await Svc.ValidateAsync(_country, _contno, progress);
-            if (!_validation.Ok) { ShowError("Validation failed — see steps below."); return; }
+            if (_validate)
+            {
+                _validation = await Svc.ValidateAsync(_country, _contno, progress);
+                if (!_validation.Ok) { ShowError("Validation failed — see steps below."); return; }
+            }
+            else
+            {
+                _validation = null;
+            }
             // Reset progress for the Process phase so the bar starts fresh at 0/N.
             _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
             var ro = _runOption == "RoundRobin" ? RunOption.RoundRobin : RunOption.FillSKUMax;
@@ -457,6 +469,23 @@
             ShowInfo($"Loaded draft — {_allocation.Count} rows (showing first {Math.Min(MAX_RENDER_ROWS, _allocation.Count)}; filter to narrow).");
         }
         catch (Exception ex) { ShowError($"Load draft failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private async Task ResetFinalAsync()
+    {
+        if (_status is null || !_status.HasFinal) return;
+        var ok = await JS.InvokeAsync<bool>("confirm",
+            $"Delete {_status.FinalRows} confirmed rows for {_contno} from WMS_ContAllocationData?\n\nThis cannot be undone. Process will become available again.");
+        if (!ok) return;
+        _busy = true; _message = ""; await InvokeAsync(StateHasChanged);
+        try
+        {
+            var n = await Svc.ResetFinalAsync(_contno);
+            await RefreshStatusAsync();
+            ShowInfo($"Deleted {n} final rows for {_contno}.");
+        }
+        catch (Exception ex) { ShowError($"Reset failed: {ex.Message}"); }
         finally { _busy = false; }
     }
 
