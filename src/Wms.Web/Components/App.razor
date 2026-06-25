@@ -21,5 +21,25 @@
     <Routes />
     <script src="_framework/blazor.web.js"></script>
     <script src="_content/MudBlazor/MudBlazor.min.js"></script>
+    <script>
+      // Idle auto-signout: redirects to the OIDC sign-out endpoint after
+      // 60 minutes of no mouse / keyboard / touch activity. Reset on any
+      // user interaction. Pairs with the server-side 1h auth-cookie expiry.
+      (function () {
+        var IDLE_MS = 60 * 60 * 1000;
+        var t;
+        function logout() {
+          window.location.href = '/MicrosoftIdentity/Account/SignOut';
+        }
+        function reset() {
+          clearTimeout(t);
+          t = setTimeout(logout, IDLE_MS);
+        }
+        ['mousemove','mousedown','keydown','touchstart','scroll'].forEach(function (ev) {
+          document.addEventListener(ev, reset, { passive: true });
+        });
+        reset();
+      })();
+    </script>
 </body>
 </html>

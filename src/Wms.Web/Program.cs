@@ -77,6 +77,18 @@ public class Program
             .AddAuthentication(OpenIdConnectDefaults.AuthenticationScheme)
             .AddMicrosoftIdentityWebApp(builder.Configuration.GetSection("AzureAd"));
 
+        // Auth cookie expires 1 hour after the last HTTP request; SlidingExpiration
+        // renews the cookie on activity so an active user isn't kicked off.
+        // Pairs with the in-browser idle timer in App.razor to cover the closed-tab
+        // / circuit-disconnected case.
+        builder.Services.Configure<Microsoft.AspNetCore.Authentication.Cookies.CookieAuthenticationOptions>(
+            Microsoft.AspNetCore.Authentication.Cookies.CookieAuthenticationDefaults.AuthenticationScheme,
+            o =>
+            {
+                o.ExpireTimeSpan    = TimeSpan.FromHours(1);
+                o.SlidingExpiration = true;
+            });
+
         builder.Services.AddControllersWithViews();
         builder.Services.AddRazorPages()
             .AddMicrosoftIdentityUI();
