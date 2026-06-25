@@ -20,7 +20,10 @@
         <div>
             <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">PALLET CATEGORY</label>
             <select @bind="_palletCat" style="padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white; min-width:180px;">
-                @foreach (var c in _palletCats) { <option value="@c">@c</option> }
+                @foreach (var c in _palletCats)
+                {
+                    <option value="@c" selected="@(string.Equals(c, _palletCat, StringComparison.OrdinalIgnoreCase))">@c</option>
+                }
             </select>
         </div>
         <div>
@@ -70,11 +73,11 @@ else if (_cells.Count > 0)
             <table style="@TblStyle">
                 <thead>
                     <tr>
-                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Country")'>Country@SortArrow("Country")</th>
-                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Division")'>Division@SortArrow("Division")</th>
-                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Summer")'>LPM Summer Qty@SortArrow("Summer")</th>
-                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Winter")'>LPM Winter Qty@SortArrow("Winter")</th>
-                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Total")'>Total Qty@SortArrow("Total")</th>
+                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Country")'>Country @SortArrow("Country")</th>
+                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Summer")'>LPM Summer Qty @SortArrow("Summer")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Winter")'>LPM Winter Qty @SortArrow("Winter")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Total")'>Total Qty @SortArrow("Total")</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -103,14 +106,14 @@ else if (_cells.Count > 0)
             <table style="@TblStyle">
                 <thead>
                     <tr>
-                        <th style="@Th text-align:left; cursor:pointer" rowspan="2" @onclick='() => Sort("Country")'>Country@SortArrow("Country")</th>
-                        <th style="@Th text-align:left; cursor:pointer" rowspan="2" @onclick='() => Sort("Division")'>Division@SortArrow("Division")</th>
+                        <th style="@Th text-align:left; cursor:pointer" rowspan="2" @onclick='() => Sort("Country")'>Country @SortArrow("Country")</th>
+                        <th style="@Th text-align:left; cursor:pointer" rowspan="2" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
                         @if (months.Count > 0)
                         {
                             <th style="@Th text-align:center" colspan="@months.Count">SUMMER QTY</th>
                             <th style="@Th text-align:center" colspan="@months.Count">WINTER QTY</th>
                         }
-                        <th style="@Th text-align:right; cursor:pointer" rowspan="2" @onclick='() => Sort("Total")'>Total Qty@SortArrow("Total")</th>
+                        <th style="@Th text-align:right; cursor:pointer" rowspan="2" @onclick='() => Sort("Total")'>Total Qty @SortArrow("Total")</th>
                     </tr>
                     <tr>
                         @foreach (var m in months)
@@ -150,11 +153,11 @@ else if (_cells.Count > 0)
             <table style="@TblStyle">
                 <thead>
                     <tr>
-                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Country")'>Country@SortArrow("Country")</th>
-                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Division")'>Division@SortArrow("Division")</th>
-                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Current")'>LPM Current Qty@SortArrow("Current")</th>
-                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Future")'>LPM Future Qty@SortArrow("Future")</th>
-                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Total")'>Total Qty@SortArrow("Total")</th>
+                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Country")'>Country @SortArrow("Country")</th>
+                        <th style="@Th text-align:left; cursor:pointer"  @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Current")'>LPM Current Qty @SortArrow("Current")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Future")'>LPM Future Qty @SortArrow("Future")</th>
+                        <th style="@Th text-align:right; cursor:pointer" @onclick='() => Sort("Total")'>Total Qty @SortArrow("Total")</th>
                     </tr>
                 </thead>
                 <tbody>

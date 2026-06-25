@@ -223,7 +223,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
             UNION ALL
             SELECT 'Excess' AS [Type],
                    d.BoxNo, d.preparedby AS PreparedBy, d.itemcode AS ItemCode,
-                   d.qty AS Qty, d.QtyIssued AS QtyIssued, (d.QtyIssued - d.qty) AS Diff
+                   d.qty AS Qty, d.QtyIssued AS QtyIssued, (d.qty - d.QtyIssued) AS Diff
               FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
               INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
              WHERE ISNULL(d.Status,'') <> ''
@@ -242,7 +242,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
                        CASE WHEN ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty
                             THEN (d.qty - d.QtyIssued) ELSE 0 END AS MissingQty,
                        CASE WHEN ISNULL(d.Status,'') <> ''
-                            THEN (d.QtyIssued - d.qty) ELSE 0 END AS ExcessQty
+                            THEN (d.qty - d.QtyIssued) ELSE 0 END AS ExcessQty
                   FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
                   INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
             ), agg AS (
@@ -665,7 +665,7 @@ DROP TABLE #Scans, #BatchKind, #ItemDiv;";
                        CASE WHEN ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty
                             THEN (d.qty - d.QtyIssued) ELSE 0 END AS MissingQty,
                        CASE WHEN ISNULL(d.Status,'') <> ''
-                            THEN (d.QtyIssued - d.qty) ELSE 0 END AS ExcessQty
+                            THEN (d.qty - d.QtyIssued) ELSE 0 END AS ExcessQty
                   FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
                   INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
             ), agg AS (
