@@ -395,13 +395,7 @@
         {
             _status = null; return;
         }
-        try
-        {
-            _status = await Svc.GetStatusAsync(_country, _contno);
-            // Recall prior Run Option when revisiting the same container.
-            if (!string.IsNullOrEmpty(_status?.DraftRunOption))
-                _runOption = _status.DraftRunOption!;
-        }
+        try { _status = await Svc.GetStatusAsync(_country, _contno); }
         catch { _status = null; }
     }
 
