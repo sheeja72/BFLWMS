@@ -15,9 +15,10 @@
 
 <div class="aiwms-section">
     <div class="aiwms-card-header">Country Activation</div>
-    <table class="aiwms-table aiwms-table-dense" style="max-width:720px">
+    <table class="aiwms-table aiwms-table-dense" style="max-width:860px">
         <thead>
             <tr>
+                <th>Process</th>
                 <th>Country</th>
                 <th>Active</th>
                 <th>Last updated</th>
@@ -29,6 +30,7 @@
             @foreach (var c in _config)
             {
                 <tr>
+                    <td>@MissingExcessSnapshotService.JobName</td>
                     <td><strong>@c.Country</strong></td>
                     <td>
                         <input type="checkbox" checked="@c.IsActive"
@@ -46,7 +48,7 @@
             }
             @if (_config.Count == 0)
             {
-                <tr><td colspan="5" style="font-style:italic; color:var(--text-secondary)">No countries configured yet. Add one with the form below.</td></tr>
+                <tr><td colspan="6" style="font-style:italic; color:var(--text-secondary)">No countries configured yet. Add one with the form below.</td></tr>
             }
         </tbody>
     </table>
