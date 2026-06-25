@@ -10,7 +10,7 @@
 
 <div class="aiwms-page-header">
     <h2>Nightly Batches Status</h2>
-    <p>Country toggles for the 06:00 GST job, recent run log, and on-demand Refresh / Backfill.</p>
+    <p>Country toggles for the 06:00 GST job, recent run log, and on-demand Refresh / Backfill. All times shown are GST (UTC+4).</p>
 </div>
 
 <div class="aiwms-section">
@@ -36,7 +36,7 @@
                         <input type="checkbox" checked="@c.IsActive"
                                @onchange="@(e => ToggleAsync(c.Country, (bool)e.Value!))" />
                     </td>
-                    <td>@c.UpdatedTS.ToString("yyyy-MM-dd HH:mm")</td>
+                    <td>@ToGst(c.UpdatedTS).ToString("yyyy-MM-dd HH:mm") <span style="font-size:10px; color:var(--text-secondary)">GST</span></td>
                     <td>@c.UpdatedBy</td>
                     <td>
                         <button class="aiwms-btn aiwms-btn-secondary" style="font-size:11px; padding:4px 8px"
@@ -88,8 +88,8 @@
                     <td>@r.JobName</td>
                     <td>@r.Country</td>
                     <td>@r.Mode</td>
-                    <td>@r.StartTS.ToString("yyyy-MM-dd HH:mm:ss")</td>
-                    <td>@(r.EndTS?.ToString("yyyy-MM-dd HH:mm:ss"))</td>
+                    <td>@ToGst(r.StartTS).ToString("yyyy-MM-dd HH:mm:ss")</td>
+                    <td>@(r.EndTS is null ? "" : ToGst(r.EndTS.Value).ToString("yyyy-MM-dd HH:mm:ss"))</td>
                     <td><span class="aiwms-pill @StatusPill(r.Status)">@r.Status</span></td>
                     <td style="text-align:right">@r.RowsProcessed</td>
                     <td style="text-align:right">@r.DatesProcessed</td>
@@ -195,6 +195,9 @@
         }
         finally { _busy = false; await RefreshLogAsync(); }
     }
+
+    // Azure SQL SYSDATETIME() returns UTC; the UI shows GST (UTC+4, no DST).
+    private static DateTime ToGst(DateTime utc) => utc.AddHours(4);
 
     private static string StatusPill(string s) => s switch
     {
