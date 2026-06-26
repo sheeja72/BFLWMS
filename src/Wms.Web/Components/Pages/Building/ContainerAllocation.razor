@@ -59,6 +59,7 @@
         {
             <button class="aiwms-btn aiwms-btn-secondary" style="border-color:#D1435B; color:#D1435B" @onclick="DeleteAsync" disabled="@_busy">Delete @_runOption (@currentRoRows rows)</button>
         }
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="() => _showBlocked = !_showBlocked" disabled="@_busy">@(_showBlocked ? "Hide" : "Blocked Items") (@_blocked.Count)</button>
     </div>
 
     @if (_progressTotal > 0 || _busy)
@@ -100,6 +101,41 @@
             </tbody>
             <tfoot><tr style="background:var(--bfl-grey-50); font-weight:800"><td colspan="7" style="text-align:right">Total</td><td style="text-align:right">@_poData.Sum(r => r.Qty)</td><td></td></tr></tfoot>
         </table>
+    </div>
+}
+
+@if (_showBlocked)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header">Blocked Items — @_blocked.Count rows</div>
+        @if (_blocked.Count == 0)
+        {
+            <div style="padding:14px; font-style:italic; color:var(--text-secondary)">No records.</div>
+        }
+        else
+        {
+            <table class="aiwms-table aiwms-table-dense">
+                <thead>
+                    <tr>
+                        <th>Item Code</th><th>Item Name</th><th>Division</th><th>Department</th>
+                        <th>Store ID</th><th>Store Name</th><th>Country</th>
+                        <th style="text-align:right">PO Qty</th><th>Block Reason</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var b in _blocked)
+                    {
+                        <tr>
+                            <td>@b.ItemCode</td><td>@b.ItemName</td>
+                            <td>@b.Division</td><td>@b.Department</td>
+                            <td>@b.StoreID</td><td>@b.StoreName</td><td>@b.Country</td>
+                            <td style="text-align:right">@b.PoQty</td>
+                            <td>@b.BlockReason</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
     </div>
 }
 
@@ -336,6 +372,8 @@
     private string _runOption = "FillSKUMax";
     private bool _validate = true;
     private long _totalPoQty;
+    private List<BlockedItemRow> _blocked = new();
+    private bool _showBlocked;
     private bool _busy;
     private string _message = "";
     private bool _messageIsError;
@@ -429,6 +467,7 @@
             if (existing > 0)
             {
                 _allocation = await Svc.LoadFinalAsync(_country, _contno, ro);
+                _blocked    = await Svc.LoadBlockedAsync(_country, _contno, ro);
                 _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
                 ShowInfo($"Loaded existing {_runOption} allocation — {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
                 return;
@@ -445,8 +484,10 @@
                 _validation = null;
             }
             _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
-            _allocation = await Svc.ProcessAllocationAsync(_contno, progress, ro);
-            if (_allocation.Count == 0)
+            var procResult = await Svc.ProcessAllocationAsync(_contno, progress, ro);
+            _allocation = procResult.Allocations;
+            _blocked    = procResult.Blocked;
+            if (_allocation.Count == 0 && _blocked.Count == 0)
             {
                 ShowError("No allocation rows produced. Check LPM_EOM_Output + LPM_SKUMaxRule coverage.");
             }
@@ -454,10 +495,10 @@
             {
                 _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
                 await InvokeAsync(StateHasChanged);
-                await Svc.SaveFinalDirectAsync(_country, _contno, _allocation, ro, progress);
+                await Svc.SaveFinalDirectAsync(_country, _contno, _allocation, ro, _blocked, progress);
                 await RefreshStatusAsync();
                 _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
-                ShowInfo($"Allocation computed and saved ({_runOption}): {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
+                ShowInfo($"Allocation computed and saved ({_runOption}): {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs, {_blocked.Count} blocked.");
             }
         }
         catch (Exception ex) { ShowError($"Process failed: {ex.Message}"); }
