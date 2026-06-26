@@ -291,7 +291,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                     OUTER APPLY (
                         SELECT TOP 1
                           CASE WHEN ISNULL(o.targetEOM, 0) = 0 THEN NULL
-                               ELSE ((ISNULL(o.targetEOM,0) - ISNULL(o.SOH,0) + ISNULL(o.salestgwk,0))
+                               ELSE ((ISNULL(o.targetEOM,0) - ISNULL(o.SOH,0) + ISNULL(o.SalesTgtWk,0))
                                     - (ISNULL(o.trfQty1,0) + ISNULL(o.trfqty2,0) + ISNULL(o.trfqty3,0)
                                        + ISNULL(o.trfqty4,0) + ISNULL(o.trfqty5,0) + ISNULL(o.trfqty6,0)
                                        + ISNULL(o.trfqty7,0)))
