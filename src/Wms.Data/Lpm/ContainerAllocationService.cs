@@ -261,8 +261,66 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             cancellationToken: ct)))
             .ToDictionary(r => r.StoreID, r => r.PBFullname, StringComparer.OrdinalIgnoreCase);
 
-        // 3. For each PO line, query eligible stores+rules in priority order
-        //    (VolumeGroup ASC = A first, then MerchNeedMonth DESC).
+        // 2d. Prefetch eligible stores + SKUMax bands + latest TodayOTS for ALL DivCodes
+        // in the container — in 3 round-trips total. The per-line loop below then does
+        // an in-memory join instead of one SQL query per PO line (N+1 was the timeout cause).
+        var distinctDivs = divByItem.Values.Where(d => d > 0).Distinct().ToArray();
+        if (distinctDivs.Length == 0) return new(result, blocked);
+
+        var eomStores = (await c.QueryAsync<(string StoreID, string Country, int DivCode, string VolumeGroup, int MerchNeedMonth)>(
+            new CommandDefinition(@"
+                SELECT s.StoreID, s.Country, s.DivCode, s.VolumeGroup,
+                       ISNULL(s.MerchNeedMonth, 0) AS MerchNeedMonth
+                FROM dbo.LPM_EOM_Output s WITH (NOLOCK)
+                WHERE s.DivCode IN @divs
+                  AND s.Month1  = MONTH(SYSDATETIME())
+                  AND s.Year1   = YEAR(SYSDATETIME())
+                  AND s.VolumeGroup IS NOT NULL",
+                new { divs = distinctDivs }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+
+        var storesByDiv = eomStores
+            .GroupBy(s => s.DivCode)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var rulesRaw = (await c.QueryAsync<(string Country, int DivCode, string GroupCode, int WHStockFrom, int WHStockTo, int SKUMax)>(
+            new CommandDefinition(@"
+                SELECT Country, DivCode, GroupCode, WHStockFrom, WHStockTo, SKUMax
+                FROM dbo.LPM_SKUMaxRule WITH (NOLOCK)
+                WHERE DivCode IN @divs AND IsActive = 1",
+                new { divs = distinctDivs }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+
+        var rulesByKey = rulesRaw
+            .GroupBy(r => (r.Country, r.DivCode, r.GroupCode))
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        // Latest TodayOTS per (StoreID, DivCode) — single query, ROW_NUMBER picks
+        // the most recent OTSDate < today. Index IX_LPM_OTS_Output_StoreDivDate
+        // makes this an index seek + top-1 instead of the per-line OUTER APPLY scan.
+        var otsRows = (await c.QueryAsync<(string StoreID, int DivCode, double? TodayOTS)>(
+            new CommandDefinition(@"
+                WITH ranked AS (
+                    SELECT o.StoreID, o.DivCode, o.targetEOM, o.SOH, o.SalesTgtWk,
+                           o.trfQty1, o.trfqty2, o.trfqty3, o.trfqty4,
+                           o.trfqty5, o.trfqty6, o.trfqty7,
+                           ROW_NUMBER() OVER (PARTITION BY o.StoreID, o.DivCode
+                                              ORDER BY o.OTSDate DESC) AS rn
+                    FROM dbo.LPM_OTS_Output o WITH (NOLOCK)
+                    WHERE o.DivCode IN @divs
+                      AND o.OTSDate < CAST(SYSDATETIME() AS DATE)
+                )
+                SELECT StoreID, DivCode,
+                       CASE WHEN ISNULL(targetEOM,0) = 0 THEN NULL
+                            ELSE ((ISNULL(targetEOM,0) - ISNULL(SOH,0) + ISNULL(SalesTgtWk,0))
+                                 - (ISNULL(trfQty1,0) + ISNULL(trfqty2,0) + ISNULL(trfqty3,0)
+                                    + ISNULL(trfqty4,0) + ISNULL(trfqty5,0) + ISNULL(trfqty6,0)
+                                    + ISNULL(trfqty7,0))) * 1.0 / NULLIF(targetEOM, 0)
+                       END AS TodayOTS
+                  FROM ranked WHERE rn = 1",
+                new { divs = distinctDivs }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+
+        var otsByKey = otsRows.ToDictionary(o => (o.StoreID, o.DivCode), o => o.TodayOTS);
+
+        // 3. For each PO line, do an in-memory join against the prefetched data.
         progress?.Report(new AllocationProgress(0, lines.Count, null));
         var idxLine = 0;
         foreach (var line in lines)
@@ -271,50 +329,33 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             progress?.Report(new AllocationProgress(idxLine, lines.Count, line.ItemCode));
             if (line.Qty <= 0) continue;
             if (!divByItem.TryGetValue(line.ItemCode, out var divCode) || divCode == 0) continue;
+            if (!storesByDiv.TryGetValue(divCode, out var divStores)) continue;
 
-            // Priority order is now TodayOTS DESC (latest OTSDate < today per StoreID + DivCode).
-            // OTS = ((targetEOM - SOH + salestgwk) - Σ trfQty1..7) / NULLIF(targetEOM, 0).
-            // NULL OTS (no row or targetEOM = 0) ranked last.
-            var rawStores = (await c.QueryAsync<(string StoreID, string Country, string VolumeGroup, int MerchNeedMonth, int SKUMax, double? TodayOTS)>(
-                new CommandDefinition(@"
-                    SELECT s.StoreID, s.Country, s.VolumeGroup,
-                           ISNULL(s.MerchNeedMonth, 0) AS MerchNeedMonth,
-                           r.SKUMax,
-                           ots.TodayOTS
-                    FROM dbo.LPM_EOM_Output s WITH (NOLOCK)
-                    INNER JOIN dbo.LPM_SKUMaxRule r WITH (NOLOCK)
-                       ON r.Country   = s.Country
-                      AND r.DivCode   = s.DivCode
-                      AND r.GroupCode = s.VolumeGroup
-                      AND r.IsActive  = 1
-                      AND @q BETWEEN r.WHStockFrom AND r.WHStockTo
-                    OUTER APPLY (
-                        SELECT TOP 1
-                          CASE WHEN ISNULL(o.targetEOM, 0) = 0 THEN NULL
-                               ELSE ((ISNULL(o.targetEOM,0) - ISNULL(o.SOH,0) + ISNULL(o.SalesTgtWk,0))
-                                    - (ISNULL(o.trfQty1,0) + ISNULL(o.trfqty2,0) + ISNULL(o.trfqty3,0)
-                                       + ISNULL(o.trfqty4,0) + ISNULL(o.trfqty5,0) + ISNULL(o.trfqty6,0)
-                                       + ISNULL(o.trfqty7,0)))
-                                    * 1.0 / NULLIF(o.targetEOM, 0)
-                          END AS TodayOTS
-                          FROM dbo.LPM_OTS_Output o WITH (NOLOCK)
-                         WHERE o.StoreID = s.StoreID AND o.DivCode = s.DivCode
-                           AND o.OTSDate < CAST(SYSDATETIME() AS DATE)
-                         ORDER BY o.OTSDate DESC
-                    ) ots
-                    WHERE s.DivCode = @d
-                      AND s.Month1  = MONTH(SYSDATETIME())
-                      AND s.Year1   = YEAR(SYSDATETIME())
-                      AND s.VolumeGroup IS NOT NULL
-                    ORDER BY CASE WHEN ots.TodayOTS IS NULL THEN 1 ELSE 0 END,
-                             ots.TodayOTS DESC",
-                    new { q = line.Qty, d = divCode }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+            // Resolve (StoreID -> SKUMax band matching line.Qty + TodayOTS) once per store.
+            // Dedupe by StoreID — first occurrence wins (mirrors the original GroupBy().First()).
+            var perStore = new Dictionary<string, (string Country, string VolumeGroup, int MerchNeedMonth, int SKUMax, double? TodayOTS)>(StringComparer.OrdinalIgnoreCase);
+            foreach (var s in divStores)
+            {
+                if (perStore.ContainsKey(s.StoreID)) continue;
+                if (!rulesByKey.TryGetValue((s.Country, divCode, s.VolumeGroup), out var bands)) continue;
+                int? skuMax = null;
+                foreach (var b in bands)
+                {
+                    if (line.Qty >= b.WHStockFrom && line.Qty <= b.WHStockTo) { skuMax = b.SKUMax; break; }
+                }
+                if (skuMax is null) continue;
+                otsByKey.TryGetValue((s.StoreID, divCode), out var ots);
+                perStore[s.StoreID] = (s.Country, s.VolumeGroup, s.MerchNeedMonth, skuMax.Value, ots);
+            }
 
-            // Dedupe by StoreID — LPM_SKUMaxRule can return multiple rows per store
-            // when stock ranges overlap. Keep the first one per the TodayOTS ORDER BY.
-            var allStores = rawStores
-                .GroupBy(s => s.StoreID, StringComparer.OrdinalIgnoreCase)
-                .Select(g => g.First())
+            // Order: TodayOTS DESC, nulls last (matches the original SQL ORDER BY).
+            var allStores = perStore
+                .Select(kv => (StoreID: kv.Key,
+                               kv.Value.Country, kv.Value.VolumeGroup,
+                               kv.Value.MerchNeedMonth, SKUMax: kv.Value.SKUMax,
+                               TodayOTS: kv.Value.TodayOTS))
+                .OrderBy(s => s.TodayOTS.HasValue ? 0 : 1)
+                .ThenByDescending(s => s.TodayOTS)
                 .ToList();
 
             // Block filter: drop stores blocked by LPM_StoreDeptAccess or LPM_StoreDivAccess.

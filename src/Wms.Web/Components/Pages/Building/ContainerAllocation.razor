@@ -107,7 +107,13 @@
 @if (_showBlocked)
 {
     <div class="aiwms-section">
-        <div class="aiwms-card-header">Blocked Items — @_blocked.Count rows</div>
+        <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px">
+            <span>Blocked Items — @_blocked.Count rows</span>
+            @if (_blocked.Count > 0)
+            {
+                <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportBlockedCsvAsync">Export to Excel</button>
+            }
+        </div>
         @if (_blocked.Count == 0)
         {
             <div style="padding:14px; font-style:italic; color:var(--text-secondary)">No records.</div>
@@ -229,6 +235,7 @@
                         <th style="cursor:pointer" @onclick='() => Sort("Country")'>Country @SortArrow("Country")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("VolumeGroup")'>VolumeGroup @SortArrow("VolumeGroup")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("MerchNeedMonth")'>MerchNeed/Mo @SortArrow("MerchNeedMonth")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("OTS")'>OTS @SortArrow("OTS")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("SkuMax")'>SKUMax @SortArrow("SkuMax")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("AllocQty")'>Alloc Qty @SortArrow("AllocQty")</th>
                         <th style="text-align:right">RR Extra</th>
@@ -242,6 +249,7 @@
                             <td style="text-align:right">@r.PoQty</td>
                             <td>@r.StoreID</td><td>@r.StoreName</td><td>@r.Country</td>
                             <td>@r.VolumeGroup</td><td style="text-align:right">@r.MerchNeedMonth</td>
+                            <td style="text-align:right">@r.OTS?.ToString("F4")</td>
                             <td style="text-align:right">@r.SkuMax</td>
                             <td style="text-align:right">@r.AllocQty</td>
                             <td style="text-align:right">@(r.RoundRobinExtra > 0 ? r.RoundRobinExtra.ToString() : "")</td>
@@ -439,7 +447,7 @@
 
     private async Task LoadPoDataAsync()
     {
-        _busy = true; _message = ""; _validation = null; _allocation = new();
+        _busy = true; _message = ""; _validation = null; _allocation = new(); _blocked = new();
         try
         {
             _poData = await Svc.LoadPoDataAsync(_contno);
@@ -452,7 +460,7 @@
 
     private async Task ProcessAsync()
     {
-        _busy = true; _message = ""; _allocation = new();
+        _busy = true; _message = ""; _allocation = new(); _blocked = new();
         _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
         try
         {
@@ -518,6 +526,7 @@
         {
             var n = await Svc.ResetFinalAsync(_contno, ro);
             _allocation = new();
+            _blocked = new();
             _totalPoQty = 0;
             await RefreshStatusAsync();
             ShowInfo($"Deleted {n} {_runOption} rows for {_contno}.");
@@ -532,25 +541,44 @@
     {
         await RefreshStatusAsync();
         _allocation = new();
+        _blocked = new();
         _totalPoQty = 0;
     }
 
     private async Task ExportCsvAsync()
     {
         var sb = new StringBuilder();
-        sb.AppendLine("Contno,OraPONo,ItemCode,ItemName,Brand,PoQty,StoreID,StoreName,Country,Division,VolumeGroup,SkuMax,AllocQty,RoundRobinExtra,MerchNeedMonth,LPM,LPMDt");
+        sb.AppendLine("Contno,OraPONo,ItemCode,ItemName,Brand,PoQty,StoreID,StoreName,Country,Division,VolumeGroup,OTS,SkuMax,AllocQty,RoundRobinExtra,MerchNeedMonth,LPM,LPMDt");
         foreach (var r in Filtered)
         {
             sb.Append(Csv(r.Contno)).Append(',').Append(Csv(r.OraPONo)).Append(',').Append(Csv(r.ItemCode)).Append(',')
               .Append(Csv(r.ItemName)).Append(',').Append(Csv(r.Brand)).Append(',').Append(r.PoQty).Append(',')
               .Append(Csv(r.StoreID)).Append(',').Append(Csv(r.StoreName)).Append(',').Append(Csv(r.Country)).Append(',')
               .Append(Csv(r.Division)).Append(',').Append(Csv(r.VolumeGroup)).Append(',')
+              .Append(r.OTS?.ToString("F4")).Append(',')
               .Append(r.SkuMax).Append(',').Append(r.AllocQty).Append(',').Append(r.RoundRobinExtra).Append(',')
               .Append(r.MerchNeedMonth).Append(',').Append(Csv(r.LPM)).Append(',').Append(r.LPMDt?.ToString("yyyy-MM-dd"))
               .AppendLine();
         }
         var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(sb.ToString()));
         var filename = $"allocation_{_contno}_{_view}_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+        await JS.InvokeVoidAsync("eval", $"(function(){{var a=document.createElement('a');a.href='data:text/csv;base64,{b64}';a.download='{filename}';document.body.appendChild(a);a.click();document.body.removeChild(a);}})();");
+    }
+
+    private async Task ExportBlockedCsvAsync()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Contno,ItemCode,ItemName,Division,Department,StoreID,StoreName,Country,PoQty,DivCode,BlockReason");
+        foreach (var b in _blocked)
+        {
+            sb.Append(Csv(b.Contno)).Append(',').Append(Csv(b.ItemCode)).Append(',').Append(Csv(b.ItemName)).Append(',')
+              .Append(Csv(b.Division)).Append(',').Append(Csv(b.Department)).Append(',')
+              .Append(Csv(b.StoreID)).Append(',').Append(Csv(b.StoreName)).Append(',').Append(Csv(b.Country)).Append(',')
+              .Append(b.PoQty).Append(',').Append(b.DivCode).Append(',').Append(Csv(b.BlockReason))
+              .AppendLine();
+        }
+        var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(sb.ToString()));
+        var filename = $"allocation_blocked_{_contno}_{_runOption}_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
         await JS.InvokeVoidAsync("eval", $"(function(){{var a=document.createElement('a');a.href='data:text/csv;base64,{b64}';a.download='{filename}';document.body.appendChild(a);a.click();document.body.removeChild(a);}})();");
     }
 
@@ -596,6 +624,7 @@
                     "Country" => r => r.Country,
                     "VolumeGroup" => r => r.VolumeGroup,
                     "MerchNeedMonth" => r => r.MerchNeedMonth,
+                    "OTS" => r => r.OTS,
                     "SkuMax" => r => r.SkuMax,
                     "AllocQty" => r => r.AllocQty,
                     _ => r => r.OraPONo,
