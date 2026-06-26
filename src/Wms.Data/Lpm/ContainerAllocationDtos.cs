@@ -44,7 +44,23 @@ public record AllocationRow(
     int     DivCode,
     int     RoundRobinExtra,
     string? LPM,
-    DateTime? LPMDt);
+    DateTime? LPMDt,
+    double? OTS = null);
+
+/// <summary>One row in the blocked-items list: an (item, store) pair that was
+/// excluded from allocation by LPM_StoreDeptAccess or LPM_StoreDivAccess.</summary>
+public record BlockedItemRow(
+    string  Contno,
+    string  ItemCode,
+    string? ItemName,
+    string? Division,
+    string? Department,
+    string  StoreID,
+    string? StoreName,
+    string  Country,
+    int     PoQty,
+    int     DivCode,
+    string  BlockReason);   // 'DeptAccess' / 'DivAccess' / 'DeptAccess+DivAccess'
 
 /// <summary>State info shown above the buttons. Now tracks per-RunOption final
 /// row counts so the page knows whether each algorithm has been run for this container.</summary>
@@ -60,3 +76,9 @@ public record AllocationStatus(
 
 /// <summary>How to distribute qty across eligible stores.</summary>
 public enum RunOption { FillSKUMax = 0, RoundRobin = 1 }
+
+/// <summary>What ProcessAllocationAsync returns — allocations + the
+/// (item, store) pairs blocked by LPM_StoreDeptAccess / LPM_StoreDivAccess.</summary>
+public record AllocationProcessResult(
+    List<AllocationRow>    Allocations,
+    List<BlockedItemRow>   Blocked);
