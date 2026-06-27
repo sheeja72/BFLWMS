@@ -792,38 +792,10 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     {
         var roTag = runOption.ToString();
         await using var c = OpenOnPremBackup();
-        // Detail rows are tagged with BatchNo from the Header; load via the matching Header.
-        var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName,
-                                       int? Qty, string? StoreID, string? Country, string? GroupCode, string? Division,
-                                       string? Remarks, DateTime? LPMDt)>(new CommandDefinition(@"
-            SELECT d.ContNo, d.ORAPONo, d.Itemcode, d.Itemname, d.Qty, d.StoreID, d.Country,
-                   d.GroupCode, d.Division, d.Remarks, d.LPMDt
-              FROM LPMSIM.dbo.WMS_ContAllocationData d WITH (NOLOCK)
-              JOIN LPMSIM.dbo.WMS_Cont_Allocation_Header h WITH (NOLOCK) ON h.BatchNo = d.BatchNo
-             WHERE h.GenCountry = @gc AND h.ContNo = @c AND h.RunOption = @ro
-             ORDER BY d.IdNo",
-            new { gc = genCountry, c = contno, ro = roTag }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
-
-        return rows.Select(r => new AllocationRow(
-            Contno: r.ContNo,
-            OraPONo: r.OraPONo ?? "",
-            ItemCode: r.ItemCode ?? "",
-            ItemName: r.ItemName,
-            Brand: null,
-            PoQty: 0,
-            StoreID: r.StoreID ?? "",
-            StoreName: null,
-            Country: r.Country ?? genCountry,
-            Division: r.Division,
-            VolumeGroup: r.GroupCode ?? "",
-            SkuMax: 0,
-            AllocQty: r.Qty ?? 0,
-            MerchNeedMonth: 0,
-            DivCode: 0,
-            RoundRobinExtra: ParseRoundRobin(r.Remarks),
-            LPM: null,
-            LPMDt: r.LPMDt
-        )).ToList();
+        return await LoadAllocationDetailAsync(c,
+            "JOIN LPMSIM.dbo.WMS_Cont_Allocation_Header h WITH (NOLOCK) ON h.BatchNo = d.BatchNo " +
+            "WHERE h.GenCountry = @gc AND h.ContNo = @c AND h.RunOption = @ro",
+            new { gc = genCountry, c = contno, ro = roTag }, ct);
     }
 
     /// <summary>
@@ -1031,46 +1003,12 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     }
 
     /// <summary>Load detail rows for a specific BatchNo. Used by the "Load Processed Data" path.
-    /// Joins to bfldata.DataSettings for StoreName and to usa.USAOrgFile for Brand so the
-    /// re-opened grid is as complete as a freshly processed one.</summary>
+    /// Delegates to the shared loader so the re-opened grid carries PoQty, LPM, Brand,
+    /// StoreName, MerchNeedMonth, DivCode, OTS — the columns the report views need.</summary>
     public async Task<List<AllocationRow>> LoadFinalByBatchAsync(int batchNo, CancellationToken ct = default)
     {
         await using var c = OpenOnPremBackup();
-        var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName, string? Brand,
-                                       int? Qty, string? StoreID, string? StoreName, string? Country, string? GroupCode, string? Division,
-                                       string? Remarks, DateTime? LPMDt)>(new CommandDefinition(@"
-            SELECT d.ContNo, d.ORAPONo, d.Itemcode, d.Itemname,
-                   (SELECT TOP 1 vendor     FROM usa.dbo.USAOrgFile       WITH (NOLOCK)
-                     WHERE ContNo = d.ContNo AND itemcode = d.Itemcode)                  AS Brand,
-                   d.Qty, d.StoreID,
-                   (SELECT TOP 1 PBFullname FROM bfldata.dbo.DataSettings WITH (NOLOCK)
-                     WHERE StoreID = d.StoreID AND PBFullname IS NOT NULL)               AS StoreName,
-                   d.Country, d.GroupCode, d.Division, d.Remarks, d.LPMDt
-              FROM LPMSIM.dbo.WMS_ContAllocationData d WITH (NOLOCK)
-             WHERE d.BatchNo = @b
-             ORDER BY d.IdNo",
-            new { b = batchNo }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
-
-        return rows.Select(r => new AllocationRow(
-            Contno: r.ContNo,
-            OraPONo: r.OraPONo ?? "",
-            ItemCode: r.ItemCode ?? "",
-            ItemName: r.ItemName,
-            Brand: r.Brand,
-            PoQty: 0,
-            StoreID: r.StoreID ?? "",
-            StoreName: r.StoreName,
-            Country: r.Country ?? "",
-            Division: r.Division,
-            VolumeGroup: r.GroupCode ?? "",
-            SkuMax: 0,
-            AllocQty: r.Qty ?? 0,
-            MerchNeedMonth: 0,
-            DivCode: 0,
-            RoundRobinExtra: ParseRoundRobin(r.Remarks),
-            LPM: null,
-            LPMDt: r.LPMDt
-        )).ToList();
+        return await LoadAllocationDetailAsync(c, "WHERE d.BatchNo = @b", new { b = batchNo }, ct);
     }
 
     public async Task<List<BlockedItemRow>> LoadBlockedByBatchAsync(int batchNo, CancellationToken ct = default)
@@ -1084,5 +1022,133 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
              ORDER BY ItemCode, StoreID",
             new { b = batchNo }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
+    }
+
+    /// <summary>
+    /// Shared loader for `WMS_ContAllocationData` rows. Caller supplies the JOIN +
+    /// WHERE clause (e.g. " WHERE d.BatchNo = @b " or with a JOIN to Header by RunOption)
+    /// and matching parameter object. Persisted columns (Itemname, GroupCode, OTS, ...)
+    /// come straight from the detail row; transient fields (PoQty, Brand, StoreName,
+    /// MerchNeedMonth, LPM, DivCode) are filled by 5 prefetches and joined in memory so
+    /// every report view shows complete data when a batch is re-opened.
+    /// </summary>
+    private async Task<List<AllocationRow>> LoadAllocationDetailAsync(
+        SqlConnection c, string joinAndWhereSql, object filterParams, CancellationToken ct)
+    {
+        var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName,
+                                       int? Qty, string? StoreID, string? Country, string? GroupCode, string? Division,
+                                       string? Remarks, DateTime? LPMDt, double? OTS)>(new CommandDefinition($@"
+            SELECT d.ContNo, d.ORAPONo, d.Itemcode, d.Itemname, d.Qty, d.StoreID, d.Country,
+                   d.GroupCode, d.Division, d.Remarks, d.LPMDt, d.OTS
+              FROM LPMSIM.dbo.WMS_ContAllocationData d WITH (NOLOCK)
+              {joinAndWhereSql}
+             ORDER BY d.IdNo",
+            filterParams, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+
+        if (rows.Count == 0) return new();
+
+        var distinctContnos = rows.Select(r => r.ContNo).Where(s => !string.IsNullOrEmpty(s)).Distinct().ToArray();
+        var distinctItems   = rows.Select(r => r.ItemCode!).Where(s => !string.IsNullOrEmpty(s)).Distinct().ToArray();
+        var distinctStores  = rows.Select(r => r.StoreID!).Where(s => !string.IsNullOrEmpty(s)).Distinct().ToArray();
+
+        // PoQty + LPM per (ContNo, OraPONo, ItemCode) from usaorgfile_LPM.
+        var poInfo = new Dictionary<(string ContNo, string OraPONo, string ItemCode), (int Qty, string? LPM)>();
+        if (distinctContnos.Length > 0)
+        {
+            var poRows = await c.QueryAsync<(string ContNo, string? OraPONo, string ItemCode, int? Qty, string? LPM)>(new CommandDefinition(@"
+                SELECT ContNo, OraPONo, ItemCode,
+                       SUM(CAST(ISNULL(orgqty,0) AS INT)) AS Qty,
+                       MAX(LPM)                          AS LPM
+                  FROM usa.dbo.usaorgfile_LPM WITH (NOLOCK)
+                 WHERE ContNo IN @contnos
+                 GROUP BY ContNo, OraPONo, ItemCode",
+                new { contnos = distinctContnos }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            foreach (var p in poRows) poInfo[(p.ContNo, p.OraPONo ?? "", p.ItemCode)] = (p.Qty ?? 0, p.LPM);
+        }
+
+        // Brand per (ContNo, ItemCode) from USAOrgFile.
+        var brandByKey = new Dictionary<(string ContNo, string ItemCode), string?>();
+        if (distinctContnos.Length > 0 && distinctItems.Length > 0)
+        {
+            var brandRows = await c.QueryAsync<(string ContNo, string itemcode, string? vendor)>(new CommandDefinition(@"
+                SELECT ContNo, itemcode, MAX(vendor) AS vendor
+                  FROM usa.dbo.USAOrgFile WITH (NOLOCK)
+                 WHERE ContNo IN @contnos AND itemcode IN @items
+                 GROUP BY ContNo, itemcode",
+                new { contnos = distinctContnos, items = distinctItems }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            foreach (var b in brandRows) brandByKey[(b.ContNo, b.itemcode)] = b.vendor;
+        }
+
+        // StoreName per StoreID from DataSettings.
+        var storeNameById = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        if (distinctStores.Length > 0)
+        {
+            var snRows = await c.QueryAsync<(string StoreID, string? PBFullname)>(new CommandDefinition(@"
+                SELECT StoreID, MAX(PBFullname) AS PBFullname
+                  FROM bfldata.dbo.DataSettings WITH (NOLOCK)
+                 WHERE StoreID IN @stores AND PBFullname IS NOT NULL
+                 GROUP BY StoreID",
+                new { stores = distinctStores }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            foreach (var s in snRows) storeNameById[s.StoreID] = s.PBFullname;
+        }
+
+        // DivCode per ItemCode from vupc_subclass.
+        var divByItem = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (distinctItems.Length > 0)
+        {
+            var divRows = await c.QueryAsync<(string itemcode, int? DivID)>(new CommandDefinition(@"
+                SELECT itemcode, MAX(DivID) AS DivID
+                  FROM datareporting.dbo.vupc_subclass WITH (NOLOCK)
+                 WHERE itemcode IN @items
+                 GROUP BY itemcode",
+                new { items = distinctItems }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            foreach (var d in divRows) divByItem[d.itemcode] = d.DivID ?? 0;
+        }
+
+        // MerchNeedMonth per (StoreID, DivCode) for the current month.
+        var merchByKey = new Dictionary<(string StoreID, int DivCode), int>();
+        var distinctDivs = divByItem.Values.Where(d => d > 0).Distinct().ToArray();
+        if (distinctStores.Length > 0 && distinctDivs.Length > 0)
+        {
+            var merchRows = await c.QueryAsync<(string StoreID, int DivCode, int MerchNeedMonth)>(new CommandDefinition(@"
+                SELECT StoreID, DivCode, ISNULL(MerchNeedMonth, 0) AS MerchNeedMonth
+                  FROM dbo.LPM_EOM_Output WITH (NOLOCK)
+                 WHERE StoreID IN @stores AND DivCode IN @divs
+                   AND Month1 = MONTH(SYSDATETIME()) AND Year1 = YEAR(SYSDATETIME())",
+                new { stores = distinctStores, divs = distinctDivs }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            foreach (var m in merchRows) merchByKey[(m.StoreID, m.DivCode)] = m.MerchNeedMonth;
+        }
+
+        return rows.Select(r =>
+        {
+            var item  = r.ItemCode ?? "";
+            var store = r.StoreID ?? "";
+            divByItem.TryGetValue(item, out var divCode);
+            poInfo.TryGetValue((r.ContNo, r.OraPONo ?? "", item), out var po);
+            brandByKey.TryGetValue((r.ContNo, item), out var brand);
+            storeNameById.TryGetValue(store, out var storeName);
+            merchByKey.TryGetValue((store, divCode), out var merch);
+
+            return new AllocationRow(
+                Contno: r.ContNo,
+                OraPONo: r.OraPONo ?? "",
+                ItemCode: item,
+                ItemName: r.ItemName,
+                Brand: brand,
+                PoQty: po.Qty,
+                StoreID: store,
+                StoreName: storeName,
+                Country: r.Country ?? "",
+                Division: r.Division,
+                VolumeGroup: r.GroupCode ?? "",
+                SkuMax: 0,
+                AllocQty: r.Qty ?? 0,
+                MerchNeedMonth: merch,
+                DivCode: divCode,
+                RoundRobinExtra: ParseRoundRobin(r.Remarks),
+                LPM: po.LPM,
+                LPMDt: r.LPMDt,
+                OTS: r.OTS);
+        }).ToList();
     }
 }
