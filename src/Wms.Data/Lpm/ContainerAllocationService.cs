@@ -639,39 +639,63 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     /// (no draft round-trip). Used by the simplified Container Allocation flow where
     /// Process always saves immediately.
     /// </summary>
-    public async Task SaveFinalDirectAsync(string country, string contno, IReadOnlyList<AllocationRow> rows,
-        RunOption runOption, IReadOnlyList<BlockedItemRow>? blocked = null,
+    public async Task<int> SaveFinalDirectAsync(string genCountry, string contno, string allocationCountries,
+        string? warehouse, IReadOnlyList<AllocationRow> rows, RunOption runOption,
+        IReadOnlyList<BlockedItemRow>? blocked = null,
         IProgress<AllocationProgress>? progress = null, CancellationToken ct = default)
     {
-        if (rows.Count == 0) return;
+        if (rows.Count == 0) return 0;
         var roTag = runOption.ToString();
         await using var c = OpenOnPremBackup();
 
-        // Wipe any prior rows for this Container + RunOption (so re-Process replaces
-        // the matching slice without touching the other algorithm's saved data).
+        // 1) Find any prior Header batches for (GenCountry, ContNo, RunOption) — re-Process
+        //    replaces the matching slice. Delete their detail + blocked + header rows.
         progress?.Report(new AllocationProgress(0, rows.Count, "Saving: cleaning prior data"));
-        await c.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c AND ISNULL(RunOption,'FillSKUMax') = @ro",
-            new { c = contno, ro = roTag }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
-        await c.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationBlocked WHERE Country=@ct AND ContNo=@c AND ISNULL(RunOption,'FillSKUMax')=@ro",
-            new { ct = country, c = contno, ro = roTag }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        var priorBatches = (await c.QueryAsync<int>(new CommandDefinition(@"
+            SELECT BatchNo FROM LPMSIM.dbo.WMS_Cont_Allocation_Header
+            WHERE GenCountry = @gc AND ContNo = @c AND RunOption = @ro",
+            new { gc = genCountry, c = contno, ro = roTag },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToList();
+        if (priorBatches.Count > 0)
+        {
+            await c.ExecuteAsync(new CommandDefinition(
+                "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData    WHERE BatchNo IN @bs",
+                new { bs = priorBatches }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            await c.ExecuteAsync(new CommandDefinition(
+                "DELETE FROM LPMSIM.dbo.WMS_ContAllocationBlocked WHERE BatchNo IN @bs",
+                new { bs = priorBatches }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            await c.ExecuteAsync(new CommandDefinition(
+                "DELETE FROM LPMSIM.dbo.WMS_Cont_Allocation_Header WHERE BatchNo IN @bs",
+                new { bs = priorBatches }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        }
 
-        // Write the blocked rows (small list — per-row INSERT is fine).
+        // 2) Create the new Header row and read back BatchNo.
+        var totalQty = rows.Sum(r => r.AllocQty);
+        var batchNo = await c.ExecuteScalarAsync<int>(new CommandDefinition(@"
+            INSERT INTO LPMSIM.dbo.WMS_Cont_Allocation_Header
+                (ContNo, Warehouse, GenCountry, Country, RunOption,
+                 RowCount1, TotalQty, ProcessedBy)
+            VALUES (@c, @wh, @gc, @ac, @ro, @rc, @tq, @u);
+            SELECT CAST(SCOPE_IDENTITY() AS INT);",
+            new { c = contno, wh = warehouse, gc = genCountry, ac = allocationCountries,
+                  ro = roTag, rc = rows.Count, tq = totalQty, u = user.Name },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+
+        // 3) Write blocked rows (small list — per-row INSERT is fine).
         if (blocked is { Count: > 0 })
         {
             const string blkSql = @"
                 INSERT INTO LPMSIM.dbo.WMS_ContAllocationBlocked
-                    (Country, ContNo, RunOption, ItemCode, ItemName, StoreID, StoreName,
+                    (BatchNo, Country, ContNo, RunOption, ItemCode, ItemName, StoreID, StoreName,
                      DivCode, Division, Department, PoQty, BlockReason, CreatedBy)
                 VALUES
-                    (@Country, @ContNo, @RunOption, @ItemCode, @ItemName, @StoreID, @StoreName,
+                    (@BatchNo, @Country, @ContNo, @RunOption, @ItemCode, @ItemName, @StoreID, @StoreName,
                      @DivCode, @Division, @Department, @PoQty, @BlockReason, @CreatedBy)";
             foreach (var b in blocked)
             {
                 await c.ExecuteAsync(new CommandDefinition(blkSql, new
                 {
-                    Country = country, ContNo = b.Contno, RunOption = roTag,
+                    BatchNo = batchNo, Country = b.Country, ContNo = b.Contno, RunOption = roTag,
                     b.ItemCode, b.ItemName, b.StoreID, b.StoreName,
                     b.DivCode, b.Division, b.Department, b.PoQty, b.BlockReason,
                     CreatedBy = user.Name,
@@ -679,16 +703,19 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             }
         }
 
-        // Build a DataTable matching the columns we set on per-row fallback path.
+        // 4) Bulk-copy detail rows tagged with BatchNo + per-row Country.
         progress?.Report(new AllocationProgress(0, rows.Count, "Saving: bulk insert"));
         var dt = new System.Data.DataTable();
+        dt.Columns.Add("BatchNo",          typeof(int));
         dt.Columns.Add("ContNo",           typeof(string));
+        dt.Columns.Add("Country",          typeof(string));
         dt.Columns.Add("TrnDate",          typeof(DateTime));
         dt.Columns.Add("Time1",            typeof(TimeSpan));
         dt.Columns.Add("UPC",              typeof(string));
         dt.Columns.Add("Itemcode",         typeof(string));
         dt.Columns.Add("GroupCode",        typeof(string));
         dt.Columns.Add("Qty",              typeof(int));
+        dt.Columns.Add("AllocatedQty",     typeof(int));
         dt.Columns.Add("QtyIssue",         typeof(int));
         dt.Columns.Add("StoreID",          typeof(string));
         dt.Columns.Add("TcmContno",        typeof(string));
@@ -698,7 +725,6 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         dt.Columns.Add("ORAPONo",          typeof(string));
         dt.Columns.Add("Division",         typeof(string));
         dt.Columns.Add("Remarks",          typeof(string));
-        dt.Columns.Add("RunOption",        typeof(string));
         dt.Columns.Add("OTS",              typeof(double));
 
         var now = DateTime.Now;
@@ -708,13 +734,13 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         foreach (var r in rows)
         {
             dt.Rows.Add(
-                r.Contno, trnDate, time1, r.ItemCode, r.ItemCode, r.VolumeGroup,
-                r.AllocQty, 0, r.StoreID, r.Contno,
-                (object?)r.ItemName ?? DBNull.Value, country,
+                batchNo,
+                r.Contno, r.Country, trnDate, time1, r.ItemCode, r.ItemCode, r.VolumeGroup,
+                r.AllocQty, r.AllocQty, 0, r.StoreID, r.Contno,
+                (object?)r.ItemName ?? DBNull.Value, genCountry,
                 (object?)r.LPMDt ?? DBNull.Value, r.OraPONo,
                 (object?)r.Division ?? DBNull.Value,
                 (object?)(r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null) ?? DBNull.Value,
-                roTag,
                 (object?)r.OTS ?? DBNull.Value);
         }
 
@@ -733,6 +759,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         await bulk.WriteToServerAsync(dt, ct);
 
         progress?.Report(new AllocationProgress(rows.Count, rows.Count, "Saving: done"));
+        return batchNo;
     }
 
     /// <summary>
@@ -752,18 +779,21 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     /// Fields not stored in the final table (PoQty, SkuMax, VolumeGroup, etc.) come
     /// back as defaults; UI still displays Allocated Qty, StoreID, Division, etc.
     /// </summary>
-    public async Task<List<AllocationRow>> LoadFinalAsync(string country, string contno, RunOption runOption, CancellationToken ct = default)
+    public async Task<List<AllocationRow>> LoadFinalAsync(string genCountry, string contno, RunOption runOption, CancellationToken ct = default)
     {
         var roTag = runOption.ToString();
         await using var c = OpenOnPremBackup();
+        // Detail rows are tagged with BatchNo from the Header; load via the matching Header.
         var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName,
-                                       int? Qty, string? StoreID, string? GroupCode, string? Division,
+                                       int? Qty, string? StoreID, string? Country, string? GroupCode, string? Division,
                                        string? Remarks, DateTime? LPMDt)>(new CommandDefinition(@"
-            SELECT ContNo, ORAPONo, Itemcode, Itemname, Qty, StoreID, GroupCode, Division, Remarks, LPMDt
-            FROM LPMSIM.dbo.WMS_ContAllocationData WITH (NOLOCK)
-            WHERE ContNo = @c AND ISNULL(RunOption,'FillSKUMax') = @ro
-            ORDER BY IdNo",
-            new { c = contno, ro = roTag }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+            SELECT d.ContNo, d.ORAPONo, d.Itemcode, d.Itemname, d.Qty, d.StoreID, d.Country,
+                   d.GroupCode, d.Division, d.Remarks, d.LPMDt
+              FROM LPMSIM.dbo.WMS_ContAllocationData d WITH (NOLOCK)
+              JOIN LPMSIM.dbo.WMS_Cont_Allocation_Header h WITH (NOLOCK) ON h.BatchNo = d.BatchNo
+             WHERE h.GenCountry = @gc AND h.ContNo = @c AND h.RunOption = @ro
+             ORDER BY d.IdNo",
+            new { gc = genCountry, c = contno, ro = roTag }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
 
         return rows.Select(r => new AllocationRow(
             Contno: r.ContNo,
@@ -774,7 +804,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             PoQty: 0,
             StoreID: r.StoreID ?? "",
             StoreName: null,
-            Country: country,
+            Country: r.Country ?? genCountry,
             Division: r.Division,
             VolumeGroup: r.GroupCode ?? "",
             SkuMax: 0,
@@ -792,53 +822,66 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     /// given container so the page unlocks and Process can run again. Destructive —
     /// caller is responsible for confirming with the user. Returns rows deleted.
     /// </summary>
-    public async Task<int> ResetFinalAsync(string contno, RunOption runOption, CancellationToken ct = default)
+    public async Task<int> ResetFinalAsync(string genCountry, string contno, RunOption runOption, CancellationToken ct = default)
     {
         var roTag = runOption.ToString();
         await using var c = OpenOnPremBackup();
+        var batches = (await c.QueryAsync<int>(new CommandDefinition(@"
+            SELECT BatchNo FROM LPMSIM.dbo.WMS_Cont_Allocation_Header
+             WHERE GenCountry = @gc AND ContNo = @c AND RunOption = @ro",
+            new { gc = genCountry, c = contno, ro = roTag },
+            commandTimeout: 120, cancellationToken: ct))).ToList();
+        if (batches.Count == 0) return 0;
+
         var n = await c.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c AND ISNULL(RunOption,'FillSKUMax') = @ro",
-            new { c = contno, ro = roTag }, commandTimeout: 120, cancellationToken: ct));
+            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData    WHERE BatchNo IN @bs",
+            new { bs = batches }, commandTimeout: 120, cancellationToken: ct));
         await c.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationBlocked WHERE ContNo = @c AND ISNULL(RunOption,'FillSKUMax') = @ro",
-            new { c = contno, ro = roTag }, commandTimeout: 120, cancellationToken: ct));
+            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationBlocked WHERE BatchNo IN @bs",
+            new { bs = batches }, commandTimeout: 120, cancellationToken: ct));
+        await c.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM LPMSIM.dbo.WMS_Cont_Allocation_Header WHERE BatchNo IN @bs",
+            new { bs = batches }, commandTimeout: 120, cancellationToken: ct));
         return n;
     }
 
     /// <summary>Load saved blocked items for the (Container, RunOption).</summary>
-    public async Task<List<BlockedItemRow>> LoadBlockedAsync(string country, string contno, RunOption runOption, CancellationToken ct = default)
+    public async Task<List<BlockedItemRow>> LoadBlockedAsync(string genCountry, string contno, RunOption runOption, CancellationToken ct = default)
     {
         var roTag = runOption.ToString();
         await using var c = OpenOnPremBackup();
         var rows = await c.QueryAsync<BlockedItemRow>(new CommandDefinition(@"
-            SELECT ContNo AS Contno, ItemCode, ItemName, Division, Department,
-                   StoreID, StoreName, Country, PoQty, DivCode, BlockReason
-              FROM LPMSIM.dbo.WMS_ContAllocationBlocked WITH (NOLOCK)
-             WHERE Country = @ct AND ContNo = @c AND ISNULL(RunOption,'FillSKUMax') = @ro
-             ORDER BY ItemCode, StoreID",
-            new { ct = country, c = contno, ro = roTag },
+            SELECT b.ContNo AS Contno, b.ItemCode, b.ItemName, b.Division, b.Department,
+                   b.StoreID, b.StoreName, b.Country, b.PoQty, b.DivCode, b.BlockReason
+              FROM LPMSIM.dbo.WMS_ContAllocationBlocked b WITH (NOLOCK)
+              JOIN LPMSIM.dbo.WMS_Cont_Allocation_Header h WITH (NOLOCK) ON h.BatchNo = b.BatchNo
+             WHERE h.GenCountry = @gc AND h.ContNo = @c AND h.RunOption = @ro
+             ORDER BY b.ItemCode, b.StoreID",
+            new { gc = genCountry, c = contno, ro = roTag },
             commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 
-    public async Task<AllocationStatus> GetStatusAsync(string country, string contno, CancellationToken ct = default)
+    public async Task<AllocationStatus> GetStatusAsync(string genCountry, string contno, CancellationToken ct = default)
     {
         await using var c = OpenOnPremBackup();
         var d = await c.QueryFirstOrDefaultAsync<(int? RowCount1, int? TotalQty, string? RunOption)>(new CommandDefinition(
             "SELECT RowCount1, TotalQty, RunOption FROM LPMSIM.dbo.WMS_ContAllocationDraftHeader WHERE Country = @ct AND ContNo = @c",
-            new { ct = country, c = contno }, cancellationToken: ct));
+            new { ct = genCountry, c = contno }, cancellationToken: ct));
         var hasDraft = d.RowCount1 is not null;
         var draftRows = d.RowCount1 ?? 0;
 
-        // Per-RunOption final row counts (NULL RunOption maps to FillSKUMax — legacy rows).
+        // Per-RunOption final row counts from the Header table. Each Process run creates
+        // one Header row per (GenCountry, ContNo, RunOption); RowCount1 holds the saved total.
         var f = await c.QueryFirstOrDefaultAsync<(int Total, DateTime? Max1, int Fsm, int Rr)>(new CommandDefinition(@"
             SELECT
-                Total = COUNT(*),
-                Max1  = MAX(TrnDate),
-                Fsm   = SUM(CASE WHEN ISNULL(RunOption,'FillSKUMax') = 'FillSKUMax' THEN 1 ELSE 0 END),
-                Rr    = SUM(CASE WHEN ISNULL(RunOption,'FillSKUMax') = 'RoundRobin' THEN 1 ELSE 0 END)
-            FROM LPMSIM.dbo.WMS_ContAllocationData WHERE ContNo = @c",
-            new { c = contno }, cancellationToken: ct));
+                Total = ISNULL(SUM(RowCount1), 0),
+                Max1  = MAX(ProcessedTS),
+                Fsm   = ISNULL(SUM(CASE WHEN RunOption = 'FillSKUMax' THEN RowCount1 ELSE 0 END), 0),
+                Rr    = ISNULL(SUM(CASE WHEN RunOption = 'RoundRobin' THEN RowCount1 ELSE 0 END), 0)
+            FROM LPMSIM.dbo.WMS_Cont_Allocation_Header
+            WHERE GenCountry = @gc AND ContNo = @c",
+            new { gc = genCountry, c = contno }, cancellationToken: ct));
         var hasFinal = f.Total > 0;
         return new AllocationStatus(hasDraft, hasFinal, draftRows, f.Total, f.Max1, d.RunOption, f.Fsm, f.Rr);
     }
