@@ -194,6 +194,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         string contno,
         IProgress<AllocationProgress>? progress = null,
         RunOption runOption = RunOption.FillSKUMax,
+        IReadOnlyCollection<string>? allocationCountries = null,
         CancellationToken ct = default)
     {
         var result  = new List<AllocationRow>();
@@ -267,6 +268,10 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         var distinctDivs = divByItem.Values.Where(d => d > 0).Distinct().ToArray();
         if (distinctDivs.Length == 0) return new(result, blocked);
 
+        // Country filter: if the caller passed a non-empty allocation-country set,
+        // narrow eligible stores to those countries. Empty/null = all countries (back-compat).
+        var hasCountryFilter = allocationCountries is { Count: > 0 };
+        var countryFilter = hasCountryFilter ? allocationCountries!.ToArray() : Array.Empty<string>();
         var eomStores = (await c.QueryAsync<(string StoreID, string Country, int DivCode, string VolumeGroup, int MerchNeedMonth)>(
             new CommandDefinition(@"
                 SELECT s.StoreID, s.Country, s.DivCode, s.VolumeGroup,
@@ -275,8 +280,12 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 WHERE s.DivCode IN @divs
                   AND s.Month1  = MONTH(SYSDATETIME())
                   AND s.Year1   = YEAR(SYSDATETIME())
-                  AND s.VolumeGroup IS NOT NULL",
-                new { divs = distinctDivs }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+                  AND s.VolumeGroup IS NOT NULL
+                  AND (@noCountryFilter = 1 OR s.Country IN @countries)",
+                new { divs = distinctDivs,
+                      noCountryFilter = hasCountryFilter ? 0 : 1,
+                      countries = countryFilter },
+                commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
 
         var storesByDiv = eomStores
             .GroupBy(s => s.DivCode)
@@ -974,5 +983,106 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
               WHERE Active = 1 AND Country = @c ORDER BY Warehouse",
             new { c = country }, cancellationToken: ct));
         return list.AsList();
+    }
+
+    // ===================== P2: SIM countries (allocation destinations) =====================
+    public async Task<List<string>> GetSimCountriesAsync(CancellationToken ct = default)
+    {
+        await using var c = OpenOnPremBackup();
+        var list = await c.QueryAsync<string>(new CommandDefinition(
+            @"SELECT DISTINCT SIMCountry
+                FROM bfldata.dbo.DataSettings WITH (NOLOCK)
+               WHERE SIMCountry IS NOT NULL AND LTRIM(RTRIM(SIMCountry)) <> ''
+               ORDER BY SIMCountry",
+            cancellationToken: ct));
+        return list.AsList();
+    }
+
+    // ===================== P2: Processed Contnos dropdown =====================
+    public async Task<List<string>> GetProcessedContnosAsync(string genCountry, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(genCountry)) return new();
+        await using var c = OpenOnPremBackup();
+        var list = await c.QueryAsync<string>(new CommandDefinition(
+            @"SELECT DISTINCT ContNo
+                FROM LPMSIM.dbo.WMS_Cont_Allocation_Header WITH (NOLOCK)
+               WHERE GenCountry = @gc
+               ORDER BY ContNo",
+            new { gc = genCountry }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return list.AsList();
+    }
+
+    /// <summary>Latest batch (highest BatchNo) for (GenCountry, ContNo). Used by the
+    /// "Load Processed Data" button to look up which batch to display + the banner info.</summary>
+    public async Task<BatchInfo?> GetLatestBatchInfoAsync(string genCountry, string contno, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(genCountry) || string.IsNullOrWhiteSpace(contno)) return null;
+        await using var c = OpenOnPremBackup();
+        var b = await c.QueryFirstOrDefaultAsync<BatchInfo>(new CommandDefinition(@"
+            SELECT TOP 1
+                   BatchNo, ContNo, Warehouse, GenCountry, Country, RunOption,
+                   RowCount1, TotalQty, ProcessedTS, ProcessedBy, ApprovedDt, ApprovedBy
+              FROM LPMSIM.dbo.WMS_Cont_Allocation_Header WITH (NOLOCK)
+             WHERE GenCountry = @gc AND ContNo = @c
+             ORDER BY BatchNo DESC",
+            new { gc = genCountry, c = contno },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return b;
+    }
+
+    /// <summary>Load detail rows for a specific BatchNo. Used by the "Load Processed Data" path.
+    /// Joins to bfldata.DataSettings for StoreName and to usa.USAOrgFile for Brand so the
+    /// re-opened grid is as complete as a freshly processed one.</summary>
+    public async Task<List<AllocationRow>> LoadFinalByBatchAsync(int batchNo, CancellationToken ct = default)
+    {
+        await using var c = OpenOnPremBackup();
+        var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName, string? Brand,
+                                       int? Qty, string? StoreID, string? StoreName, string? Country, string? GroupCode, string? Division,
+                                       string? Remarks, DateTime? LPMDt)>(new CommandDefinition(@"
+            SELECT d.ContNo, d.ORAPONo, d.Itemcode, d.Itemname,
+                   (SELECT TOP 1 vendor     FROM usa.dbo.USAOrgFile       WITH (NOLOCK)
+                     WHERE ContNo = d.ContNo AND itemcode = d.Itemcode)                  AS Brand,
+                   d.Qty, d.StoreID,
+                   (SELECT TOP 1 PBFullname FROM bfldata.dbo.DataSettings WITH (NOLOCK)
+                     WHERE StoreID = d.StoreID AND PBFullname IS NOT NULL)               AS StoreName,
+                   d.Country, d.GroupCode, d.Division, d.Remarks, d.LPMDt
+              FROM LPMSIM.dbo.WMS_ContAllocationData d WITH (NOLOCK)
+             WHERE d.BatchNo = @b
+             ORDER BY d.IdNo",
+            new { b = batchNo }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+
+        return rows.Select(r => new AllocationRow(
+            Contno: r.ContNo,
+            OraPONo: r.OraPONo ?? "",
+            ItemCode: r.ItemCode ?? "",
+            ItemName: r.ItemName,
+            Brand: r.Brand,
+            PoQty: 0,
+            StoreID: r.StoreID ?? "",
+            StoreName: r.StoreName,
+            Country: r.Country ?? "",
+            Division: r.Division,
+            VolumeGroup: r.GroupCode ?? "",
+            SkuMax: 0,
+            AllocQty: r.Qty ?? 0,
+            MerchNeedMonth: 0,
+            DivCode: 0,
+            RoundRobinExtra: ParseRoundRobin(r.Remarks),
+            LPM: null,
+            LPMDt: r.LPMDt
+        )).ToList();
+    }
+
+    public async Task<List<BlockedItemRow>> LoadBlockedByBatchAsync(int batchNo, CancellationToken ct = default)
+    {
+        await using var c = OpenOnPremBackup();
+        var rows = await c.QueryAsync<BlockedItemRow>(new CommandDefinition(@"
+            SELECT ContNo AS Contno, ItemCode, ItemName, Division, Department,
+                   StoreID, StoreName, Country, PoQty, DivCode, BlockReason
+              FROM LPMSIM.dbo.WMS_ContAllocationBlocked WITH (NOLOCK)
+             WHERE BatchNo = @b
+             ORDER BY ItemCode, StoreID",
+            new { b = batchNo }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return rows.AsList();
     }
 }

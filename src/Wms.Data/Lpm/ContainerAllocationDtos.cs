@@ -82,3 +82,19 @@ public enum RunOption { FillSKUMax = 0, RoundRobin = 1 }
 public record AllocationProcessResult(
     List<AllocationRow>    Allocations,
     List<BlockedItemRow>   Blocked);
+
+/// <summary>Header row read back for the "Processed Contnos" dropdown banner.
+/// Mirrors WMS_Cont_Allocation_Header columns.</summary>
+public record BatchInfo(
+    int       BatchNo,
+    string    ContNo,
+    string?   Warehouse,
+    string    GenCountry,
+    string    Country,            // comma-separated allocation destinations
+    string    RunOption,
+    int?      RowCount1,
+    int?      TotalQty,
+    DateTime  ProcessedTS,
+    string?   ProcessedBy,
+    DateTime? ApprovedDt,
+    string?   ApprovedBy);
