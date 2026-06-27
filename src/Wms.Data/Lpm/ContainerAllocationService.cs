@@ -1,4 +1,5 @@
 using System.Data;
+using System.Text.RegularExpressions;
 using Wms.Core;
 using Wms.Data.Configuration;
 using Dapper;
@@ -244,14 +245,21 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             .Select(r => (Sid: (r.StoreID ?? "").Trim().ToUpperInvariant(), r.DivCode))
             .ToHashSet();
 
-        // 2b. ItemName + Brand from usa.USAOrgFile (joined on ContNo + ItemCode)
-        var orgByItem = (await c.QueryAsync<(string itemcode, string? itemname, string? vendor)>(new CommandDefinition(@"
-            SELECT itemcode, MAX(itemname) AS itemname, MAX(vendor) AS vendor
+        // 2b. ItemName + Brand + Season + Style + Size from usa.USAOrgFile.
+        // Season drives the PalletType pick at save time (S vs W variant);
+        // Style + Size are written to the detail rows for downstream consumers.
+        var orgByItem = (await c.QueryAsync<(string itemcode, string? itemname, string? vendor, string? season, string? Style, string? Size)>(new CommandDefinition(@"
+            SELECT itemcode,
+                   MAX(itemname) AS itemname,
+                   MAX(vendor)   AS vendor,
+                   MAX(season)   AS season,
+                   MAX(Style)    AS Style,
+                   MAX([Size])   AS [Size]
             FROM usa.dbo.USAOrgFile WITH (NOLOCK)
             WHERE contno = @c AND itemcode IN @items
             GROUP BY itemcode",
             new { c = contno, items = lines.Select(l => l.ItemCode).Distinct().ToArray() }, cancellationToken: ct)))
-            .ToDictionary(r => r.itemcode, r => (r.itemname, r.vendor), StringComparer.OrdinalIgnoreCase);
+            .ToDictionary(r => r.itemcode, r => (r.itemname, r.vendor, r.season, r.Style, r.Size), StringComparer.OrdinalIgnoreCase);
 
         // 2c. StoreName lookup from bfldata.DataSettings.PBFullname (key column: StoreID)
         var storeNameById = (await c.QueryAsync<(string StoreID, string? PBFullname)>(new CommandDefinition(@"
@@ -262,16 +270,122 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             cancellationToken: ct)))
             .ToDictionary(r => r.StoreID, r => r.PBFullname, StringComparer.OrdinalIgnoreCase);
 
+        // 2c2. WMS_Building_PalletTypes — keyed by StoreId. Per-row ResultType picks
+        // PalletTypeS when item season <> 'W' else PalletTypeW (per user spec Q-C).
+        var palletByStore = (await c.QueryAsync<(string StoreId, string? PalletTypeS, string? PalletTypeW)>(new CommandDefinition(@"
+            SELECT StoreId, MAX(PalletTypeS) AS PalletTypeS, MAX(PalletTypeW) AS PalletTypeW
+            FROM dbo.WMS_Building_PalletTypes WITH (NOLOCK)
+            WHERE StoreId IS NOT NULL
+            GROUP BY StoreId",
+            cancellationToken: ct)))
+            .ToDictionary(r => r.StoreId, r => (r.PalletTypeS, r.PalletTypeW), StringComparer.OrdinalIgnoreCase);
+
+        // Determine the country filter once — used for both eomStores narrowing and
+        // the SalesPrice lookup. Empty/null = all countries (back-compat).
+        var hasCountryFilter = allocationCountries is { Count: > 0 };
+        var countryFilter = hasCountryFilter ? allocationCountries!.ToArray() : Array.Empty<string>();
+
+        // 2c3. SalesPrice per (country, itemcode). UAE stores → hodata.salesprice.salesrate,
+        // other countries → <DataName>.dbo.RFSalesprice.salesrate where DataName comes
+        // from bfldata.DataSettings.DataName for that SIMCountry. DataName is sanitized
+        // (alphanumeric/underscore only) before being injected into the dynamic FROM clause.
+        var pricesByCountryItem = new Dictionary<(string Country, string ItemCode), decimal?>();
+        var distinctItemCodes = lines.Select(l => l.ItemCode).Distinct().ToArray();
+        if (hasCountryFilter && distinctItemCodes.Length > 0)
+        {
+            foreach (var sc in countryFilter.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    if (string.Equals(sc, "UAE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var rows = await c.QueryAsync<(string itemcode, decimal? salesrate)>(new CommandDefinition(@"
+                            SELECT itemcode, salesrate
+                            FROM hodata.dbo.salesprice WITH (NOLOCK)
+                            WHERE itemcode IN @items",
+                            new { items = distinctItemCodes }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+                        foreach (var r in rows) pricesByCountryItem[(sc, r.itemcode)] = r.salesrate;
+                    }
+                    else
+                    {
+                        var dataName = await c.ExecuteScalarAsync<string?>(new CommandDefinition(@"
+                            SELECT TOP 1 DataName FROM bfldata.dbo.DataSettings WITH (NOLOCK)
+                            WHERE SIMCountry = @c
+                              AND DataName IS NOT NULL AND LTRIM(RTRIM(DataName)) <> ''",
+                            new { c = sc }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+                        if (string.IsNullOrWhiteSpace(dataName)) continue;
+                        if (!Regex.IsMatch(dataName, @"^[A-Za-z0-9_]+$")) continue;  // defend against ETL drift
+                        var sql = $@"SELECT itemcode, salesrate
+                                       FROM {dataName}.dbo.RFSalesprice WITH (NOLOCK)
+                                      WHERE itemcode IN @items";
+                        var rows = await c.QueryAsync<(string itemcode, decimal? salesrate)>(new CommandDefinition(
+                            sql, new { items = distinctItemCodes }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+                        foreach (var r in rows) pricesByCountryItem[(sc, r.itemcode)] = r.salesrate;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[ContainerAllocation] WARN: SalesPrice lookup failed for country '{sc}': {ex.Message}");
+                }
+            }
+        }
+
+        // 2c4. PrevAllocatedQty seed — sum of allocated qty per (StoreID, DivCode) from
+        // approved Headers' detail rows whose (ContNo, Country) pair has NOT yet been
+        // marked complete in the Azure WMS DB's WmsBuildingCompletion table.
+        // Until Approve UI ships (P4), this returns empty.
+        var prevAllocatedSeed = new Dictionary<(string StoreID, int DivCode), int>();
+        {
+            var approvedRows = (await c.QueryAsync<(string ContNo, string Country, string StoreID, string Itemcode, int? Qty)>(new CommandDefinition(@"
+                SELECT d.TcmContno AS ContNo, d.Country, d.StoreID, d.Itemcode, d.Qty
+                  FROM LPMSIM.dbo.WMS_Cont_Allocation_Header h WITH (NOLOCK)
+                  JOIN LPMSIM.dbo.WMS_ContAllocationData d   WITH (NOLOCK) ON d.BatchNo = h.BatchNo
+                 WHERE h.ApprovedDt IS NOT NULL",
+                commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
+            if (approvedRows.Count > 0)
+            {
+                var distinctContnos = approvedRows.Select(r => r.ContNo).Distinct().ToArray();
+                HashSet<(string, string)> completed;
+                await using (var w = OpenWms())
+                {
+                    var compRows = await w.QueryAsync<(string ContNo, string Country)>(new CommandDefinition(@"
+                        SELECT DISTINCT ContNo, Country FROM dbo.WmsBuildingCompletion WITH (NOLOCK)
+                        WHERE ContNo IN @contnos",
+                        new { contnos = distinctContnos }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+                    completed = compRows.Select(r => (r.ContNo, r.Country)).ToHashSet();
+                }
+
+                // Resolve DivCode for any approved-batch item not already in divByItem.
+                var extraItems = approvedRows.Select(r => r.Itemcode)
+                    .Where(i => !divByItem.ContainsKey(i)).Distinct().ToArray();
+                var divByApprovedItem = new Dictionary<string, int>(divByItem, StringComparer.OrdinalIgnoreCase);
+                if (extraItems.Length > 0)
+                {
+                    var extraDivs = await c.QueryAsync<(string itemcode, int? DivID)>(new CommandDefinition(@"
+                        SELECT itemcode, MAX(DivID) AS DivID
+                        FROM datareporting.dbo.vupc_subclass WITH (NOLOCK)
+                        WHERE itemcode IN @items GROUP BY itemcode",
+                        new { items = extraItems }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+                    foreach (var r in extraDivs) divByApprovedItem[r.itemcode] = r.DivID ?? 0;
+                }
+
+                foreach (var r in approvedRows)
+                {
+                    if (completed.Contains((r.ContNo, r.Country))) continue;
+                    if (!divByApprovedItem.TryGetValue(r.Itemcode, out var div) || div == 0) continue;
+                    var key = (r.StoreID, div);
+                    prevAllocatedSeed[key] = prevAllocatedSeed.GetValueOrDefault(key, 0) + (r.Qty ?? 0);
+                }
+            }
+        }
+
         // 2d. Prefetch eligible stores + SKUMax bands + latest TodayOTS for ALL DivCodes
         // in the container — in 3 round-trips total. The per-line loop below then does
         // an in-memory join instead of one SQL query per PO line (N+1 was the timeout cause).
         var distinctDivs = divByItem.Values.Where(d => d > 0).Distinct().ToArray();
         if (distinctDivs.Length == 0) return new(result, blocked);
 
-        // Country filter: if the caller passed a non-empty allocation-country set,
-        // narrow eligible stores to those countries. Empty/null = all countries (back-compat).
-        var hasCountryFilter = allocationCountries is { Count: > 0 };
-        var countryFilter = hasCountryFilter ? allocationCountries!.ToArray() : Array.Empty<string>();
+        // eomStores narrowed by the country filter computed above.
         var eomStores = (await c.QueryAsync<(string StoreID, string Country, int DivCode, string VolumeGroup, int MerchNeedMonth)>(
             new CommandDefinition(@"
                 SELECT s.StoreID, s.Country, s.DivCode, s.VolumeGroup,
@@ -302,188 +416,217 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             .GroupBy(r => (r.Country, r.DivCode, r.GroupCode))
             .ToDictionary(g => g.Key, g => g.ToList());
 
-        // Latest TodayOTS per (StoreID, DivCode) — single query, ROW_NUMBER picks
-        // the most recent OTSDate < today. Index IX_LPM_OTS_Output_StoreDivDate
-        // makes this an index seek + top-1 instead of the per-line OUTER APPLY scan.
-        var otsRows = (await c.QueryAsync<(string StoreID, int DivCode, double? TodayOTS)>(
+        // Latest OTS raw components per (StoreID, DivCode). We keep targetEOM / SOH /
+        // SalesTgtWk / Σ trfQty separately so the per-item loop can recompute OTS as
+        // AllocatedQty grows during this batch. The OTS formula stays in C# now:
+        //
+        //   OTS = ((targetEOM − SOH + SalesTgtWk − AllocatedQty − PrevAllocatedQty) − Σ trfQty)
+        //         / targetEOM
+        var otsRaw = (await c.QueryAsync<(string StoreID, int DivCode, int targetEOM, int SOH, int SalesTgtWk, int trfSum)>(
             new CommandDefinition(@"
                 WITH ranked AS (
-                    SELECT o.StoreID, o.DivCode, o.targetEOM, o.SOH, o.SalesTgtWk,
-                           o.trfQty1, o.trfqty2, o.trfqty3, o.trfqty4,
-                           o.trfqty5, o.trfqty6, o.trfqty7,
+                    SELECT o.StoreID, o.DivCode,
+                           ISNULL(o.targetEOM,0)   AS targetEOM,
+                           ISNULL(o.SOH,0)         AS SOH,
+                           ISNULL(o.SalesTgtWk,0)  AS SalesTgtWk,
+                           ISNULL(o.trfQty1,0) + ISNULL(o.trfqty2,0) + ISNULL(o.trfqty3,0)
+                             + ISNULL(o.trfqty4,0) + ISNULL(o.trfqty5,0) + ISNULL(o.trfqty6,0)
+                             + ISNULL(o.trfqty7,0)                            AS trfSum,
                            ROW_NUMBER() OVER (PARTITION BY o.StoreID, o.DivCode
                                               ORDER BY o.OTSDate DESC) AS rn
                     FROM dbo.LPM_OTS_Output o WITH (NOLOCK)
                     WHERE o.DivCode IN @divs
                       AND o.OTSDate < CAST(SYSDATETIME() AS DATE)
                 )
-                SELECT StoreID, DivCode,
-                       CASE WHEN ISNULL(targetEOM,0) = 0 THEN NULL
-                            ELSE ((ISNULL(targetEOM,0) - ISNULL(SOH,0) + ISNULL(SalesTgtWk,0))
-                                 - (ISNULL(trfQty1,0) + ISNULL(trfqty2,0) + ISNULL(trfqty3,0)
-                                    + ISNULL(trfqty4,0) + ISNULL(trfqty5,0) + ISNULL(trfqty6,0)
-                                    + ISNULL(trfqty7,0))) * 1.0 / NULLIF(targetEOM, 0)
-                       END AS TodayOTS
+                SELECT StoreID, DivCode, targetEOM, SOH, SalesTgtWk, trfSum
                   FROM ranked WHERE rn = 1",
                 new { divs = distinctDivs }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).AsList();
 
-        var otsByKey = otsRows.ToDictionary(o => (o.StoreID, o.DivCode), o => o.TodayOTS);
+        var otsRawByKey = otsRaw.ToDictionary(o => (o.StoreID, o.DivCode),
+            o => (o.targetEOM, o.SOH, o.SalesTgtWk, o.trfSum));
 
-        // 3. For each PO line, do an in-memory join against the prefetched data.
+        // Running allocation total per (StoreID, DivCode) this batch — drives the
+        // OTS refresh between items. Starts at zero; grows as we allocate.
+        var runningAlloc = new Dictionary<(string StoreID, int DivCode), int>();
+
+        double? ComputeOts(string sid, int div)
+        {
+            if (!otsRawByKey.TryGetValue((sid, div), out var raw) || raw.targetEOM == 0) return null;
+            var alloc = runningAlloc.GetValueOrDefault((sid, div), 0);
+            var prev  = prevAllocatedSeed.GetValueOrDefault((sid, div), 0);
+            var numerator = (raw.targetEOM - raw.SOH + raw.SalesTgtWk - alloc - prev) - raw.trfSum;
+            return numerator * 1.0 / raw.targetEOM;
+        }
+
+        // 3. P3 allocation loop — group lines by (OraPONo, Division, LPMDt) combo, sort
+        // items within each combo by Qty DESC, and walk stores by current OTS DESC.
+        // After each item finishes, runningAlloc is mutated so the next item's store
+        // ordering uses a refreshed OTS reflecting what's already been given out.
         progress?.Report(new AllocationProgress(0, lines.Count, null));
         var idxLine = 0;
-        foreach (var line in lines)
+        var combos = lines
+            .Where(l => l.Qty > 0)
+            .Select(l => new
+            {
+                Line = l,
+                Division = itemMeta.TryGetValue(l.ItemCode, out var im) ? im.Division : null
+            })
+            .GroupBy(x => (x.Line.OraPONo, Division: x.Division ?? "", x.Line.LPMDt))
+            .OrderBy(g => g.Key.OraPONo).ThenBy(g => g.Key.Division).ThenBy(g => g.Key.LPMDt);
+
+        foreach (var combo in combos)
         {
-            idxLine++;
-            progress?.Report(new AllocationProgress(idxLine, lines.Count, line.ItemCode));
-            if (line.Qty <= 0) continue;
-            if (!divByItem.TryGetValue(line.ItemCode, out var divCode) || divCode == 0) continue;
-            if (!storesByDiv.TryGetValue(divCode, out var divStores)) continue;
-
-            // Resolve (StoreID -> SKUMax band matching line.Qty + TodayOTS) once per store.
-            // Dedupe by StoreID — first occurrence wins (mirrors the original GroupBy().First()).
-            var perStore = new Dictionary<string, (string Country, string VolumeGroup, int MerchNeedMonth, int SKUMax, double? TodayOTS)>(StringComparer.OrdinalIgnoreCase);
-            foreach (var s in divStores)
+            var comboLines = combo.OrderByDescending(x => x.Line.Qty).Select(x => x.Line).ToList();
+            foreach (var line in comboLines)
             {
-                if (perStore.ContainsKey(s.StoreID)) continue;
-                if (!rulesByKey.TryGetValue((s.Country, divCode, s.VolumeGroup), out var bands)) continue;
-                int? skuMax = null;
-                foreach (var b in bands)
+                idxLine++;
+                progress?.Report(new AllocationProgress(idxLine, lines.Count, line.ItemCode));
+                if (line.Qty <= 0) continue;
+                if (!divByItem.TryGetValue(line.ItemCode, out var divCode) || divCode == 0) continue;
+                if (!storesByDiv.TryGetValue(divCode, out var divStores)) continue;
+
+                itemMeta.TryGetValue(line.ItemCode, out var itemRow);
+                orgByItem.TryGetValue(line.ItemCode, out var orgRow);
+                var dept = (itemRow.Department ?? "").Trim();
+
+                // Resolve (StoreID -> band-matching SKUMax + current OTS) for this item.
+                var perStore = new Dictionary<string, (string Country, string VolumeGroup, int MerchNeedMonth, int SKUMax, double? Ots)>(StringComparer.OrdinalIgnoreCase);
+                foreach (var s in divStores)
                 {
-                    if (line.Qty >= b.WHStockFrom && line.Qty <= b.WHStockTo) { skuMax = b.SKUMax; break; }
+                    if (perStore.ContainsKey(s.StoreID)) continue;
+                    if (!rulesByKey.TryGetValue((s.Country, divCode, s.VolumeGroup), out var bands)) continue;
+                    int? skuMax = null;
+                    foreach (var b in bands)
+                    {
+                        if (line.Qty >= b.WHStockFrom && line.Qty <= b.WHStockTo) { skuMax = b.SKUMax; break; }
+                    }
+                    if (skuMax is null) continue;
+                    perStore[s.StoreID] = (s.Country, s.VolumeGroup, s.MerchNeedMonth, skuMax.Value, ComputeOts(s.StoreID, divCode));
                 }
-                if (skuMax is null) continue;
-                otsByKey.TryGetValue((s.StoreID, divCode), out var ots);
-                perStore[s.StoreID] = (s.Country, s.VolumeGroup, s.MerchNeedMonth, skuMax.Value, ots);
-            }
 
-            // Order: TodayOTS DESC, nulls last (matches the original SQL ORDER BY).
-            var allStores = perStore
-                .Select(kv => (StoreID: kv.Key,
-                               kv.Value.Country, kv.Value.VolumeGroup,
-                               kv.Value.MerchNeedMonth, SKUMax: kv.Value.SKUMax,
-                               TodayOTS: kv.Value.TodayOTS))
-                .OrderBy(s => s.TodayOTS.HasValue ? 0 : 1)
-                .ThenByDescending(s => s.TodayOTS)
-                .ToList();
-
-            // Block filter: drop stores blocked by LPM_StoreDeptAccess or LPM_StoreDivAccess.
-            // Each blocked store is recorded once with the combined reason for the UI.
-            itemMeta.TryGetValue(line.ItemCode, out var itemRow);
-            var dept = (itemRow.Department ?? "").Trim();
-            orgByItem.TryGetValue(line.ItemCode, out var orgRow);
-            var stores = new List<(string StoreID, string Country, string VolumeGroup, int MerchNeedMonth, int SKUMax, double? TodayOTS)>(allStores.Count);
-            foreach (var s in allStores)
-            {
-                var sidU  = (s.StoreID ?? "").Trim().ToUpperInvariant();
-                var deptU = dept.ToUpperInvariant();
-                var deptHit = !string.IsNullOrEmpty(dept) && deptBlocks.Contains((sidU, divCode, deptU));
-                var divHit  = divBlocks.Contains((sidU, divCode));
-                if (deptHit || divHit)
+                // Apply block filter (DeptAccess / DivAccess). Surviving stores then sorted
+                // by current OTS DESC (nulls last).
+                var stores = new List<(string StoreID, string Country, string VolumeGroup, int MerchNeedMonth, int SKUMax, double? Ots)>(perStore.Count);
+                foreach (var (storeId, info) in perStore)
                 {
-                    var reason = deptHit && divHit ? "DeptAccess+DivAccess" : (deptHit ? "DeptAccess" : "DivAccess");
-                    storeNameById.TryGetValue(s.StoreID, out var sName);
-                    blocked.Add(new BlockedItemRow(
-                        Contno:    line.ContNo,
-                        ItemCode:  line.ItemCode,
-                        ItemName:  orgRow.itemname,
-                        Division:  itemRow.Division,
-                        Department: itemRow.Department,
-                        StoreID:   s.StoreID,
-                        StoreName: sName,
-                        Country:   s.Country,
-                        PoQty:     line.Qty,
-                        DivCode:   divCode,
-                        BlockReason: reason));
-                    continue;
+                    var sidU  = storeId.Trim().ToUpperInvariant();
+                    var deptU = dept.ToUpperInvariant();
+                    var deptHit = !string.IsNullOrEmpty(dept) && deptBlocks.Contains((sidU, divCode, deptU));
+                    var divHit  = divBlocks.Contains((sidU, divCode));
+                    if (deptHit || divHit)
+                    {
+                        var reason = deptHit && divHit ? "DeptAccess+DivAccess" : (deptHit ? "DeptAccess" : "DivAccess");
+                        storeNameById.TryGetValue(storeId, out var sName);
+                        blocked.Add(new BlockedItemRow(
+                            Contno: line.ContNo, ItemCode: line.ItemCode, ItemName: orgRow.itemname,
+                            Division: itemRow.Division, Department: itemRow.Department,
+                            StoreID: storeId, StoreName: sName, Country: info.Country,
+                            PoQty: line.Qty, DivCode: divCode, BlockReason: reason));
+                        continue;
+                    }
+                    stores.Add((storeId, info.Country, info.VolumeGroup, info.MerchNeedMonth, info.SKUMax, info.Ots));
                 }
-                stores.Add(s);
-            }
+                if (stores.Count == 0) continue;
 
-            if (stores.Count == 0) continue;
+                stores = stores
+                    .OrderBy(s => s.Ots.HasValue ? 0 : 1)
+                    .ThenByDescending(s => s.Ots)
+                    .ToList();
 
-            // Pass 1: walk in order. Fill SKUMax = give each store min(SKUMax, remaining)
-            //         Round Robin = give 1 pc per pass, respecting SKUMax cap; loop until
-            //         qty=0 or all stores at cap.
-            var allocs = new Dictionary<string, AllocationRow>(StringComparer.OrdinalIgnoreCase);
-            var remaining = line.Qty;
-
-            AllocationRow MakeRow(string sid, string sn, string country, string vg, int merch, int cap, int take, double? ots)
-            {
-                return new AllocationRow(
-                    Contno: line.ContNo, OraPONo: line.OraPONo, ItemCode: line.ItemCode,
-                    ItemName: orgRow.itemname, Brand: orgRow.vendor, PoQty: line.Qty,
-                    StoreID: sid, StoreName: sn, Country: country, Division: itemRow.Division,
-                    VolumeGroup: vg, SkuMax: cap, AllocQty: take, MerchNeedMonth: merch,
-                    DivCode: divCode, RoundRobinExtra: 0, LPM: line.LPM, LPMDt: line.LPMDt, OTS: ots);
-            }
-
-            if (runOption == RunOption.FillSKUMax)
-            {
-                foreach (var s in stores)
+                // Build an enrichment-aware row factory. PalletType is season-driven
+                // (W → PalletTypeW, else PalletTypeS); SalesPrice is per store country.
+                var season = (orgRow.season ?? "").Trim();
+                var isWinter = season.Equals("W", StringComparison.OrdinalIgnoreCase);
+                string? PalletFor(string sid)
                 {
-                    if (remaining <= 0) break;
-                    var take = Math.Min(s.SKUMax, remaining);
-                    if (take <= 0) continue;
-                    storeNameById.TryGetValue(s.StoreID, out var storeName);
-                    allocs[s.StoreID] = MakeRow(s.StoreID, storeName ?? "", s.Country, s.VolumeGroup, s.MerchNeedMonth, s.SKUMax, take, s.TodayOTS);
-                    remaining -= take;
+                    if (!palletByStore.TryGetValue(sid, out var pt)) return null;
+                    return isWinter ? pt.PalletTypeW : pt.PalletTypeS;
                 }
-            }
-            else // RoundRobin — 1 pc per store per pass, respect SKUMax
-            {
-                while (remaining > 0)
+
+                AllocationRow MakeRow(string sid, string country, string vg, int merch, int cap, int take, int rrExtra)
                 {
-                    bool any = false;
+                    storeNameById.TryGetValue(sid, out var storeName);
+                    pricesByCountryItem.TryGetValue((country, line.ItemCode), out var price);
+                    return new AllocationRow(
+                        Contno: line.ContNo, OraPONo: line.OraPONo, ItemCode: line.ItemCode,
+                        ItemName: orgRow.itemname, Brand: orgRow.vendor, PoQty: line.Qty,
+                        StoreID: sid, StoreName: storeName, Country: country, Division: itemRow.Division,
+                        VolumeGroup: vg, SkuMax: cap, AllocQty: take, MerchNeedMonth: merch,
+                        DivCode: divCode, RoundRobinExtra: rrExtra, LPM: line.LPM, LPMDt: line.LPMDt,
+                        OTS: ComputeOts(sid, divCode),
+                        Season: orgRow.season, Style: orgRow.Style, Size: orgRow.Size,
+                        Department: itemRow.Department, SalesPrice: price,
+                        PalletType: PalletFor(sid),
+                        PrevAllocatedQty: prevAllocatedSeed.GetValueOrDefault((sid, divCode), 0));
+                }
+
+                var allocs = new Dictionary<string, AllocationRow>(StringComparer.OrdinalIgnoreCase);
+                var remaining = line.Qty;
+
+                if (runOption == RunOption.FillSKUMax)
+                {
                     foreach (var s in stores)
                     {
                         if (remaining <= 0) break;
-                        var current = allocs.TryGetValue(s.StoreID, out var row) ? row.AllocQty : 0;
-                        if (current >= s.SKUMax) continue;
-                        storeNameById.TryGetValue(s.StoreID, out var storeName);
-                        allocs[s.StoreID] = row is null
-                            ? MakeRow(s.StoreID, storeName ?? "", s.Country, s.VolumeGroup, s.MerchNeedMonth, s.SKUMax, 1, s.TodayOTS)
-                            : row with { AllocQty = current + 1 };
-                        remaining--;
-                        any = true;
+                        var take = Math.Min(s.SKUMax, remaining);
+                        if (take <= 0) continue;
+                        allocs[s.StoreID] = MakeRow(s.StoreID, s.Country, s.VolumeGroup, s.MerchNeedMonth, s.SKUMax, take, 0);
+                        remaining -= take;
                     }
-                    if (!any) break;  // every store at cap
                 }
-            }
-
-            // Pass 2: round-robin (ignoring SKUMax) if Fill SKUMax mode has remaining qty.
-            // In RoundRobin mode we respect the cap strictly — excess remains unallocated.
-            if (runOption == RunOption.FillSKUMax && remaining > 0 && stores.Count > 0)
-            {
-                int idx = 0;
-                while (remaining > 0)
+                else
                 {
-                    var s = stores[idx % stores.Count];
-                    if (allocs.TryGetValue(s.StoreID, out var row))
+                    while (remaining > 0)
                     {
-                        allocs[s.StoreID] = row with
+                        bool any = false;
+                        foreach (var s in stores)
                         {
-                            AllocQty = row.AllocQty + 1,
-                            RoundRobinExtra = row.RoundRobinExtra + 1,
-                        };
+                            if (remaining <= 0) break;
+                            var current = allocs.TryGetValue(s.StoreID, out var row) ? row.AllocQty : 0;
+                            if (current >= s.SKUMax) continue;
+                            allocs[s.StoreID] = row is null
+                                ? MakeRow(s.StoreID, s.Country, s.VolumeGroup, s.MerchNeedMonth, s.SKUMax, 1, 0)
+                                : row with { AllocQty = current + 1 };
+                            remaining--;
+                            any = true;
+                        }
+                        if (!any) break;
                     }
-                    else
+                }
+
+                // FillSKUMax pass 2: round-robin extras when cap hit but qty remains.
+                if (runOption == RunOption.FillSKUMax && remaining > 0 && stores.Count > 0)
+                {
+                    int idx = 0;
+                    while (remaining > 0)
                     {
-                        storeNameById.TryGetValue(s.StoreID, out var sn2);
-                        allocs[s.StoreID] = new AllocationRow(
-                            Contno: line.ContNo, OraPONo: line.OraPONo, ItemCode: line.ItemCode,
-                            ItemName: orgRow.itemname, Brand: orgRow.vendor, PoQty: line.Qty,
-                            StoreID: s.StoreID, StoreName: sn2, Country: s.Country,
-                            Division: itemRow.Division, VolumeGroup: s.VolumeGroup, SkuMax: s.SKUMax,
-                            AllocQty: 1, MerchNeedMonth: s.MerchNeedMonth, DivCode: divCode,
-                            RoundRobinExtra: 1, LPM: line.LPM, LPMDt: line.LPMDt, OTS: s.TodayOTS);
+                        var s = stores[idx % stores.Count];
+                        if (allocs.TryGetValue(s.StoreID, out var row))
+                        {
+                            allocs[s.StoreID] = row with
+                            {
+                                AllocQty        = row.AllocQty + 1,
+                                RoundRobinExtra = row.RoundRobinExtra + 1,
+                            };
+                        }
+                        else
+                        {
+                            allocs[s.StoreID] = MakeRow(s.StoreID, s.Country, s.VolumeGroup, s.MerchNeedMonth, s.SKUMax, 1, 1);
+                        }
+                        remaining--;
+                        idx++;
                     }
-                    remaining--;
-                    idx++;
+                }
+
+                // Commit allocations + mutate runningAlloc so next item's OTS reflects what
+                // we just gave out.
+                foreach (var row in allocs.Values)
+                {
+                    result.Add(row);
+                    var key = (row.StoreID, divCode);
+                    runningAlloc[key] = runningAlloc.GetValueOrDefault(key, 0) + row.AllocQty;
                 }
             }
-
-            result.AddRange(allocs.Values);
         }
 
         // Sanity check: total allocated must equal sum of PO line qtys (Fill SKUMax)
@@ -712,7 +855,10 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             }
         }
 
-        // 4) Bulk-copy detail rows tagged with BatchNo + per-row Country.
+        // 4) Bulk-copy detail rows tagged with BatchNo + per-row Country + enrichment columns.
+        // BuildingCategory now = Division (P3 spec; was the SIM country in P1/P2).
+        // ResultType comes from WMS_Building_PalletTypes (S vs W per item season);
+        // FinalResult mirrors ResultType (Q-A). Result stays NULL.
         progress?.Report(new AllocationProgress(0, rows.Count, "Saving: bulk insert"));
         var dt = new System.Data.DataTable();
         dt.Columns.Add("BatchNo",          typeof(int));
@@ -722,9 +868,11 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         dt.Columns.Add("Time1",            typeof(TimeSpan));
         dt.Columns.Add("UPC",              typeof(string));
         dt.Columns.Add("Itemcode",         typeof(string));
+        dt.Columns.Add("Barcode",          typeof(string));
         dt.Columns.Add("GroupCode",        typeof(string));
         dt.Columns.Add("Qty",              typeof(int));
         dt.Columns.Add("AllocatedQty",     typeof(int));
+        dt.Columns.Add("PrevAllocatedQty", typeof(int));
         dt.Columns.Add("QtyIssue",         typeof(int));
         dt.Columns.Add("StoreID",          typeof(string));
         dt.Columns.Add("TcmContno",        typeof(string));
@@ -733,6 +881,13 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         dt.Columns.Add("LPMDt",            typeof(DateTime));
         dt.Columns.Add("ORAPONo",          typeof(string));
         dt.Columns.Add("Division",         typeof(string));
+        dt.Columns.Add("Department",       typeof(string));
+        dt.Columns.Add("Season",           typeof(string));
+        dt.Columns.Add("Style",            typeof(string));
+        dt.Columns.Add("Size",             typeof(string));
+        dt.Columns.Add("SalesPrice",       typeof(decimal));
+        dt.Columns.Add("ResultType",       typeof(string));
+        dt.Columns.Add("FinalResult",      typeof(string));
         dt.Columns.Add("Remarks",          typeof(string));
         dt.Columns.Add("OTS",              typeof(double));
 
@@ -744,11 +899,22 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         {
             dt.Rows.Add(
                 batchNo,
-                r.Contno, r.Country, trnDate, time1, r.ItemCode, r.ItemCode, r.VolumeGroup,
-                r.AllocQty, r.AllocQty, 0, r.StoreID, r.Contno,
-                (object?)r.ItemName ?? DBNull.Value, genCountry,
+                r.Contno, r.Country, trnDate, time1, r.ItemCode, r.ItemCode,
+                r.ItemCode,                                  // Barcode = ItemCode
+                r.VolumeGroup,
+                r.AllocQty, r.AllocQty, r.PrevAllocatedQty, 0,
+                r.StoreID, r.Contno,
+                (object?)r.ItemName ?? DBNull.Value,
+                (object?)r.Division ?? DBNull.Value,         // BuildingCategory = Division
                 (object?)r.LPMDt ?? DBNull.Value, r.OraPONo,
                 (object?)r.Division ?? DBNull.Value,
+                (object?)r.Department ?? DBNull.Value,
+                (object?)r.Season ?? DBNull.Value,
+                (object?)r.Style ?? DBNull.Value,
+                (object?)r.Size ?? DBNull.Value,
+                (object?)r.SalesPrice ?? DBNull.Value,
+                (object?)r.PalletType ?? DBNull.Value,        // ResultType
+                (object?)r.PalletType ?? DBNull.Value,        // FinalResult mirrors ResultType
                 (object?)(r.RoundRobinExtra > 0 ? $"RR+{r.RoundRobinExtra}" : null) ?? DBNull.Value,
                 (object?)r.OTS ?? DBNull.Value);
         }
