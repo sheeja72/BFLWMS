@@ -10,11 +10,11 @@
 # approving review from the other team member.
 
 # SQL schema needs an extra eye since it hits shared on-prem DBs
-/db/                                    @sheeja72 @rijubfl
+/db/                                    @sheeja72
 
 # Auth + Program.cs changes need careful review — can break login for everyone
-/src/Wms.Web/Auth/                    @sheeja72 @rijubfl
-/src/Wms.Web/Program.cs               @sheeja72 @rijubfl
+/src/Wms.Web/Auth/                    @sheeja72
+/src/Wms.Web/Program.cs               @sheeja72
 
 # CI / deploy workflows — controls what ships to production
-/.github/workflows/                     @sheeja72 @rijubfl
+/.github/workflows/                     @sheeja72
