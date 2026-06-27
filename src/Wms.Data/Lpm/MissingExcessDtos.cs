@@ -42,6 +42,8 @@ public record BoxSummaryMonthRow(string Month, int BoxCount, int MissQty, int Ex
 /// <summary>Item Summary aggregated by (Division, Department).</summary>
 public record ItemSummaryByDivDeptRow(string? Division, string? Department, int MissingQty, int ExcessQty, int HOStock);
 
-/// <summary>Box Detail row with a Type label ("Missing" or "Excess") so the
-/// combined export distinguishes which side the row came from.</summary>
-public record BoxDetailCombinedRow(string Type, string? BoxNo, string? PreparedBy, string? ItemCode, int Qty, int QtyIssued, int Diff);
+/// <summary>Box Detail row with Missing + Excess as separate columns so each
+/// item appears once with both contributions.
+/// Missing = qty − QtyIssued when Status='' and QtyIssued &lt; qty.
+/// Excess  = QtyIssued when Status&lt;&gt;'' (issued qty IS the excess).</summary>
+public record BoxDetailCombinedRow(string? BoxNo, string? PreparedBy, string? ItemCode, int Qty, int QtyIssued, int MissingQty, int ExcessQty);

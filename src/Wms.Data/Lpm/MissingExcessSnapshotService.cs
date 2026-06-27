@@ -156,20 +156,20 @@ public class MissingExcessSnapshotService(IOnPremConnectionResolver resolver, IC
               FROM #BadBoxes
              GROUP BY BoxNo, ClosedDt, ClosedBy;
 
-            -- Result 2: Box Detail combined (Missing + Excess)
-            SELECT 'Missing' AS [Type], b.ClosedDt,
+            -- Result 2: Box Detail — one row per (box, item) with Missing + Excess as columns.
+            -- Missing fires only when Status='' and QtyIssued < qty. Excess = QtyIssued
+            -- when Status<>'' (the issued qty IS the excess per the user spec).
+            SELECT b.ClosedDt,
                    d.BoxNo, d.preparedby AS PreparedBy, d.itemcode AS ItemCode,
-                   d.qty AS Qty, d.QtyIssued AS QtyIssued, (d.qty - d.QtyIssued) AS Diff
+                   d.qty AS Qty, d.QtyIssued AS QtyIssued,
+                   CASE WHEN ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty
+                        THEN (d.qty - d.QtyIssued) ELSE 0 END AS MissingQty,
+                   CASE WHEN ISNULL(d.Status,'') <> ''
+                        THEN d.QtyIssued          ELSE 0 END AS ExcessQty
               FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
               INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
-             WHERE d.QtyIssued < d.qty AND ISNULL(d.Status,'') = ''
-            UNION ALL
-            SELECT 'Excess' AS [Type], b.ClosedDt,
-                   d.BoxNo, d.preparedby AS PreparedBy, d.itemcode AS ItemCode,
-                   d.qty AS Qty, d.QtyIssued AS QtyIssued, (d.qty - d.QtyIssued) AS Diff
-              FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
-              INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
-             WHERE ISNULL(d.Status,'') <> '';
+             WHERE (ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty)
+                OR (ISNULL(d.Status,'') <> '' AND d.QtyIssued > 0);
 
             -- Result 3: Item Summary per item, with current HOStock
             ;WITH base AS (
@@ -177,7 +177,7 @@ public class MissingExcessSnapshotService(IOnPremConnectionResolver resolver, IC
                        CASE WHEN ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty
                             THEN (d.qty - d.QtyIssued) ELSE 0 END AS MissingQty,
                        CASE WHEN ISNULL(d.Status,'') <> ''
-                            THEN (d.qty - d.QtyIssued) ELSE 0 END AS ExcessQty
+                            THEN d.QtyIssued          ELSE 0 END AS ExcessQty
                   FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
                   INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
             ), agg AS (
@@ -236,9 +236,9 @@ public class MissingExcessSnapshotService(IOnPremConnectionResolver resolver, IC
             foreach (var r in boxDetail)
             {
                 await dst.ExecuteAsync(new CommandDefinition(@"
-                    INSERT INTO dbo.WmsRptMissingExcess_BoxDetail (Country, [Type], ClosedDt, BoxNo, PreparedBy, ItemCode, Qty, QtyIssued, Diff)
-                    VALUES (@c, @t, @d, @b, @p, @i, @q, @qi, @df);",
-                    new { c = country, t = r.Type, d = r.ClosedDt ?? d, b = r.BoxNo, p = r.PreparedBy, i = r.ItemCode, q = r.Qty, qi = r.QtyIssued, df = r.Diff },
+                    INSERT INTO dbo.WmsRptMissingExcess_BoxDetail (Country, ClosedDt, BoxNo, PreparedBy, ItemCode, Qty, QtyIssued, MissingQty, ExcessQty)
+                    VALUES (@c, @d, @b, @p, @i, @q, @qi, @m, @x);",
+                    new { c = country, d = r.ClosedDt ?? d, b = r.BoxNo, p = r.PreparedBy, i = r.ItemCode, q = r.Qty, qi = r.QtyIssued, m = r.MissingQty, x = r.ExcessQty },
                     transaction: tx, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
             }
             foreach (var r in itemSummary)
@@ -274,5 +274,5 @@ public class MissingExcessSnapshotService(IOnPremConnectionResolver resolver, IC
 
     /// <summary>Day in the BoxDetailCombined result set carries a ClosedDt the
     /// service maps back into the snapshot row.</summary>
-    internal record BoxDetailCombinedDayRow(string Type, DateTime? ClosedDt, string? BoxNo, string? PreparedBy, string? ItemCode, int Qty, int QtyIssued, int Diff);
+    internal record BoxDetailCombinedDayRow(DateTime? ClosedDt, string? BoxNo, string? PreparedBy, string? ItemCode, int Qty, int QtyIssued, int MissingQty, int ExcessQty);
 }

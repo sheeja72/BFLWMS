@@ -82,7 +82,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
     {
         await using var c = OpenWms();
         var rows = await c.QueryAsync<BoxDetailCombinedRow>(new CommandDefinition(@"
-            SELECT [Type], BoxNo, PreparedBy, ItemCode, Qty, QtyIssued, Diff
+            SELECT BoxNo, PreparedBy, ItemCode, Qty, QtyIssued, MissingQty, ExcessQty
               FROM dbo.WmsRptMissingExcess_BoxDetail
              WHERE Country = @c AND ClosedDt BETWEEN @from AND @to
              ORDER BY BoxNo, ItemCode",
@@ -214,20 +214,17 @@ public class ReportsService(IOnPremConnectionResolver resolver)
     {
         await using var c = OpenCountry(country);
         var rows = await c.QueryAsync<BoxDetailCombinedRow>(new CommandDefinition(BadBoxesPrefix + @"
-            SELECT 'Missing' AS [Type],
-                   d.BoxNo, d.preparedby AS PreparedBy, d.itemcode AS ItemCode,
-                   d.qty AS Qty, d.QtyIssued AS QtyIssued, (d.qty - d.QtyIssued) AS Diff
+            SELECT d.BoxNo, d.preparedby AS PreparedBy, d.itemcode AS ItemCode,
+                   d.qty AS Qty, d.QtyIssued AS QtyIssued,
+                   CASE WHEN ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty
+                        THEN (d.qty - d.QtyIssued) ELSE 0 END AS MissingQty,
+                   CASE WHEN ISNULL(d.Status,'') <> ''
+                        THEN d.QtyIssued          ELSE 0 END AS ExcessQty
               FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
               INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
-             WHERE d.QtyIssued < d.qty AND ISNULL(d.Status,'') = ''
-            UNION ALL
-            SELECT 'Excess' AS [Type],
-                   d.BoxNo, d.preparedby AS PreparedBy, d.itemcode AS ItemCode,
-                   d.qty AS Qty, d.QtyIssued AS QtyIssued, (d.qty - d.QtyIssued) AS Diff
-              FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
-              INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
-             WHERE ISNULL(d.Status,'') <> ''
-             ORDER BY BoxNo, ItemCode",
+             WHERE (ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty)
+                OR (ISNULL(d.Status,'') <> '' AND d.QtyIssued > 0)
+             ORDER BY d.BoxNo, d.itemcode",
             new { from = fromDt, to = toDt }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
@@ -242,7 +239,7 @@ public class ReportsService(IOnPremConnectionResolver resolver)
                        CASE WHEN ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty
                             THEN (d.qty - d.QtyIssued) ELSE 0 END AS MissingQty,
                        CASE WHEN ISNULL(d.Status,'') <> ''
-                            THEN (d.qty - d.QtyIssued) ELSE 0 END AS ExcessQty
+                            THEN d.QtyIssued          ELSE 0 END AS ExcessQty
                   FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
                   INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
             ), agg AS (
@@ -499,89 +496,31 @@ DROP TABLE #Scans, #BatchKind, #ItemDiv;";
         string palletCategory, IEnumerable<string>? onlyCountries = null, CancellationToken ct = default)
     {
         var pc = string.IsNullOrWhiteSpace(palletCategory) ? "ELIGIBLE" : palletCategory.Trim();
-        await using var conn = OpenOnPremBackup();
+        var only = onlyCountries?.Where(s => !string.IsNullOrWhiteSpace(s))
+                                  .Select(s => s.Trim()).ToArray();
+        var hasCountryFilter = only is { Length: > 0 };
 
-        // 1) item → division map ONCE (global master tables)
-        await using (var ddl = conn.CreateCommand())
-        {
-            ddl.CommandText = @"
-                IF OBJECT_ID('tempdb..#LpmItemDiv') IS NOT NULL DROP TABLE #LpmItemDiv;
-                SELECT u.itemcode, Division = MIN(sm.Division)
-                  INTO #LpmItemDiv
-                  FROM Datareporting.dbo.upc_subclass    u
-                  INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
-                 WHERE u.itemcode IS NOT NULL AND u.itemcode <> ''
-                 GROUP BY u.itemcode;
-                CREATE CLUSTERED INDEX IX_LpmItemDiv ON #LpmItemDiv (itemcode);";
-            ddl.CommandTimeout = 120;
-            await ddl.ExecuteNonQueryAsync(ct);
-        }
-
-        // 2) Which SIM countries to process?
-        var countries = new List<string>();
-        await using (var cc = conn.CreateCommand())
-        {
-            cc.CommandText = @"
-                SELECT DISTINCT SIMCountry
-                  FROM bfldata.dbo.DataSettings
-                 WHERE SIMCountry IS NOT NULL AND LTRIM(RTRIM(SIMCountry)) <> ''
-                 ORDER BY SIMCountry;";
-            cc.CommandTimeout = 60;
-            await using var rdr = await cc.ExecuteReaderAsync(ct);
-            var only = onlyCountries?.Where(s => !string.IsNullOrWhiteSpace(s))
-                                     .Select(s => s.Trim())
-                                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            while (await rdr.ReadAsync(ct))
-            {
-                var ctry = rdr.GetString(0);
-                if (only is null || only.Count == 0 || only.Contains(ctry.Trim()))
-                    countries.Add(ctry);
-            }
-        }
-
-        // 3) per-country aggregation to (Division, Season, Year, Month)
-        var rows = new List<LpmWhStockCell>();
-        foreach (var country in countries)
-        {
-            string whSrc;
-            try { whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct); }
-            catch { continue; }
-
-            try
-            {
-                await using var cmd = conn.CreateCommand();
-                cmd.CommandText = $@"
-                    SELECT Division = ISNULL(id.Division, '(no division)'),
-                           Season   = CASE WHEN UPPER(ISNULL(w.Season,'')) = 'W' THEN 'Winter' ELSE 'Summer' END,
-                           Yr       = YEAR(w.LPMDt),
-                           Mo       = MONTH(w.LPMDt),
-                           Qty      = SUM(CAST(ISNULL(w.Qty,0) AS bigint))
-                      FROM {whSrc} w
-                      LEFT JOIN #LpmItemDiv id ON id.itemcode = w.ItemCode
-                     WHERE w.LPMDt IS NOT NULL
-                       AND ISNULL(w.ShopEligible,'') <> 'E'
-                       AND UPPER(ISNULL(w.PalletCategory,'')) = UPPER(@pc)
-                     GROUP BY ISNULL(id.Division, '(no division)'),
-                              CASE WHEN UPPER(ISNULL(w.Season,'')) = 'W' THEN 'Winter' ELSE 'Summer' END,
-                              YEAR(w.LPMDt), MONTH(w.LPMDt)
-                    HAVING SUM(CAST(ISNULL(w.Qty,0) AS bigint)) <> 0;";
-                cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@pc", pc));
-                cmd.CommandTimeout = 300;
-                await using var rdr = await cmd.ExecuteReaderAsync(ct);
-                while (await rdr.ReadAsync(ct))
-                {
-                    rows.Add(new LpmWhStockCell(
-                        Country:  country,
-                        Division: rdr.IsDBNull(0) ? "" : rdr.GetString(0),
-                        Season:   rdr.IsDBNull(1) ? "" : rdr.GetString(1),
-                        Year:     rdr.IsDBNull(2) ? 0  : rdr.GetInt32(2),
-                        Month:    rdr.IsDBNull(3) ? 0  : rdr.GetInt32(3),
-                        Qty:      rdr.IsDBNull(4) ? 0L : rdr.GetInt64(4)));
-                }
-            }
-            catch { /* one country unreadable — skip */ }
-        }
-        return rows;
+        // Single read from the pre-aggregated snapshot. Snapshot is keyed on
+        // (PalletCategory, Country, Division, Brand, Season, Year1, Month1) — the
+        // report shape doesn't include Brand so we SUM(Qty) across brands.
+        await using var c = OpenOnPremBackup();
+        var rows = await c.QueryAsync<LpmWhStockCell>(new CommandDefinition(@"
+            SELECT Country,
+                   Division,
+                   Season,
+                   Year1  AS [Year],
+                   Month1 AS [Month],
+                   SUM(CAST(ISNULL(Qty, 0) AS bigint)) AS Qty
+              FROM dbo.LPM_WhStockSnapshot WITH (NOLOCK)
+             WHERE PalletCategory = @pc
+               AND (@noCountryFilter = 1 OR Country IN @countries)
+             GROUP BY Country, Division, Season, Year1, Month1
+            HAVING SUM(CAST(ISNULL(Qty, 0) AS bigint)) <> 0",
+            new { pc,
+                  noCountryFilter = hasCountryFilter ? 0 : 1,
+                  countries = only ?? Array.Empty<string>() },
+            commandTimeout: 60, cancellationToken: ct));
+        return rows.AsList();
     }
 
     // ===================== Non-LPM WH Stock report (ported from LPMSIM) =====================
@@ -665,7 +604,7 @@ DROP TABLE #Scans, #BatchKind, #ItemDiv;";
                        CASE WHEN ISNULL(d.Status,'') = '' AND d.QtyIssued < d.qty
                             THEN (d.qty - d.QtyIssued) ELSE 0 END AS MissingQty,
                        CASE WHEN ISNULL(d.Status,'') <> ''
-                            THEN (d.qty - d.QtyIssued) ELSE 0 END AS ExcessQty
+                            THEN d.QtyIssued          ELSE 0 END AS ExcessQty
                   FROM usa.dbo.vUPCBoxDet d WITH (NOLOCK)
                   INNER JOIN #BadBoxes b ON b.BoxNo = d.BoxNo
             ), agg AS (
