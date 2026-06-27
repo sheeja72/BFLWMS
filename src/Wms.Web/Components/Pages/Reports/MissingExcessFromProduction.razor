@@ -250,9 +250,9 @@ else if (_loaded && _view == "ItemSummary")
         {
             var rows = await Svc.BoxDetailCombinedFromSnapshotAsync(_country, _fromDt, _toDt);
             var sb = new StringBuilder();
-            sb.AppendLine("Type,BoxNo,PreparedBy,ItemCode,Qty,QtyIssued,Diff");
+            sb.AppendLine("BoxNo,PreparedBy,ItemCode,Qty,QtyIssued,Missing,Excess");
             foreach (var r in rows)
-                sb.AppendLine($"{r.Type},{Csv(r.BoxNo)},{Csv(r.PreparedBy)},{Csv(r.ItemCode)},{r.Qty},{r.QtyIssued},{r.Diff}");
+                sb.AppendLine($"{Csv(r.BoxNo)},{Csv(r.PreparedBy)},{Csv(r.ItemCode)},{r.Qty},{r.QtyIssued},{r.MissingQty},{r.ExcessQty}");
             await DownloadCsv(sb.ToString(), "BoxDetail");
             ShowInfo($"Exported {rows.Count} rows.");
         }
