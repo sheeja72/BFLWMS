@@ -503,7 +503,7 @@
             {
                 _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
                 await InvokeAsync(StateHasChanged);
-                await Svc.SaveFinalDirectAsync(_country, _contno, _allocation, ro, _blocked, progress);
+                await Svc.SaveFinalDirectAsync(_country, _contno, _country, _warehouse, _allocation, ro, _blocked, progress);
                 await RefreshStatusAsync();
                 _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
                 ShowInfo($"Allocation computed and saved ({_runOption}): {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs, {_blocked.Count} blocked.");
@@ -524,7 +524,7 @@
         _busy = true; _message = ""; await InvokeAsync(StateHasChanged);
         try
         {
-            var n = await Svc.ResetFinalAsync(_contno, ro);
+            var n = await Svc.ResetFinalAsync(_country, _contno, ro);
             _allocation = new();
             _blocked = new();
             _totalPoQty = 0;
