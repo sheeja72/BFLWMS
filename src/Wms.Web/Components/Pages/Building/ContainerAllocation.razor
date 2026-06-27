@@ -46,6 +46,30 @@
         <button class="aiwms-btn aiwms-btn-secondary" @onclick="LoadPoDataAsync" disabled="@(_busy || !CanLoad)">Load PO Data</button>
         <button class="aiwms-btn aiwms-btn-primary" @onclick="ProcessAsync" disabled="@(_busy || !CanProcess)">Process</button>
     </div>
+
+    <!-- Row 2: Allocation Countries (multi-select) + Processed Contnos dropdown -->
+    <div style="display:grid; grid-template-columns: 2fr 1fr 200px; gap:12px; align-items:end; margin-top:12px">
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">ALLOCATION COUNTRIES *</label>
+            <MudSelect T="string" Dense="true" MultiSelection="true" SelectAll="true"
+                       SelectedValues="_allocCountries"
+                       SelectedValuesChanged="@(v => _allocCountries = v.ToHashSet())"
+                       Placeholder="Pick one or more SIM countries"
+                       Variant="Variant.Outlined" Margin="Margin.Dense">
+                @foreach (var sc in _simCountries) { <MudSelectItem T="string" Value="@sc">@sc</MudSelectItem> }
+            </MudSelect>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">PROCESSED CONTNOS</label>
+            <select @bind="_selectedProcessedContno" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-mono); font-size:13px; background:white;">
+                <option value="">-- Select a processed contno --</option>
+                @foreach (var p in _processedContnos) { <option value="@p">@p</option> }
+            </select>
+        </div>
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="LoadProcessedDataAsync"
+                disabled="@(_busy || string.IsNullOrWhiteSpace(_selectedProcessedContno))">Load Processed Data</button>
+    </div>
+
     <div style="display:flex; gap:12px; margin-top:12px; flex-wrap:wrap; align-items:center">
         <label style="display:flex; align-items:center; gap:6px; font-size:12px; cursor:pointer">
             <input type="checkbox" @bind="_validate" /> Validate before Process
@@ -78,6 +102,22 @@
     @if (!string.IsNullOrEmpty(_message))
     {
         <div class="aiwms-alert @(_messageIsError ? "error" : "info")" style="margin-top:12px">@_message</div>
+    }
+
+    @if (_loadedBatch is not null)
+    {
+        <div style="margin-top:12px; padding:10px 14px; background:#eef6ff; border:1px solid #b9d7ff; border-radius:var(--r-sm); font-size:13px">
+            <strong>Loaded Batch #@_loadedBatch.BatchNo</strong>
+            — @_loadedBatch.ContNo
+            <span style="color:var(--text-secondary)">(@_loadedBatch.Country)</span>
+            — @_loadedBatch.RunOption
+            — by @(_loadedBatch.ProcessedBy ?? "?")
+            @_loadedBatch.ProcessedTS.ToString("yyyy-MM-dd HH:mm")
+            @if (_loadedBatch.ApprovedDt is not null)
+            {
+                <span style="margin-left:10px; padding:2px 8px; background:#dcfce7; color:#166534; border-radius:var(--r-pill); font-weight:700">APPROVED</span>
+            }
+        </div>
     }
 </div>
 
@@ -239,6 +279,7 @@
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("SkuMax")'>SKUMax @SortArrow("SkuMax")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("AllocQty")'>Alloc Qty @SortArrow("AllocQty")</th>
                         <th style="text-align:right">RR Extra</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("LPMDt")'>LPM Dt @SortArrow("LPMDt")</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -253,10 +294,19 @@
                             <td style="text-align:right">@r.SkuMax</td>
                             <td style="text-align:right">@r.AllocQty</td>
                             <td style="text-align:right">@(r.RoundRobinExtra > 0 ? r.RoundRobinExtra.ToString() : "")</td>
+                            <td>@r.LPMDt?.ToString("yyyy-MM-dd")</td>
                         </tr>
                     }
                 </tbody>
             </table>
+            <!-- Pagination controls for the Item x Store view (CSV exports the full sorted result, not just this page). -->
+            <div style="display:flex; gap:10px; align-items:center; justify-content:flex-end; padding:8px 0; font-size:12px; color:var(--text-secondary)">
+                <span>Showing page @_page of @TotalPages — @_filteredCount total rows</span>
+                <button class="aiwms-btn aiwms-btn-secondary" style="font-size:11px; padding:4px 10px"
+                        @onclick="PrevPage" disabled="@(_page <= 1)">‹ Prev</button>
+                <button class="aiwms-btn aiwms-btn-secondary" style="font-size:11px; padding:4px 10px"
+                        @onclick="NextPage" disabled="@(_page >= TotalPages)">Next ›</button>
+            </div>
         }
         else if (_view == "ItemSummary")
         {
@@ -271,6 +321,7 @@
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("PoQty")'>PO Qty @SortArrow("PoQty")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("TotalAlloc")'>Total Alloc @SortArrow("TotalAlloc")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("Stores")'>Stores @SortArrow("Stores")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("LPMDt")'>LPM Dt @SortArrow("LPMDt")</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -281,6 +332,7 @@
                             <td style="text-align:right">@g.PoQty</td>
                             <td style="text-align:right">@g.TotalAlloc</td>
                             <td style="text-align:right">@g.Stores</td>
+                            <td>@g.LPMDt?.ToString("yyyy-MM-dd")</td>
                         </tr>
                     }
                 </tbody>
@@ -300,6 +352,7 @@
                         <th style="cursor:pointer" @onclick='() => Sort("Brand")'>Brand @SortArrow("Brand")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("PoQtySum")'>PO Qty (sum) @SortArrow("PoQtySum")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("AllocSum")'>Allocated Qty @SortArrow("AllocSum")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("LPMDt")'>LPM Dt @SortArrow("LPMDt")</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -310,6 +363,7 @@
                             <td style="text-align:right">@g.MerchNeedMonth</td><td>@g.Division</td><td>@g.Brand</td>
                             <td style="text-align:right">@g.PoQtySum</td>
                             <td style="text-align:right">@g.AllocSum</td>
+                            <td>@g.LPMDt?.ToString("yyyy-MM-dd")</td>
                         </tr>
                     }
                 </tbody>
@@ -326,6 +380,7 @@
                         <th style="cursor:pointer" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("PoQty")'>PO Qty @SortArrow("PoQty")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("AllocQty")'>Allocated Qty @SortArrow("AllocQty")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("LPMDt")'>LPM Dt @SortArrow("LPMDt")</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -338,6 +393,7 @@
                             <td>@g.Division</td>
                             <td style="text-align:right">@g.PoQty</td>
                             <td style="text-align:right">@g.AllocQty</td>
+                            <td>@g.LPMDt?.ToString("yyyy-MM-dd")</td>
                         </tr>
                     }
                 </tbody>
@@ -388,6 +444,13 @@
     private int _progressCurrent, _progressTotal;
     private string? _progressItem;
 
+    // P2: Allocation Countries (multi) + Processed Contnos dropdown + loaded batch banner.
+    private List<string> _simCountries = new();
+    private HashSet<string> _allocCountries = new();
+    private List<string> _processedContnos = new();
+    private string _selectedProcessedContno = "";
+    private BatchInfo? _loadedBatch;
+
     private string _view = "Store";  // Store summary loads fastest — no per-item rows
     private string? _sortKey;
     private bool _sortAsc = true;
@@ -409,6 +472,9 @@
         try { _countries = await Svc.GetCountriesAsync(); }
         catch (Exception ex) { ShowError($"Failed to load countries: {ex.Message}"); }
 
+        try { _simCountries = await Svc.GetSimCountriesAsync(); }
+        catch { _simCountries = new(); }
+
         // Default Country + Warehouse from the logged-in user's WmsUser row.
         await CurrentUser.EnsureLoadedAsync();
         if (!string.IsNullOrWhiteSpace(CurrentUser.Country) && _countries.Contains(CurrentUser.Country!))
@@ -419,6 +485,12 @@
             if (!string.IsNullOrWhiteSpace(CurrentUser.Warehouse) && _warehouses.Contains(CurrentUser.Warehouse!))
                 _warehouse = CurrentUser.Warehouse!;
         }
+
+        // Default Allocation Countries to user's SIM country (single-pick); user can add more.
+        if (!string.IsNullOrWhiteSpace(CurrentUser.Country) && _simCountries.Contains(CurrentUser.Country!))
+            _allocCountries = new HashSet<string> { CurrentUser.Country! };
+
+        await RefreshProcessedContnosAsync();
     }
 
     private async Task OnCountryChangedAsync()
@@ -428,6 +500,32 @@
         try { _warehouses = await Svc.GetWarehousesAsync(_country); }
         catch (Exception ex) { ShowError($"Failed to load warehouses: {ex.Message}"); }
         await RefreshStatusAsync();
+        await RefreshProcessedContnosAsync();
+    }
+
+    private async Task RefreshProcessedContnosAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_country)) { _processedContnos = new(); return; }
+        try { _processedContnos = await Svc.GetProcessedContnosAsync(_country); }
+        catch { _processedContnos = new(); }
+    }
+
+    private async Task LoadProcessedDataAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_country) || string.IsNullOrWhiteSpace(_selectedProcessedContno)) return;
+        _busy = true; _message = ""; _allocation = new(); _blocked = new(); _loadedBatch = null;
+        try
+        {
+            var info = await Svc.GetLatestBatchInfoAsync(_country, _selectedProcessedContno);
+            if (info is null) { ShowError($"No batch found for {_selectedProcessedContno} in {_country}."); return; }
+            _loadedBatch = info;
+            _allocation = await Svc.LoadFinalByBatchAsync(info.BatchNo);
+            _blocked    = await Svc.LoadBlockedByBatchAsync(info.BatchNo);
+            _totalPoQty = info.TotalQty ?? 0;
+            ShowInfo($"Loaded Batch #{info.BatchNo} — {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs, {_blocked.Count} blocked.");
+        }
+        catch (Exception ex) { ShowError($"Load failed: {ex.Message}"); }
+        finally { _busy = false; }
     }
 
     private async Task OnContnoChangedAsync()
@@ -447,7 +545,7 @@
 
     private async Task LoadPoDataAsync()
     {
-        _busy = true; _message = ""; _validation = null; _allocation = new(); _blocked = new();
+        _busy = true; _message = ""; _validation = null; _allocation = new(); _blocked = new(); _loadedBatch = null;
         try
         {
             _poData = await Svc.LoadPoDataAsync(_contno);
@@ -460,7 +558,12 @@
 
     private async Task ProcessAsync()
     {
-        _busy = true; _message = ""; _allocation = new(); _blocked = new();
+        if (_allocCountries.Count == 0)
+        {
+            ShowError("Pick at least one Allocation Country before Process.");
+            return;
+        }
+        _busy = true; _message = ""; _allocation = new(); _blocked = new(); _loadedBatch = null;
         _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
         try
         {
@@ -492,7 +595,8 @@
                 _validation = null;
             }
             _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
-            var procResult = await Svc.ProcessAllocationAsync(_contno, progress, ro);
+            var allocCsv = string.Join(",", _allocCountries);
+            var procResult = await Svc.ProcessAllocationAsync(_contno, progress, ro, _allocCountries);
             _allocation = procResult.Allocations;
             _blocked    = procResult.Blocked;
             if (_allocation.Count == 0 && _blocked.Count == 0)
@@ -503,8 +607,9 @@
             {
                 _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
                 await InvokeAsync(StateHasChanged);
-                await Svc.SaveFinalDirectAsync(_country, _contno, _country, _warehouse, _allocation, ro, _blocked, progress);
+                await Svc.SaveFinalDirectAsync(_country, _contno, allocCsv, _warehouse, _allocation, ro, _blocked, progress);
                 await RefreshStatusAsync();
+                await RefreshProcessedContnosAsync();
                 _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
                 ShowInfo($"Allocation computed and saved ({_runOption}): {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs, {_blocked.Count} blocked.");
             }
@@ -527,8 +632,10 @@
             var n = await Svc.ResetFinalAsync(_country, _contno, ro);
             _allocation = new();
             _blocked = new();
+            _loadedBatch = null;
             _totalPoQty = 0;
             await RefreshStatusAsync();
+            await RefreshProcessedContnosAsync();
             ShowInfo($"Deleted {n} {_runOption} rows for {_contno}.");
         }
         catch (Exception ex) { ShowError($"Delete failed: {ex.Message}"); }
@@ -549,7 +656,8 @@
     {
         var sb = new StringBuilder();
         sb.AppendLine("Contno,OraPONo,ItemCode,ItemName,Brand,PoQty,StoreID,StoreName,Country,Division,VolumeGroup,OTS,SkuMax,AllocQty,RoundRobinExtra,MerchNeedMonth,LPM,LPMDt");
-        foreach (var r in Filtered)
+        // Export the entire sorted result, not just the current page.
+        foreach (var r in FilteredSorted)
         {
             sb.Append(Csv(r.Contno)).Append(',').Append(Csv(r.OraPONo)).Append(',').Append(Csv(r.ItemCode)).Append(',')
               .Append(Csv(r.ItemName)).Append(',').Append(Csv(r.Brand)).Append(',').Append(r.PoQty).Append(',')
@@ -585,9 +693,11 @@
     private static string Csv(string? s) => s is null ? ""
         : (s.Contains(',') || s.Contains('"') || s.Contains('\n')) ? "\"" + s.Replace("\"", "\"\"") + "\"" : s;
 
-    // --- Filtering + sorting ---
-    private const int MAX_RENDER_ROWS = 1000;
+    // --- Filtering + sorting + pagination ---
+    private const int PAGE_SIZE = 100;
     private int _filteredCount;
+    private int _page = 1;
+    private int TotalPages => Math.Max(1, (int)Math.Ceiling((double)_filteredCount / PAGE_SIZE));
 
     // No cap, no sort — used by grouped views (Item Summary, Store, Country Summary)
     // and as the base for the capped+sorted ItemStore `Filtered`.
@@ -605,7 +715,8 @@
         }
     }
 
-    private IEnumerable<AllocationRow> Filtered
+    // Sorted full list (used by CSV export so user gets every row).
+    private List<AllocationRow> FilteredSorted
     {
         get
         {
@@ -627,20 +738,33 @@
                     "OTS" => r => r.OTS,
                     "SkuMax" => r => r.SkuMax,
                     "AllocQty" => r => r.AllocQty,
+                    "LPMDt" => r => r.LPMDt,
                     _ => r => r.OraPONo,
                 };
                 q = _sortAsc ? q.OrderBy(k) : q.OrderByDescending(k);
             }
-            var list = q.ToList();
+            return q.ToList();
+        }
+    }
+
+    // Current page slice (used by table rendering).
+    private IEnumerable<AllocationRow> Filtered
+    {
+        get
+        {
+            var list = FilteredSorted;
             _filteredCount = list.Count;
-            return list;
+            if (_page > TotalPages) _page = TotalPages;
+            if (_page < 1) _page = 1;
+            return list.Skip((_page - 1) * PAGE_SIZE).Take(PAGE_SIZE);
         }
     }
 
     // --- Grouped view row types + getters (sorted by _sortKey if applicable) ---
-    private record ItemSummaryRowVm(string OraPONo, string ItemCode, string? ItemName, string? Brand, string? Division, int PoQty, int TotalAlloc, int Stores);
-    private record StoreRowVm(string StoreID, string? StoreName, string Country, string VolumeGroup, int MerchNeedMonth, string? Division, string Brand, int PoQtySum, int AllocSum);
-    private record CountrySummaryRowVm(string Country, int StoresCount, string OraPONo, string? Division, int PoQty, int AllocQty);
+    // LPMDt on grouped views = earliest LPMDt within the group (Min, ignoring nulls).
+    private record ItemSummaryRowVm(string OraPONo, string ItemCode, string? ItemName, string? Brand, string? Division, int PoQty, int TotalAlloc, int Stores, DateTime? LPMDt);
+    private record StoreRowVm(string StoreID, string? StoreName, string Country, string VolumeGroup, int MerchNeedMonth, string? Division, string Brand, int PoQtySum, int AllocSum, DateTime? LPMDt);
+    private record CountrySummaryRowVm(string Country, int StoresCount, string OraPONo, string? Division, int PoQty, int AllocQty, DateTime? LPMDt);
 
     private IEnumerable<ItemSummaryRowVm> ItemSummaryRows
     {
@@ -650,13 +774,14 @@
                 .GroupBy(r => new { r.OraPONo, r.ItemCode })
                 .Select(g => new ItemSummaryRowVm(g.Key.OraPONo, g.Key.ItemCode,
                     g.First().ItemName, g.First().Brand, g.First().Division,
-                    g.First().PoQty, g.Sum(x => x.AllocQty), g.Count()));
+                    g.First().PoQty, g.Sum(x => x.AllocQty), g.Count(),
+                    g.Where(x => x.LPMDt.HasValue).Min(x => x.LPMDt)));
             if (_sortKey is null)
                 return rows.OrderBy(r => r.OraPONo).ThenBy(r => r.ItemCode);
             Func<ItemSummaryRowVm, object?> k = _sortKey switch {
                 "OraPONo" => r => r.OraPONo, "ItemCode" => r => r.ItemCode, "ItemName" => r => r.ItemName,
                 "Brand" => r => r.Brand, "Division" => r => r.Division, "PoQty" => r => r.PoQty,
-                "TotalAlloc" => r => r.TotalAlloc, "Stores" => r => r.Stores,
+                "TotalAlloc" => r => r.TotalAlloc, "Stores" => r => r.Stores, "LPMDt" => r => r.LPMDt,
                 _ => r => r.OraPONo,
             };
             return _sortAsc ? rows.OrderBy(k) : rows.OrderByDescending(k);
@@ -673,14 +798,15 @@
                     g.Key, g.First().StoreName, g.First().Country, g.First().VolumeGroup,
                     g.First().MerchNeedMonth, g.First().Division,
                     string.Join(", ", g.Select(x => x.Brand).Where(b => b is not null).Distinct()),
-                    g.Sum(x => x.PoQty), g.Sum(x => x.AllocQty)));
+                    g.Sum(x => x.PoQty), g.Sum(x => x.AllocQty),
+                    g.Where(x => x.LPMDt.HasValue).Min(x => x.LPMDt)));
             if (_sortKey is null)
                 return rows.OrderBy(r => r.StoreID);
             Func<StoreRowVm, object?> k = _sortKey switch {
                 "StoreID" => r => r.StoreID, "StoreName" => r => r.StoreName, "Country" => r => r.Country,
                 "VolumeGroup" => r => r.VolumeGroup, "MerchNeedMonth" => r => r.MerchNeedMonth,
                 "Division" => r => r.Division, "Brand" => r => r.Brand,
-                "PoQtySum" => r => r.PoQtySum, "AllocSum" => r => r.AllocSum,
+                "PoQtySum" => r => r.PoQtySum, "AllocSum" => r => r.AllocSum, "LPMDt" => r => r.LPMDt,
                 _ => r => r.StoreID,
             };
             return _sortAsc ? rows.OrderBy(k) : rows.OrderByDescending(k);
@@ -707,13 +833,14 @@
                     // PO Qty per (Country, PO, Division) = sum of distinct PoQty per ItemCode
                     // (raw .Sum multi-counts because each item × store row repeats the same PoQty)
                     g.GroupBy(x => x.ItemCode).Sum(ig => ig.First().PoQty),
-                    g.Sum(x => x.AllocQty)));
+                    g.Sum(x => x.AllocQty),
+                    g.Where(x => x.LPMDt.HasValue).Min(x => x.LPMDt)));
             if (_sortKey is null)
                 return rows.OrderBy(r => r.Country).ThenBy(r => r.OraPONo).ThenBy(r => r.Division);
             Func<CountrySummaryRowVm, object?> k = _sortKey switch {
                 "Country" => r => r.Country, "StoresCount" => r => r.StoresCount,
                 "OraPONo" => r => r.OraPONo, "Division" => r => r.Division,
-                "PoQty" => r => r.PoQty, "AllocQty" => r => r.AllocQty,
+                "PoQty" => r => r.PoQty, "AllocQty" => r => r.AllocQty, "LPMDt" => r => r.LPMDt,
                 _ => r => r.Country,
             };
             return _sortAsc ? rows.OrderBy(k) : rows.OrderByDescending(k);
@@ -724,15 +851,19 @@
     {
         if (_sortKey == key) _sortAsc = !_sortAsc;
         else { _sortKey = key; _sortAsc = true; }
+        _page = 1;
     }
     private string SortArrow(string key) => _sortKey == key ? (_sortAsc ? "▲" : "▼") : "";
 
-    private void SetView(string v) { _view = v; _sortKey = null; _sortAsc = true; }
+    private void SetView(string v) { _view = v; _sortKey = null; _sortAsc = true; _page = 1; }
     private void ClearFilters()
     {
         _filterDivs.Clear(); _filterStores.Clear(); _filterPos.Clear(); _filterItemCode = "";
         _divSearch = ""; _storeSearch = ""; _poSearch = "";
+        _page = 1;
     }
+    private void PrevPage() { if (_page > 1) _page--; }
+    private void NextPage() { if (_page < TotalPages) _page++; }
     private void ShowError(string msg) { _message = msg; _messageIsError = true; }
     private void ShowInfo(string msg)  { _message = msg; _messageIsError = false; }
 }
