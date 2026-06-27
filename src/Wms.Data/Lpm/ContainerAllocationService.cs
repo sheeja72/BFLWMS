@@ -1150,9 +1150,11 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         return list.AsList();
     }
 
-    /// <summary>Latest batch (highest BatchNo) for (GenCountry, ContNo). Used by the
-    /// "Load Processed Data" button to look up which batch to display + the banner info.</summary>
-    public async Task<BatchInfo?> GetLatestBatchInfoAsync(string genCountry, string contno, CancellationToken ct = default)
+    /// <summary>Latest batch (highest BatchNo) for (GenCountry, ContNo). When runOption is
+    /// passed, scopes to that algorithm so the Process / Load flows can pick the right
+    /// Header (a container can have one batch per RunOption).</summary>
+    public async Task<BatchInfo?> GetLatestBatchInfoAsync(string genCountry, string contno,
+        string? runOption = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(genCountry) || string.IsNullOrWhiteSpace(contno)) return null;
         await using var c = OpenOnPremBackup();
@@ -1162,10 +1164,29 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                    RowCount1, TotalQty, ProcessedTS, ProcessedBy, ApprovedDt, ApprovedBy
               FROM LPMSIM.dbo.WMS_Cont_Allocation_Header WITH (NOLOCK)
              WHERE GenCountry = @gc AND ContNo = @c
+               AND (@ro IS NULL OR RunOption = @ro)
              ORDER BY BatchNo DESC",
-            new { gc = genCountry, c = contno },
+            new { gc = genCountry, c = contno, ro = runOption },
             commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return b;
+    }
+
+    /// <summary>P4 Approve. Stamps ApprovedDt = SYSDATETIME() + ApprovedBy = current user
+    /// on the latest Header matching (GenCountry, ContNo, RunOption). Returns true when a
+    /// row was actually updated; false when no matching unapproved batch exists.</summary>
+    public async Task<bool> ApproveAsync(string genCountry, string contno, RunOption runOption, CancellationToken ct = default)
+    {
+        var roTag = runOption.ToString();
+        await using var c = OpenOnPremBackup();
+        var n = await c.ExecuteAsync(new CommandDefinition(@"
+            UPDATE LPMSIM.dbo.WMS_Cont_Allocation_Header
+               SET ApprovedDt = SYSDATETIME(),
+                   ApprovedBy = @u
+             WHERE GenCountry = @gc AND ContNo = @c AND RunOption = @ro
+               AND ApprovedDt IS NULL",
+            new { gc = genCountry, c = contno, ro = roTag, u = user.Name },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return n > 0;
     }
 
     /// <summary>Load detail rows for a specific BatchNo. Used by the "Load Processed Data" path.
