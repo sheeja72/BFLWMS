@@ -882,6 +882,8 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         dt.Columns.Add("LPMDt",            typeof(DateTime));
         dt.Columns.Add("ORAPONo",          typeof(string));
         dt.Columns.Add("Division",         typeof(string));
+        dt.Columns.Add("Brand",            typeof(string));
+        dt.Columns.Add("DivCode",          typeof(int));
         dt.Columns.Add("Department",       typeof(string));
         dt.Columns.Add("Season",           typeof(string));
         dt.Columns.Add("Style",            typeof(string));
@@ -909,6 +911,8 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 (object?)r.Division ?? DBNull.Value,         // BuildingCategory = Division
                 (object?)r.LPMDt ?? DBNull.Value, r.OraPONo,
                 (object?)r.Division ?? DBNull.Value,
+                (object?)r.Brand ?? DBNull.Value,
+                r.DivCode,
                 (object?)r.Department ?? DBNull.Value,
                 (object?)r.Season ?? DBNull.Value,
                 (object?)r.Style ?? DBNull.Value,
@@ -1125,13 +1129,16 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     }
 
     // ===================== P2: SIM countries (allocation destinations) =====================
+    // Excludes 'Ex2Locations' — not a real allocation destination, per user request.
     public async Task<List<string>> GetSimCountriesAsync(CancellationToken ct = default)
     {
         await using var c = OpenOnPremBackup();
         var list = await c.QueryAsync<string>(new CommandDefinition(
             @"SELECT DISTINCT SIMCountry
                 FROM bfldata.dbo.DataSettings WITH (NOLOCK)
-               WHERE SIMCountry IS NOT NULL AND LTRIM(RTRIM(SIMCountry)) <> ''
+               WHERE SIMCountry IS NOT NULL
+                 AND LTRIM(RTRIM(SIMCountry)) <> ''
+                 AND SIMCountry <> 'Ex2Locations'
                ORDER BY SIMCountry",
             cancellationToken: ct));
         return list.AsList();
@@ -1223,10 +1230,10 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     private async Task<List<AllocationRow>> LoadAllocationDetailAsync(
         SqlConnection c, string joinAndWhereSql, object filterParams, CancellationToken ct)
     {
-        var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName,
-                                       int? Qty, int? SkuMax, string? StoreID, string? Country, string? GroupCode, string? Division,
+        var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName, string? Brand,
+                                       int? Qty, int? SkuMax, int? DivCode, string? StoreID, string? Country, string? GroupCode, string? Division,
                                        string? Remarks, DateTime? LPMDt, double? OTS)>(new CommandDefinition($@"
-            SELECT d.ContNo, d.ORAPONo, d.Itemcode, d.Itemname, d.Qty, d.SkuMax, d.StoreID, d.Country,
+            SELECT d.ContNo, d.ORAPONo, d.Itemcode, d.Itemname, d.Brand, d.Qty, d.SkuMax, d.DivCode, d.StoreID, d.Country,
                    d.GroupCode, d.Division, d.Remarks, d.LPMDt, d.OTS
               FROM LPMSIM.dbo.WMS_ContAllocationData d WITH (NOLOCK)
               {joinAndWhereSql}
@@ -1254,18 +1261,8 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             foreach (var p in poRows) poInfo[(p.ContNo, p.OraPONo ?? "", p.ItemCode)] = (p.Qty ?? 0, p.LPM);
         }
 
-        // Brand per (ContNo, ItemCode) from USAOrgFile.
-        var brandByKey = new Dictionary<(string ContNo, string ItemCode), string?>();
-        if (distinctContnos.Length > 0 && distinctItems.Length > 0)
-        {
-            var brandRows = await c.QueryAsync<(string ContNo, string itemcode, string? vendor)>(new CommandDefinition(@"
-                SELECT ContNo, itemcode, MAX(vendor) AS vendor
-                  FROM usa.dbo.USAOrgFile WITH (NOLOCK)
-                 WHERE ContNo IN @contnos AND itemcode IN @items
-                 GROUP BY ContNo, itemcode",
-                new { contnos = distinctContnos, items = distinctItems }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
-            foreach (var b in brandRows) brandByKey[(b.ContNo, b.itemcode)] = b.vendor;
-        }
+        // Brand: read directly from d.Brand (persisted on the detail row from this deploy
+        // onwards). Legacy batches show NULL until re-processed.
 
         // StoreName per StoreID from DataSettings.
         var storeNameById = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
@@ -1280,22 +1277,12 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             foreach (var s in snRows) storeNameById[s.StoreID] = s.PBFullname;
         }
 
-        // DivCode per ItemCode from vupc_subclass.
-        var divByItem = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        if (distinctItems.Length > 0)
-        {
-            var divRows = await c.QueryAsync<(string itemcode, int? DivID)>(new CommandDefinition(@"
-                SELECT itemcode, MAX(DivID) AS DivID
-                  FROM datareporting.dbo.vupc_subclass WITH (NOLOCK)
-                 WHERE itemcode IN @items
-                 GROUP BY itemcode",
-                new { items = distinctItems }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
-            foreach (var d in divRows) divByItem[d.itemcode] = d.DivID ?? 0;
-        }
+        // DivCode: read directly from d.DivCode (persisted from this deploy onwards).
 
-        // MerchNeedMonth per (StoreID, DivCode) for the current month.
+        // MerchNeedMonth per (StoreID, DivCode) for the current month. Use the per-row
+        // d.DivCode values from the rows just loaded to build the @divs filter.
         var merchByKey = new Dictionary<(string StoreID, int DivCode), int>();
-        var distinctDivs = divByItem.Values.Where(d => d > 0).Distinct().ToArray();
+        var distinctDivs = rows.Where(r => r.DivCode is > 0).Select(r => r.DivCode!.Value).Distinct().ToArray();
         if (distinctStores.Length > 0 && distinctDivs.Length > 0)
         {
             var merchRows = await c.QueryAsync<(string StoreID, int DivCode, int MerchNeedMonth)>(new CommandDefinition(@"
@@ -1309,11 +1296,10 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
         return rows.Select(r =>
         {
-            var item  = r.ItemCode ?? "";
-            var store = r.StoreID ?? "";
-            divByItem.TryGetValue(item, out var divCode);
+            var item    = r.ItemCode ?? "";
+            var store   = r.StoreID ?? "";
+            var divCode = r.DivCode ?? 0;
             poInfo.TryGetValue((r.ContNo, r.OraPONo ?? "", item), out var po);
-            brandByKey.TryGetValue((r.ContNo, item), out var brand);
             storeNameById.TryGetValue(store, out var storeName);
             merchByKey.TryGetValue((store, divCode), out var merch);
 
@@ -1322,7 +1308,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 OraPONo: r.OraPONo ?? "",
                 ItemCode: item,
                 ItemName: r.ItemName,
-                Brand: brand,
+                Brand: r.Brand,
                 PoQty: po.Qty,
                 StoreID: store,
                 StoreName: storeName,
