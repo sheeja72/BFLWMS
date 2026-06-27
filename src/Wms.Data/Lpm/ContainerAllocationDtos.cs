@@ -45,7 +45,15 @@ public record AllocationRow(
     int     RoundRobinExtra,
     string? LPM,
     DateTime? LPMDt,
-    double? OTS = null);
+    double? OTS = null,
+    // P3 enrichment + audit fields.
+    string?  Season           = null,    // usa.USAOrgFile.season
+    string?  Style            = null,    // usa.USAOrgFile.Style
+    string?  Size             = null,    // usa.USAOrgFile.Size
+    string?  Department       = null,    // datareporting.vupc_subclass.Department
+    decimal? SalesPrice       = null,    // hodata.salesprice or <DataName>.RFSalesprice (per store country)
+    string?  PalletType       = null,    // WMS_Building_PalletTypes.PalletTypeS (or PalletTypeW when season='W')
+    int      PrevAllocatedQty = 0);      // (StoreID, DivCode) seed at allocation time
 
 /// <summary>One row in the blocked-items list: an (item, store) pair that was
 /// excluded from allocation by LPM_StoreDeptAccess or LPM_StoreDivAccess.</summary>
