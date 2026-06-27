@@ -871,6 +871,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         dt.Columns.Add("Barcode",          typeof(string));
         dt.Columns.Add("GroupCode",        typeof(string));
         dt.Columns.Add("Qty",              typeof(int));
+        dt.Columns.Add("SkuMax",           typeof(int));
         dt.Columns.Add("AllocatedQty",     typeof(int));
         dt.Columns.Add("PrevAllocatedQty", typeof(int));
         dt.Columns.Add("QtyIssue",         typeof(int));
@@ -902,7 +903,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 r.Contno, r.Country, trnDate, time1, r.ItemCode, r.ItemCode,
                 r.ItemCode,                                  // Barcode = ItemCode
                 r.VolumeGroup,
-                r.AllocQty, r.AllocQty, r.PrevAllocatedQty, 0,
+                r.AllocQty, r.SkuMax, r.AllocQty, r.PrevAllocatedQty, 0,
                 r.StoreID, r.Contno,
                 (object?)r.ItemName ?? DBNull.Value,
                 (object?)r.Division ?? DBNull.Value,         // BuildingCategory = Division
@@ -1223,9 +1224,9 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         SqlConnection c, string joinAndWhereSql, object filterParams, CancellationToken ct)
     {
         var rows = (await c.QueryAsync<(string ContNo, string? OraPONo, string? ItemCode, string? ItemName,
-                                       int? Qty, string? StoreID, string? Country, string? GroupCode, string? Division,
+                                       int? Qty, int? SkuMax, string? StoreID, string? Country, string? GroupCode, string? Division,
                                        string? Remarks, DateTime? LPMDt, double? OTS)>(new CommandDefinition($@"
-            SELECT d.ContNo, d.ORAPONo, d.Itemcode, d.Itemname, d.Qty, d.StoreID, d.Country,
+            SELECT d.ContNo, d.ORAPONo, d.Itemcode, d.Itemname, d.Qty, d.SkuMax, d.StoreID, d.Country,
                    d.GroupCode, d.Division, d.Remarks, d.LPMDt, d.OTS
               FROM LPMSIM.dbo.WMS_ContAllocationData d WITH (NOLOCK)
               {joinAndWhereSql}
@@ -1328,7 +1329,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 Country: r.Country ?? "",
                 Division: r.Division,
                 VolumeGroup: r.GroupCode ?? "",
-                SkuMax: 0,
+                SkuMax: r.SkuMax ?? 0,
                 AllocQty: r.Qty ?? 0,
                 MerchNeedMonth: merch,
                 DivCode: divCode,

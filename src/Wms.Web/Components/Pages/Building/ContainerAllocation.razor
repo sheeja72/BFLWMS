@@ -92,7 +92,7 @@
         }
         @if (_loadedBatch is not null && _allocation.Count > 0 && !IsApproved)
         {
-            <button class="aiwms-btn aiwms-btn-primary" style="background:#16a34a; border-color:#16a34a" @onclick="ApproveAsync" disabled="@_busy">Approve Batch #@_loadedBatch.BatchNo</button>
+            <button class="aiwms-btn aiwms-btn-primary" style="background:#16a34a; border-color:#16a34a" @onclick="ApproveAsync" disabled="@_busy">Approve @_loadedBatch.ContNo#@_loadedBatch.BatchNo</button>
         }
         <button class="aiwms-btn aiwms-btn-secondary" @onclick="() => _showBlocked = !_showBlocked" disabled="@_busy">@(_showBlocked ? "Hide" : "Blocked Items") (@_blocked.Count)</button>
     </div>
@@ -118,8 +118,7 @@
     @if (_loadedBatch is not null)
     {
         <div style="margin-top:12px; padding:10px 14px; background:#eef6ff; border:1px solid #b9d7ff; border-radius:var(--r-sm); font-size:13px">
-            <strong>Loaded Batch #@_loadedBatch.BatchNo</strong>
-            — @_loadedBatch.ContNo
+            <strong>Loaded @_loadedBatch.ContNo#@_loadedBatch.BatchNo</strong>
             <span style="color:var(--text-secondary)">(@_loadedBatch.Country)</span>
             — @_loadedBatch.RunOption
             — by @(_loadedBatch.ProcessedBy ?? "?")
@@ -361,8 +360,10 @@
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("MerchNeedMonth")'>MerchNeed/Mo @SortArrow("MerchNeedMonth")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("Division")'>Division @SortArrow("Division")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("Brand")'>Brand @SortArrow("Brand")</th>
+                        <th style="cursor:pointer" @onclick='() => Sort("OraPONo")'>PO No @SortArrow("OraPONo")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("PoQtySum")'>PO Qty (sum) @SortArrow("PoQtySum")</th>
                         <th style="cursor:pointer; text-align:right" @onclick='() => Sort("AllocSum")'>Allocated Qty @SortArrow("AllocSum")</th>
+                        <th style="cursor:pointer; text-align:right" @onclick='() => Sort("OTS")'>OTS @SortArrow("OTS")</th>
                         <th style="cursor:pointer" @onclick='() => Sort("LPMDt")'>LPM Dt @SortArrow("LPMDt")</th>
                     </tr>
                 </thead>
@@ -372,8 +373,10 @@
                         <tr>
                             <td>@g.StoreID</td><td>@g.StoreName</td><td>@g.Country</td><td>@g.VolumeGroup</td>
                             <td style="text-align:right">@g.MerchNeedMonth</td><td>@g.Division</td><td>@g.Brand</td>
+                            <td>@g.OraPONo</td>
                             <td style="text-align:right">@g.PoQtySum</td>
                             <td style="text-align:right">@g.AllocSum</td>
+                            <td style="text-align:right">@g.OTS?.ToString("F4")</td>
                             <td>@g.LPMDt?.ToString("yyyy-MM-dd")</td>
                         </tr>
                     }
@@ -534,7 +537,7 @@
             _allocation = await Svc.LoadFinalByBatchAsync(info.BatchNo);
             _blocked    = await Svc.LoadBlockedByBatchAsync(info.BatchNo);
             _totalPoQty = info.TotalQty ?? 0;
-            ShowInfo($"Loaded Batch #{info.BatchNo} — {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs, {_blocked.Count} blocked.");
+            ShowInfo($"Loaded {info.ContNo}#{info.BatchNo} — {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs, {_blocked.Count} blocked.");
         }
         catch (Exception ex) { ShowError($"Load failed: {ex.Message}"); }
         finally { _busy = false; }
@@ -661,7 +664,7 @@
         if (_loadedBatch is null) return;
         var ro = _loadedBatch.RunOption == "RoundRobin" ? RunOption.RoundRobin : RunOption.FillSKUMax;
         var ok = await JS.InvokeAsync<bool>("confirm",
-            $"Approve Batch #{_loadedBatch.BatchNo} for {_loadedBatch.ContNo} ({_loadedBatch.RunOption})?\n\n" +
+            $"Approve {_loadedBatch.ContNo}#{_loadedBatch.BatchNo} ({_loadedBatch.RunOption})?\n\n" +
             "Once approved, Process and Delete are locked for this batch.");
         if (!ok) return;
         _busy = true; _message = ""; await InvokeAsync(StateHasChanged);
@@ -670,7 +673,7 @@
             var done = await Svc.ApproveAsync(_loadedBatch.GenCountry, _loadedBatch.ContNo, ro);
             if (!done) { ShowError("Approve failed — batch already approved or no matching Header."); return; }
             _loadedBatch = await Svc.GetLatestBatchInfoAsync(_loadedBatch.GenCountry, _loadedBatch.ContNo, _loadedBatch.RunOption);
-            ShowInfo($"Batch #{_loadedBatch?.BatchNo} approved.");
+            ShowInfo($"{_loadedBatch?.ContNo}#{_loadedBatch?.BatchNo} approved.");
         }
         catch (Exception ex) { ShowError($"Approve failed: {ex.Message}"); }
         finally { _busy = false; }
@@ -798,7 +801,7 @@
     // --- Grouped view row types + getters (sorted by _sortKey if applicable) ---
     // LPMDt on grouped views = earliest LPMDt within the group (Min, ignoring nulls).
     private record ItemSummaryRowVm(string OraPONo, string ItemCode, string? ItemName, string? Brand, string? Division, int PoQty, int TotalAlloc, int Stores, DateTime? LPMDt);
-    private record StoreRowVm(string StoreID, string? StoreName, string Country, string VolumeGroup, int MerchNeedMonth, string? Division, string Brand, int PoQtySum, int AllocSum, DateTime? LPMDt);
+    private record StoreRowVm(string StoreID, string? StoreName, string Country, string VolumeGroup, int MerchNeedMonth, string? Division, string Brand, string OraPONo, int PoQtySum, int AllocSum, double? OTS, DateTime? LPMDt);
     private record CountrySummaryRowVm(string Country, int StoresCount, string OraPONo, string? Division, int PoQty, int AllocQty, DateTime? LPMDt);
 
     private IEnumerable<ItemSummaryRowVm> ItemSummaryRows
@@ -827,21 +830,28 @@
     {
         get
         {
+            // Group by (StoreID, OraPONo) so each row is one (store, PO) combination —
+            // makes the per-PO breakdown visible. PoQtySum dedupes by ItemCode within
+            // the group to avoid double-counting when multiple rows exist per item.
             var rows = FilteredAll
-                .GroupBy(r => r.StoreID)
+                .GroupBy(r => new { r.StoreID, r.OraPONo })
                 .Select(g => new StoreRowVm(
-                    g.Key, g.First().StoreName, g.First().Country, g.First().VolumeGroup,
+                    g.Key.StoreID, g.First().StoreName, g.First().Country, g.First().VolumeGroup,
                     g.First().MerchNeedMonth, g.First().Division,
                     string.Join(", ", g.Select(x => x.Brand).Where(b => b is not null).Distinct()),
-                    g.Sum(x => x.PoQty), g.Sum(x => x.AllocQty),
+                    g.Key.OraPONo,
+                    g.GroupBy(x => x.ItemCode).Sum(ig => ig.First().PoQty),
+                    g.Sum(x => x.AllocQty),
+                    g.Min(x => x.OTS),
                     g.Where(x => x.LPMDt.HasValue).Min(x => x.LPMDt)));
             if (_sortKey is null)
-                return rows.OrderBy(r => r.StoreID);
+                return rows.OrderBy(r => r.StoreID).ThenBy(r => r.OraPONo);
             Func<StoreRowVm, object?> k = _sortKey switch {
                 "StoreID" => r => r.StoreID, "StoreName" => r => r.StoreName, "Country" => r => r.Country,
                 "VolumeGroup" => r => r.VolumeGroup, "MerchNeedMonth" => r => r.MerchNeedMonth,
-                "Division" => r => r.Division, "Brand" => r => r.Brand,
-                "PoQtySum" => r => r.PoQtySum, "AllocSum" => r => r.AllocSum, "LPMDt" => r => r.LPMDt,
+                "Division" => r => r.Division, "Brand" => r => r.Brand, "OraPONo" => r => r.OraPONo,
+                "PoQtySum" => r => r.PoQtySum, "AllocSum" => r => r.AllocSum,
+                "OTS" => r => r.OTS, "LPMDt" => r => r.LPMDt,
                 _ => r => r.StoreID,
             };
             return _sortAsc ? rows.OrderBy(k) : rows.OrderByDescending(k);
