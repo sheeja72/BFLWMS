@@ -802,7 +802,8 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
         // 1) Find any prior Header batches for (GenCountry, ContNo, RunOption) — re-Process
         //    replaces the matching slice. Delete their detail + blocked + header rows.
-        progress?.Report(new AllocationProgress(0, rows.Count, "Saving: cleaning prior data"));
+        //    Sub-progress so the user can tell which DELETE is the slow one.
+        progress?.Report(new AllocationProgress(0, rows.Count, "Saving: looking up prior batches"));
         var priorBatches = (await c.QueryAsync<int>(new CommandDefinition(@"
             SELECT BatchNo FROM LPMSIM.dbo.WMS_Cont_Allocation_Header
             WHERE GenCountry = @gc AND ContNo = @c AND RunOption = @ro",
@@ -810,12 +811,15 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToList();
         if (priorBatches.Count > 0)
         {
+            progress?.Report(new AllocationProgress(0, rows.Count, $"Saving: deleting prior detail rows ({priorBatches.Count} batch(es))"));
             await c.ExecuteAsync(new CommandDefinition(
                 "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData    WHERE BatchNo IN @bs",
                 new { bs = priorBatches }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            progress?.Report(new AllocationProgress(0, rows.Count, "Saving: deleting prior blocked rows"));
             await c.ExecuteAsync(new CommandDefinition(
                 "DELETE FROM LPMSIM.dbo.WMS_ContAllocationBlocked WHERE BatchNo IN @bs",
                 new { bs = priorBatches }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            progress?.Report(new AllocationProgress(0, rows.Count, "Saving: deleting prior header rows"));
             await c.ExecuteAsync(new CommandDefinition(
                 "DELETE FROM LPMSIM.dbo.WMS_Cont_Allocation_Header WHERE BatchNo IN @bs",
                 new { bs = priorBatches }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
