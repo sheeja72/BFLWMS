@@ -42,7 +42,10 @@
 
 @if (_loading)
 {
-    <div class="aiwms-section"><div style="padding:14px; font-style:italic; color:var(--text-secondary)">Loading…</div></div>
+    <div class="aiwms-section" style="padding:0; overflow:hidden">
+        <MudProgressLinear Color="Color.Primary" Indeterminate="true" Size="Size.Medium" />
+        <div style="padding:14px; font-style:italic; color:var(--text-secondary)">@(_loadingMsg ?? "Loading…")</div>
+    </div>
 }
 else if (_rows.Count > 0)
 {
@@ -199,6 +202,7 @@ else if (_loadedOnce && _rows.Count == 0)
     private DateTime _to   = CurrentProductionDayGst();
     private string _view = "Summary";
     private bool _loading;
+    private string? _loadingMsg;
     private bool _loadedOnce;
     private string _message = "";
     private bool _isError;
@@ -237,6 +241,9 @@ else if (_loadedOnce && _rows.Count == 0)
     {
         if (!CanLoad) return;
         _loading = true; _message = ""; _loadedOnce = false;
+        _loadingMsg = string.Equals(_country, "UAE", StringComparison.OrdinalIgnoreCase)
+            ? "Reading scans from UAE master…"
+            : $"Connecting to {_country} server, reading scans, then enriching against LPMSIM_Batch…";
         _rows.Clear(); _summary.Clear(); _overallStoreQty = 0; _transferQty = 0;
         await InvokeAsync(StateHasChanged);
         try
@@ -250,7 +257,7 @@ else if (_loadedOnce && _rows.Count == 0)
             ShowInfo($"Loaded {_rows.Count} detailed rows, {_summary.Count} summary rows.");
         }
         catch (Exception ex) { ShowError($"Load failed: {ex.Message}"); }
-        finally { _loading = false; }
+        finally { _loading = false; _loadingMsg = null; }
     }
 
     private async Task ExportCsvAsync()
