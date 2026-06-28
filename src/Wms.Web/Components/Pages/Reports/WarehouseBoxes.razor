@@ -356,7 +356,8 @@ else if (_groupBy == "Brand" && _brandRows.Count > 0)
     private bool _mixedSeasonOnly;
     private DateTime? _trnFrom;
     private DateTime? _trnTo;
-    private const int _topN = 10000;
+    // Match LPMSIM's cap so result counts agree (KSA alone has 36k+ boxes).
+    private const int _topN = 200000;
 
     private List<WhBoxRow>        _boxes = new();
     private List<WhDivisionRow>   _divisionRows = new();
