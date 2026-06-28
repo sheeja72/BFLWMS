@@ -580,6 +580,10 @@
         }
         _busy = true; _message = ""; _allocation = new(); _blocked = new(); _loadedBatch = null;
         _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
+        // End-to-end + per-phase timing — exposed in the success message so users
+        // can see if Validate / Algorithm / Save is the slow one.
+        var totalSw = System.Diagnostics.Stopwatch.StartNew();
+        long validateMs = 0, algoMs = 0, saveMs = 0;
         try
         {
             var progress = new Progress<AllocationProgress>(async p => {
@@ -596,15 +600,17 @@
                 _blocked    = await Svc.LoadBlockedAsync(_country, _contno, ro);
                 _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
                 _loadedBatch = await Svc.GetLatestBatchInfoAsync(_country, _contno, ro.ToString());
-                ShowInfo($"Loaded existing {_runOption} allocation — {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs.");
+                ShowInfo($"Loaded existing {_runOption} allocation — {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs (in {FmtElapsed(totalSw.ElapsedMilliseconds)}).");
                 return;
             }
 
             // Otherwise: validate (if checked) → process → save direct.
             if (_validate)
             {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 _validation = await Svc.ValidateAsync(_country, _contno, progress);
-                if (!_validation.Ok) { ShowError("Validation failed — see steps below."); return; }
+                validateMs = sw.ElapsedMilliseconds;
+                if (!_validation.Ok) { ShowError($"Validation failed — see steps below ({FmtElapsed(totalSw.ElapsedMilliseconds)})."); return; }
             }
             else
             {
@@ -612,28 +618,39 @@
             }
             _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
             var allocCsv = string.Join(",", _allocCountries);
-            var procResult = await Svc.ProcessAllocationAsync(_contno, progress, ro, _allocCountries);
-            _allocation = procResult.Allocations;
-            _blocked    = procResult.Blocked;
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var procResult = await Svc.ProcessAllocationAsync(_contno, progress, ro, _allocCountries);
+                algoMs = sw.ElapsedMilliseconds;
+                _allocation = procResult.Allocations;
+                _blocked    = procResult.Blocked;
+            }
             if (_allocation.Count == 0 && _blocked.Count == 0)
             {
-                ShowError("No allocation rows produced. Check LPM_EOM_Output + LPM_SKUMaxRule coverage.");
+                ShowError($"No allocation rows produced. Check LPM_EOM_Output + LPM_SKUMaxRule coverage ({FmtElapsed(totalSw.ElapsedMilliseconds)}).");
             }
             else
             {
                 _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
                 await InvokeAsync(StateHasChanged);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 await Svc.SaveFinalDirectAsync(_country, _contno, allocCsv, _warehouse, _allocation, ro, _blocked, progress);
+                saveMs = sw.ElapsedMilliseconds;
                 await RefreshStatusAsync();
                 await RefreshProcessedContnosAsync();
                 _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
                 _loadedBatch = await Svc.GetLatestBatchInfoAsync(_country, _contno, ro.ToString());
-                ShowInfo($"Allocation computed and saved ({_runOption}): {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs, {_blocked.Count} blocked.");
+                ShowInfo(
+                    $"Allocation computed and saved ({_runOption}): {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs, {_blocked.Count} blocked. " +
+                    $"Total {FmtElapsed(totalSw.ElapsedMilliseconds)} — validate {FmtElapsed(validateMs)}, algorithm {FmtElapsed(algoMs)}, save {FmtElapsed(saveMs)}.");
             }
         }
-        catch (Exception ex) { ShowError($"Process failed: {ex.Message}"); }
+        catch (Exception ex) { ShowError($"Process failed after {FmtElapsed(totalSw.ElapsedMilliseconds)}: {ex.Message}"); }
         finally { _busy = false; _progressTotal = 0; }
     }
+
+    private static string FmtElapsed(long ms) =>
+        ms < 1000 ? $"{ms} ms" : $"{ms / 1000.0:F1}s";
 
     private async Task DeleteAsync()
     {
