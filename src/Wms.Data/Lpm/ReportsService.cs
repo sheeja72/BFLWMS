@@ -1,3 +1,4 @@
+using System.Data;
 using Wms.Data.Configuration;
 using Dapper;
 using Microsoft.Data.SqlClient;
@@ -283,8 +284,18 @@ public class ReportsService(IOnPremConnectionResolver resolver)
     public async Task<ProductionCheckingResult> GetProductionCheckingAsync(
         string country, DateTime fromDate, DateTime toDateInclusive, CancellationToken ct = default)
     {
+        // 1.14.268 (LPMSIM) — for any non-UAE country with a {Country}_DB_ConnectionString
+        // configured, read scans directly from that server and bulk-copy them onto the
+        // central UAE backup connection for the LPMSIM_Batch / Datareporting enrichment.
         if (!string.Equals(country, "UAE", StringComparison.OrdinalIgnoreCase))
-            return new ProductionCheckingResult(new(), new(), 0, 0);  // non-UAE not configured yet
+        {
+            string? cs;
+            try { cs = resolver.GetCountryConnectionString(country); }
+            catch { cs = null; }
+            return string.IsNullOrWhiteSpace(cs)
+                ? new ProductionCheckingResult(new(), new(), 0, 0)
+                : await GetProductionCheckingViaConnStringAsync(country, cs, fromDate, toDateInclusive, ct);
+        }
 
         // Production day = WH-shift window [D 06:00 GST, D+1 06:00 GST). Scans
         // before 06:00 on calendar date D count toward D-1's shift.
@@ -470,6 +481,238 @@ DROP TABLE #Scans, #BatchKind, #ItemDiv;";
 
         return new ProductionCheckingResult(rows, summary, overallStoreQty, transferQty);
     }
+
+    // ---------------- Non-UAE Production Checking (verbatim port of LPMSIM 1.14.268) ----------------
+    // Phase 1: read raw scans from the country's dbo.amechecking via {Country}_DB_ConnectionString.
+    // Phase 2: bulk-copy into a #Scans temp table on OnPremBackup, then run the same enrichment
+    //          SQL the UAE path uses (LPMSIM_Batch country gate + Kind + Division + result sets).
+    private async Task<ProductionCheckingResult> GetProductionCheckingViaConnStringAsync(
+        string country, string connStr, DateTime fromDate, DateTime toDateInclusive, CancellationToken ct)
+    {
+        var fromInclusive       = fromDate.Date.AddHours(6);
+        var toExclusive         = toDateInclusive.Date.AddDays(1).AddHours(6);
+        var fromDateOnly        = fromDate.Date;
+        var toDateExclusiveOnly = toDateInclusive.Date.AddDays(2);
+
+        // Phase 1 — read raw scans from the country's server into a DataTable.
+        var scanTable = BuildScanDataTable();
+        await using (var countryConn = new SqlConnection(WithConnectTimeout(connStr)))
+        {
+            await countryConn.OpenAsync(ct);
+            await using var countryCmd = countryConn.CreateCommand();
+            countryCmd.CommandText = CountryScanQuery;
+            countryCmd.Parameters.Add(new SqlParameter("@fromDateOnly",        fromDateOnly));
+            countryCmd.Parameters.Add(new SqlParameter("@toDateExclusiveOnly", toDateExclusiveOnly));
+            countryCmd.Parameters.Add(new SqlParameter("@from",                fromInclusive));
+            countryCmd.Parameters.Add(new SqlParameter("@toExclusive",         toExclusive));
+            countryCmd.CommandTimeout = 120;
+
+            await using var countryRdr = await countryCmd.ExecuteReaderAsync(ct);
+            while (await countryRdr.ReadAsync(ct))
+            {
+                var row             = scanTable.NewRow();
+                row["BatchNo"]      = countryRdr.IsDBNull(0) ? DBNull.Value : countryRdr.GetInt64(0);
+                row["Itemcode"]     = countryRdr.GetString(1);
+                row["ShopName"]     = countryRdr.GetString(2);
+                row["Contno"]       = countryRdr.GetString(3);
+                row["Result"]       = countryRdr.GetInt32(4);
+                row["ProductionDay"] = countryRdr.GetDateTime(5);
+                scanTable.Rows.Add(row);
+            }
+        }
+
+        if (scanTable.Rows.Count == 0)
+            return new ProductionCheckingResult(new(), new(), 0, 0);
+
+        // Phase 2 — open OnPremBackup, create #Scans, bulk-copy in, run enrichment.
+        var rows    = new List<ProductionCheckingRow>();
+        var summary = new List<ProductionCheckingSummaryRow>();
+        int overallStoreQty = 0;
+        await using var conn = OpenOnPremBackup();
+
+        await using (var createCmd = conn.CreateCommand())
+        {
+            createCmd.CommandText = CreateScansTempTable;
+            await createCmd.ExecuteNonQueryAsync(ct);
+        }
+
+        using (var bulk = new SqlBulkCopy(conn) { DestinationTableName = "#Scans", BulkCopyTimeout = 60 })
+        {
+            bulk.ColumnMappings.Add("BatchNo",       "BatchNo");
+            bulk.ColumnMappings.Add("Itemcode",      "Itemcode");
+            bulk.ColumnMappings.Add("ShopName",      "ShopName");
+            bulk.ColumnMappings.Add("Contno",        "Contno");
+            bulk.ColumnMappings.Add("Result",        "Result");
+            bulk.ColumnMappings.Add("ProductionDay", "ProductionDay");
+            await bulk.WriteToServerAsync(scanTable, ct);
+        }
+
+        await using var enrichCmd = conn.CreateCommand();
+        enrichCmd.CommandText = CountryEnrichmentQuery;
+        enrichCmd.Parameters.Add(new SqlParameter("@country", country));
+        enrichCmd.CommandTimeout = 300;
+
+        await using (var rdr = await enrichCmd.ExecuteReaderAsync(ct))
+        {
+            while (await rdr.ReadAsync(ct))
+            {
+                rows.Add(new ProductionCheckingRow(
+                    ProductionDay: rdr.GetDateTime(0),
+                    BatchNo:       rdr.IsDBNull(1) ? null : rdr.GetInt64(1),
+                    Kind:          rdr.IsDBNull(2) ? "Unknown" : rdr.GetString(2),
+                    Division:      rdr.IsDBNull(3) ? "Unknown" : rdr.GetString(3),
+                    TotalScanned:  rdr.IsDBNull(4) ? 0L : rdr.GetInt64(4),
+                    StoreQty:      rdr.IsDBNull(5) ? 0  : rdr.GetInt32(5)));
+            }
+            if (await rdr.NextResultAsync(ct))
+            {
+                while (await rdr.ReadAsync(ct))
+                {
+                    summary.Add(new ProductionCheckingSummaryRow(
+                        ProductionDay: rdr.GetDateTime(0),
+                        Kind:          rdr.IsDBNull(1) ? "Unknown" : rdr.GetString(1),
+                        Division:      rdr.IsDBNull(2) ? "Unknown" : rdr.GetString(2),
+                        TotalScanned:  rdr.IsDBNull(3) ? 0L : rdr.GetInt64(3),
+                        StoreQty:      rdr.IsDBNull(4) ? 0  : rdr.GetInt32(4),
+                        UaeStoreQty:   rdr.IsDBNull(5) ? 0  : rdr.GetInt32(5),
+                        OmanStoreQty:  rdr.IsDBNull(6) ? 0  : rdr.GetInt32(6),
+                        Ex2StoreQty:   rdr.IsDBNull(7) ? 0  : rdr.GetInt32(7)));
+                }
+            }
+            if (await rdr.NextResultAsync(ct) && await rdr.ReadAsync(ct))
+                overallStoreQty = rdr.IsDBNull(0) ? 0 : rdr.GetInt32(0);
+        }
+
+        // Transfer Qty is UAE-only on LPMSIM — non-UAE returns 0.
+        return new ProductionCheckingResult(rows, summary, overallStoreQty, 0);
+    }
+
+    private static DataTable BuildScanDataTable()
+    {
+        var dt = new DataTable();
+        var batchCol = dt.Columns.Add("BatchNo", typeof(long));
+        batchCol.AllowDBNull = true;
+        dt.Columns.Add("Itemcode",      typeof(string));
+        dt.Columns.Add("ShopName",      typeof(string));
+        dt.Columns.Add("Contno",        typeof(string));
+        dt.Columns.Add("Result",        typeof(int));
+        dt.Columns.Add("ProductionDay", typeof(DateTime));
+        return dt;
+    }
+
+    private const string CreateScansTempTable = @"
+SET NOCOUNT ON;
+IF OBJECT_ID('tempdb..#Scans') IS NOT NULL DROP TABLE #Scans;
+CREATE TABLE #Scans (
+    BatchNo       bigint        NULL,
+    Itemcode      nvarchar(100) NOT NULL,
+    ShopName      nvarchar(100) NOT NULL,
+    Contno        nvarchar(100) NOT NULL,
+    Result        int           NOT NULL,
+    ProductionDay date          NOT NULL
+);
+CREATE CLUSTERED INDEX IX_Scans ON #Scans (BatchNo, Itemcode);";
+
+    // No DB prefix — the connection string's Initial Catalog points to the right DB.
+    private const string CountryScanQuery = @"
+SELECT
+    BatchNo = CASE
+                  WHEN CHARINDEX('BP(', CmpName) > 0
+                  THEN TRY_CAST(SUBSTRING(CmpName,
+                                          CHARINDEX('BP(', CmpName) + 3,
+                                          CHARINDEX(')',  CmpName, CHARINDEX('BP(', CmpName))
+                                          - CHARINDEX('BP(', CmpName) - 3) AS bigint)
+                  ELSE NULL
+              END,
+    Itemcode      = ISNULL(Itemcode, ''),
+    ShopName      = ISNULL(ShopName, ''),
+    Contno        = ISNULL(Contno,   ''),
+    Result        = ISNULL(TRY_CAST(Result AS int), -1),
+    ProductionDay = CAST(CASE
+                             WHEN TRY_CAST(Time1 AS time) >= '06:00:00'
+                                 THEN TrnDate
+                             ELSE DATEADD(day, -1, TrnDate)
+                         END AS date)
+  FROM dbo.amechecking
+ WHERE TrnDate >= @fromDateOnly
+   AND TrnDate <  @toDateExclusiveOnly
+   AND CAST(TrnDate AS datetime) + CAST(Time1 AS datetime) >= @from
+   AND CAST(TrnDate AS datetime) + CAST(Time1 AS datetime) <  @toExclusive";
+
+    private const string CountryEnrichmentQuery = @"
+SET NOCOUNT ON;
+
+IF OBJECT_ID('tempdb..#BatchKind') IS NOT NULL DROP TABLE #BatchKind;
+IF OBJECT_ID('tempdb..#ItemDiv')   IS NOT NULL DROP TABLE #ItemDiv;
+
+DELETE s
+  FROM #Scans s
+  INNER JOIN LPMSIM.dbo.LPMSIM_Batch b ON b.LPMBatchNo = s.BatchNo
+ WHERE b.Country <> @country;
+
+SELECT
+    b.LPMBatchNo,
+    Kind = CASE
+               WHEN b.Sources LIKE '%Non-LPM%'
+                AND REPLACE(b.Sources, 'Non-LPM', '') LIKE '%LPM%' THEN 'Mixed'
+               WHEN b.Sources LIKE '%Non-LPM%' THEN 'Non-LPM'
+               WHEN b.Sources LIKE '%LPM%'     THEN 'LPM'
+               ELSE 'Unknown'
+           END
+  INTO #BatchKind
+  FROM LPMSIM.dbo.LPMSIM_Batch b
+ WHERE b.LPMBatchNo IN (SELECT DISTINCT BatchNo FROM #Scans WHERE BatchNo IS NOT NULL);
+
+CREATE CLUSTERED INDEX IX_BatchKind ON #BatchKind (LPMBatchNo);
+
+SELECT u.itemcode,
+       Division = MIN(sm.Division)
+  INTO #ItemDiv
+  FROM (SELECT DISTINCT Itemcode FROM #Scans WHERE Itemcode <> '') si
+  INNER JOIN Datareporting.dbo.upc_subclass    u  ON u.itemcode = si.Itemcode
+  INNER JOIN Datareporting.dbo.subclassmaster  sm ON sm.MH4ID   = u.MH4ID
+ GROUP BY u.itemcode;
+
+CREATE CLUSTERED INDEX IX_ItemDiv ON #ItemDiv (itemcode);
+
+SELECT
+    s.ProductionDay,
+    s.BatchNo,
+    Kind     = ISNULL(bk.Kind, 'Unknown'),
+    Division = ISNULL(NULLIF(idv.Division, ''), 'Unknown'),
+    TotalScanned = COUNT_BIG(*),
+    StoreQty     = SUM(CASE WHEN s.Result IN (0, 13) THEN 1 ELSE 0 END)
+  FROM #Scans s
+  LEFT JOIN #BatchKind bk  ON bk.LPMBatchNo = s.BatchNo
+  LEFT JOIN #ItemDiv   idv ON idv.itemcode  = s.Itemcode
+ GROUP BY s.ProductionDay, s.BatchNo, ISNULL(bk.Kind, 'Unknown'), ISNULL(NULLIF(idv.Division, ''), 'Unknown')
+ ORDER BY s.ProductionDay DESC,
+          ISNULL(s.BatchNo, -1) DESC,
+          CASE ISNULL(bk.Kind, 'Unknown') WHEN 'LPM' THEN 0 WHEN 'Non-LPM' THEN 1 WHEN 'Mixed' THEN 2 ELSE 3 END,
+          ISNULL(NULLIF(idv.Division, ''), 'Unknown');
+
+SELECT
+    s.ProductionDay,
+    Kind     = ISNULL(bk.Kind, 'Unknown'),
+    Division = ISNULL(NULLIF(idv.Division, ''), 'Unknown'),
+    TotalScanned = COUNT_BIG(*),
+    StoreQty     = SUM(CASE WHEN s.Result IN (0, 13) THEN 1 ELSE 0 END),
+    UaeStoreQty  = SUM(CASE WHEN s.Result IN (0, 13) AND ds.SIMCountry = 'UAE'          THEN 1 ELSE 0 END),
+    OmanStoreQty = SUM(CASE WHEN s.Result IN (0, 13) AND ds.SIMCountry = 'Oman'         THEN 1 ELSE 0 END),
+    Ex2StoreQty  = SUM(CASE WHEN s.Result IN (0, 13) AND ds.SIMCountry = 'Ex2Locations' THEN 1 ELSE 0 END)
+  FROM #Scans s
+  LEFT JOIN #BatchKind         bk  ON bk.LPMBatchNo = s.BatchNo
+  LEFT JOIN #ItemDiv           idv ON idv.itemcode  = s.Itemcode
+  LEFT JOIN bfldata.dbo.DataSettings ds ON ds.ShopName = s.ShopName AND s.ShopName <> ''
+ GROUP BY s.ProductionDay, ISNULL(bk.Kind, 'Unknown'), ISNULL(NULLIF(idv.Division, ''), 'Unknown')
+ ORDER BY s.ProductionDay DESC,
+          CASE ISNULL(bk.Kind, 'Unknown') WHEN 'LPM' THEN 0 WHEN 'Non-LPM' THEN 1 WHEN 'Mixed' THEN 2 ELSE 3 END,
+          ISNULL(NULLIF(idv.Division, ''), 'Unknown');
+
+SELECT OverallStoreQty = SUM(CASE WHEN Result IN (0, 13) THEN 1 ELSE 0 END)
+  FROM #Scans;
+
+DROP TABLE #Scans, #BatchKind, #ItemDiv;";
 
     // ===================== LPM WH Stock report (ported from LPMSIM) =====================
     /// <summary>Distinct PalletCategory values from bfldata.dbo.pallettype.</summary>

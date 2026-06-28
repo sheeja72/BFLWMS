@@ -16,7 +16,6 @@
 </div>
 
 <div class="aiwms-section">
-    <div class="aiwms-card-header">Filters</div>
     <div style="display:grid; grid-template-columns: repeat(4, minmax(200px, 1fr)); gap:10px; align-items:end">
         <div>
             <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">COUNTRY</label>
@@ -135,12 +134,30 @@
         </div>
     </div>
 
-    <div style="display:flex; gap:10px; margin-top:14px">
-        <button class="aiwms-btn aiwms-btn-primary" @onclick="LoadAsync" disabled="@_loading">@(_loading ? "Loading…" : "Load")</button>
-        <button class="aiwms-btn aiwms-btn-secondary" @onclick="ExportCsvAsync" disabled="@(_loading || !HasResult)">Export to Excel</button>
-        <button class="aiwms-btn aiwms-btn-secondary" @onclick="ToggleCountrySummaryAsync" disabled="@_loading">@(_showCountrySummary ? "Hide" : "Country Summary")</button>
-        <span style="font-size:12px; color:var(--text-secondary); align-self:center">
-            @(_groupBy == "Box" ? $"Top { _topN.ToString("N0") } rows" : "Aggregated")
+    <div style="display:flex; gap:10px; margin-top:14px; align-items:center">
+        <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false" Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.PlayArrow"
+                   Disabled="_loading" OnClick="LoadAsync">
+            @(_loading ? "Loading…" : "Load")
+        </MudButton>
+        <MudButton Color="Color.Success" Variant="Variant.Outlined" DropShadow="false" Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.Download"
+                   Disabled="@(_loading || !HasResult)" OnClick="ExportCsvAsync">
+            Excel
+        </MudButton>
+        <MudButton Color="Color.Info" Variant="Variant.Filled" DropShadow="false" Size="Size.Small"
+                   StartIcon="@Icons.Material.Filled.Public"
+                   Disabled="_loading" OnClick="ToggleCountrySummaryAsync">
+            @(_showCountrySummary ? "Hide" : "Country Summary")
+        </MudButton>
+    </div>
+
+    <!-- Matches the LPMSIM info banner — nudges users to add a filter for speed. -->
+    <div style="margin-top:14px; padding:10px 14px; background:#eef6ff; border:1px solid #b9d7ff; border-radius:var(--r-sm); font-size:13px; color:#1e40af; display:flex; align-items:center; gap:8px">
+        <span style="font-size:16px">ⓘ</span>
+        <span>
+            Apply one or more filters (leave blank for All) and click <strong>Load</strong>.
+            Narrow the scope to a single Warehouse for fastest results — the underlying table has 700k+ rows.
         </span>
     </div>
 
