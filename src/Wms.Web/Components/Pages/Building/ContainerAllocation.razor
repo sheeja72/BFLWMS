@@ -578,6 +578,18 @@
             ShowError("Pick at least one Allocation Country before Process.");
             return;
         }
+        // Confirm allocation inputs before kicking off — Process can take minutes
+        // for big containers, so a quick sanity check on Run Option + Allocation
+        // Countries here saves users from cancel-Process-and-start-over loops.
+        var allocList = string.Join(", ", _allocCountries.OrderBy(s => s));
+        var confirmMsg =
+            $"Process container {_contno}?\n\n" +
+            $"Run Option: {_runOption}\n" +
+            $"Allocation Countries: {allocList}\n\n" +
+            "Continue?";
+        var proceed = await JS.InvokeAsync<bool>("confirm", confirmMsg);
+        if (!proceed) return;
+
         _busy = true; _message = ""; _allocation = new(); _blocked = new(); _loadedBatch = null;
         _progressCurrent = 0; _progressTotal = 0; _progressItem = null;
         // End-to-end + per-phase timing — exposed in the success message so users
