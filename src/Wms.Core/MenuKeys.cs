@@ -17,6 +17,7 @@ public static class MenuKeys
     public const string RPT_LPM_WH_STOCK          = "RPT_LPM_WH_STOCK";
     public const string RPT_PRODUCTION_SUMMARY    = "RPT_PRODUCTION_SUMMARY";
     public const string RPT_WAREHOUSE_BOXES       = "RPT_WAREHOUSE_BOXES";
+    public const string RPT_RACKS                 = "RPT_RACKS";
 
     public const string ADMIN_USERS               = "ADMIN_USERS";
     public const string ADMIN_WH_MASTER           = "ADMIN_WH_MASTER";
@@ -50,6 +51,7 @@ public static class MenuKeys
         new MenuEntry(RPT_LPM_WH_STOCK,      "Reports",             "LPM WH Stock Report",       "reports/lpm-wh-stock",      new[] { Roles.Admin, Roles.Reports }),
         new MenuEntry(RPT_PRODUCTION_SUMMARY,"Reports",             "Production Summary Report", "reports/production-summary",new[] { Roles.Admin, Roles.Reports }),
         new MenuEntry(RPT_WAREHOUSE_BOXES,   "Reports",             "Warehouse Boxes",           "reports/warehouse-boxes",   new[] { Roles.Admin, Roles.Reports }),
+        new MenuEntry(RPT_RACKS,             "Reports",             "Racks",                     "reports/racks",             new[] { Roles.Admin, Roles.Reports }),
 
         new MenuEntry(ADMIN_USERS,           "Admin",               "Users & Roles",             "admin/users",               new[] { Roles.Admin }),
         new MenuEntry(ADMIN_WH_MASTER,       "Admin",               "WH Master",                 "admin/wh-master",           new[] { Roles.Admin }),

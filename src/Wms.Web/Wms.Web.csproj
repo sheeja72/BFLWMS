@@ -6,7 +6,7 @@
     <RootNamespace>Wms.Web</RootNamespace>
     <UserSecretsId>4b8d3a42-cc08-411c-9a33-3c84ef8f4c19</UserSecretsId>
     <!-- CI overrides this with -p:Version=1.0.${{ github.run_number }} -->
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Wms.Core\Wms.Core.csproj" />
