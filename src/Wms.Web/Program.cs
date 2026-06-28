@@ -57,6 +57,7 @@ public class Program
         builder.Services.AddScoped<IActionLogger, ActionLogger>();
         builder.Services.AddScoped<BuildingService>();
         builder.Services.AddScoped<ContainerAllocationService>();
+        builder.Services.AddScoped<ContainerAllocationDataSyncService>();
         builder.Services.AddScoped<ReportsService>();
         builder.Services.AddScoped<WarehouseBoxesService>();
         builder.Services.AddScoped<MissingExcessSnapshotService>();

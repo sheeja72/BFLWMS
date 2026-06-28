@@ -205,6 +205,10 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
         await using var c = OpenOnPremBackup();
 
+        // Per-prefetch progress messages so the bar shows what the algorithm is
+        // doing during the ~9 prep queries before the per-line loop. Without them
+        // the user sees a static "Processing…" for several seconds after Validate.
+        progress?.Report(new AllocationProgress(0, 0, "Prefetching: PO line items"));
         // 1. Load all PO line items for this container (one row per line — no GROUP BY).
         var lines = (await c.QueryAsync<(string ContNo, string OraPONo, string ItemCode, int Qty, string? LPM, DateTime? LPMDt)>(
             new CommandDefinition(@"
@@ -218,6 +222,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
         if (lines.Count == 0) return new(result, blocked);
 
+        progress?.Report(new AllocationProgress(0, 0, "Prefetching: item Division / Department"));
         // 2. Resolve DivCode + Division name + Department per item via vupc_subclass
         var itemMeta = (await c.QueryAsync<(string itemcode, int? DivID, string? Division, string? Department)>(new CommandDefinition(@"
             SELECT itemcode, DivID, Division, Department
@@ -228,6 +233,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
         var divByItem = itemMeta.ToDictionary(kv => kv.Key, kv => kv.Value.DivID ?? 0, StringComparer.OrdinalIgnoreCase);
 
+        progress?.Report(new AllocationProgress(0, 0, "Prefetching: store eligibility blocks"));
         // 2.5. Pre-fetch block tables (LPM_StoreDeptAccess + LPM_StoreDivAccess where IsActive=0).
         // No Country filter per requirement — keys are (StoreID, DivCode[, Department]).
         var deptBlocks = (await c.QueryAsync<(string StoreID, int DivCode, string? Department)>(new CommandDefinition(@"
@@ -245,6 +251,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             .Select(r => (Sid: (r.StoreID ?? "").Trim().ToUpperInvariant(), r.DivCode))
             .ToHashSet();
 
+        progress?.Report(new AllocationProgress(0, 0, "Prefetching: item Brand / Season / Style / Size"));
         // 2b. ItemName + Brand + Season + Style + Size from usa.USAOrgFile.
         // Season drives the PalletType pick at save time (S vs W variant);
         // Style + Size are written to the detail rows for downstream consumers.
@@ -261,6 +268,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             new { c = contno, items = lines.Select(l => l.ItemCode).Distinct().ToArray() }, cancellationToken: ct)))
             .ToDictionary(r => r.itemcode, r => (r.itemname, r.vendor, r.season, r.Style, r.Size), StringComparer.OrdinalIgnoreCase);
 
+        progress?.Report(new AllocationProgress(0, 0, "Prefetching: store names"));
         // 2c. StoreName lookup from bfldata.DataSettings.PBFullname (key column: StoreID)
         var storeNameById = (await c.QueryAsync<(string StoreID, string? PBFullname)>(new CommandDefinition(@"
             SELECT StoreID, MAX(PBFullname) AS PBFullname
@@ -270,6 +278,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             cancellationToken: ct)))
             .ToDictionary(r => r.StoreID, r => r.PBFullname, StringComparer.OrdinalIgnoreCase);
 
+        progress?.Report(new AllocationProgress(0, 0, "Prefetching: pallet types"));
         // 2c2. WMS_Building_PalletTypes — keyed by StoreId. Per-row ResultType picks
         // PalletTypeS when item season <> 'W' else PalletTypeW (per user spec Q-C).
         var palletByStore = (await c.QueryAsync<(string StoreId, string? PalletTypeS, string? PalletTypeW)>(new CommandDefinition(@"
@@ -295,6 +304,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         {
             foreach (var sc in countryFilter.Distinct(StringComparer.OrdinalIgnoreCase))
             {
+                progress?.Report(new AllocationProgress(0, 0, $"Prefetching: sales prices ({sc})"));
                 try
                 {
                     if (string.Equals(sc, "UAE", StringComparison.OrdinalIgnoreCase))
@@ -330,6 +340,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             }
         }
 
+        progress?.Report(new AllocationProgress(0, 0, "Prefetching: prior approved allocations"));
         // 2c4. PrevAllocatedQty seed — sum of allocated qty per (StoreID, DivCode) from
         // approved Headers' detail rows whose (ContNo, Country) pair has NOT yet been
         // marked complete in the Azure WMS DB's WmsBuildingCompletion table.
@@ -385,6 +396,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         var distinctDivs = divByItem.Values.Where(d => d > 0).Distinct().ToArray();
         if (distinctDivs.Length == 0) return new(result, blocked);
 
+        progress?.Report(new AllocationProgress(0, 0, "Prefetching: eligible stores"));
         // eomStores narrowed by the country filter computed above.
         var eomStores = (await c.QueryAsync<(string StoreID, string Country, int DivCode, string VolumeGroup, int MerchNeedMonth)>(
             new CommandDefinition(@"
@@ -405,6 +417,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             .GroupBy(s => s.DivCode)
             .ToDictionary(g => g.Key, g => g.ToList());
 
+        progress?.Report(new AllocationProgress(0, 0, "Prefetching: SKU Max bands"));
         var rulesRaw = (await c.QueryAsync<(string Country, int DivCode, string GroupCode, int WHStockFrom, int WHStockTo, int SKUMax)>(
             new CommandDefinition(@"
                 SELECT Country, DivCode, GroupCode, WHStockFrom, WHStockTo, SKUMax
@@ -416,6 +429,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             .GroupBy(r => (r.Country, r.DivCode, r.GroupCode))
             .ToDictionary(g => g.Key, g => g.ToList());
 
+        progress?.Report(new AllocationProgress(0, 0, "Prefetching: OTS values"));
         // Latest OTS raw components per (StoreID, DivCode). We keep targetEOM / SOH /
         // SalesTgtWk / Σ trfQty separately so the per-item loop can recompute OTS as
         // AllocatedQty grows during this batch. The OTS formula stays in C# now:
