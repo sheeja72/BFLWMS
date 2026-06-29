@@ -140,12 +140,20 @@ else
                 <div class="aiwms-result-tag">RESULT</div>
                 <div class="aiwms-result-value">
                     @al.Result @(_lastItem?.Season is { Length: > 0 } s ? " - " + s : "")
-                    <span class="aiwms-pill tier@((int)al.Tier)" style="margin-left:10px;font-size:11px">Tier @((int)al.Tier)</span>
+                    <span class="aiwms-pill tier@((int)al.Tier)" style="margin-left:10px;font-size:11px"
+                          title="@TierTitle(al.Tier)">Tier @((int)al.Tier) — @TierShort(al.Tier)</span>
+                    @if (al.Manual)
+                    {
+                        <span class="aiwms-pill tier4" style="margin-left:6px;font-size:11px;background:#fff3cd;color:#664d03;border:1px solid #ffe69c"
+                              title="Item not in container — added from usa.upcbarcodes at scan time">MANUAL</span>
+                    }
                 </div>
             </div>
             <div class="aiwms-result-meta">
-                <div><span class="lbl">PalletType</span> <b>@al.PalletType</b></div>
-                <div><span class="lbl">LPMDt</span> <b>@al.LpmDt?.ToString("yyyy-MM-dd")</b></div>
+                <div><span class="lbl">Store</span> <b>@(al.StoreId ?? "—")</b></div>
+                <div><span class="lbl">Division</span> <b>@(al.Division ?? "—")</b></div>
+                <div><span class="lbl">PalletType</span> <b>@(al.PalletType ?? "—")</b></div>
+                <div><span class="lbl">LPMDt</span> <b>@(al.LpmDt?.ToString("yyyy-MM-dd") ?? "—")</b></div>
                 <div><span class="lbl">PO</span> <b>@(al.PoNumber ?? "NA")</b></div>
                 @if (_currentBoxNo is not null) { <div><span class="lbl">Box</span> <b>@_currentBoxNo</b></div> }
             </div>
@@ -373,8 +381,10 @@ else
             var thisBox = _openBoxes.FirstOrDefault(b => b.BoxNumber == boxNo);
             if (thisBox is not null && string.IsNullOrEmpty(thisBox.ToteId))
                 _globalInfo = $"Box {boxNo} has no Tote attached — click Check-In on its row in the grid below to scan a tote.";
-            else if (item.Availability == ItemAvailability.InItemMaster)
-                _globalInfo = $"Note: {code} not in container {_contno}; SHOP fallback applied.";
+            else if (alloc.Tier == AllocationTier.Tier2_OtsOverflow)
+                _globalInfo = $"Overflow piece — all allocated rows for {code} are full. Routed to store {alloc.StoreId} by OTS.";
+            else if (alloc.Tier == AllocationTier.Tier3_ManualNewItem)
+                _globalInfo = $"{code} was not in container {_contno} — added from item master and routed to store {alloc.StoreId} by OTS.";
 
             await Audit.LogAsync("Building.Item", $"{_contno}/{boxNo}/{code}", 'I',
                 $"Building/{_contno}/{boxNo}",
@@ -390,7 +400,7 @@ else
 
     private async Task ClearBox(string boxNo)
     {
-        if (!await ConfirmAsync($"Clear box {boxNo}? This reverses every PCR change made by scans into this box, and deletes all staged items."))
+        if (!await ConfirmAsync($"Clear box {boxNo}? This reverses every scan made into this box (decrementing or deleting the corresponding WMS_ContAllocationData rows) and deletes the box."))
             return;
         ClearTransient(); _busy = true;
         try
@@ -496,4 +506,20 @@ else
         try { await JS.InvokeVoidAsync("eval", "var a=new AudioContext();var o=a.createOscillator();o.frequency.value=200;o.connect(a.destination);o.start();setTimeout(()=>o.stop(),120);"); }
         catch { }
     }
+
+    private static string TierShort(AllocationTier t) => t switch
+    {
+        AllocationTier.Tier1_HasCapacity   => "matched",
+        AllocationTier.Tier2_OtsOverflow   => "OTS overflow",
+        AllocationTier.Tier3_ManualNewItem => "manual",
+        _ => t.ToString(),
+    };
+
+    private static string TierTitle(AllocationTier t) => t switch
+    {
+        AllocationTier.Tier1_HasCapacity   => "Tier 1 — existing allocation row had capacity (QtyIssue<Qty); QtyIssue incremented.",
+        AllocationTier.Tier2_OtsOverflow   => "Tier 2 — item is in this container but every allocation row is full. Best store picked by remaining OTS (division-scoped, recomputed on the fly).",
+        AllocationTier.Tier3_ManualNewItem => "Tier 3 — item was not in this container. Item details pulled from usa.upcbarcodes; best store picked by remaining OTS.",
+        _ => "",
+    };
 }
