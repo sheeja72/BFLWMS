@@ -22,23 +22,31 @@ public static class DbOpContext
 }
 
 /// <summary>
-/// LPM Manual Building business logic — Phase 2d.
+/// LPM Manual Building business logic — Phase C (ContAllocationData-driven).
 ///
-/// Routing (post-Azure migration):
-///   - Azure SQL WMS DB (WmsAzure conn) — ALL transactional writes + most reads.
-///     Tables: WmsPCR, WmsOpenBox, WmsOpenBoxItem, WmsOpenBoxScan, WmsBoxSequence,
-///     WmsContainerPhotoCheck, WmsOpenUSACont, WmsKNBBoxes, WmsBuildingCompletion,
-///     WmsBlueToteIDMaster, WmsUPCBoxHead, WmsUPCBoxDet, WMSContBuilding.
-///   - OnPremBackupDB (UAE backup conn) — read-only validation for:
-///     contreceipt, upc_subclass, SubclassMaster.
+/// Source of truth for allocation is now dbo.WMS_ContAllocationData on the
+/// Azure WMS DB (synced from LPMSIM via the Data Sync feature). WmsPCR is
+/// retired.
 ///
-/// Country filter: every Azure WMS query restricts by Country from user.Country,
-/// because all 7 countries share one DB.
+/// Every scan is recorded in dbo.WMSContBuildScanData (the scan ledger) —
+/// one row per piece, carrying BoxNo + ToteID + StoreID + Tier + Manual flag
+/// for full audit + Clear-Box reversal.
 ///
-/// Concurrency:
-///   - Box-number minted via UPDLOCK,HOLDLOCK on WmsBoxSequence — never duplicates.
-///   - WmsOpenBox.ToteID UNIQUE — blocks two open boxes sharing a tote.
-///   - PCR allocation uses SERIALIZABLE.
+/// Allocation has 3 tiers:
+///   - Tier 1: existing WMS_ContAllocationData row with QtyIssue &lt; Qty;
+///             increment QtyIssue.
+///   - Tier 2: item is in container but every row is full; pick the
+///             StoreID with the highest remaining OTS (Division-scoped,
+///             recomputed live against the scan ledger), insert a new row
+///             with Qty=1, QtyIssue=1, Manual='N'.
+///   - Tier 3: item NOT in container at all; look up usa.dbo.upcbarcodes on
+///             OnPremBackup (UAE only). If not found, error. If found, pick
+///             StoreID via OTS, insert with Manual='Y',
+///             ItemSource='usa.upcbarcodes'.
+///
+/// OTS pick is "recompute on the fly" (Q6): the OTS column is never
+/// decremented; each pick subtracts the count of non-reversed scans for that
+/// StoreID + Division from the column value.
 /// </summary>
 public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser user, IMemoryCache cache)
 {
@@ -56,7 +64,9 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         return c;
     }
 
-    /// <summary>UAE-only backup DB — read-only validation reads (contreceipt, upc_subclass, SubclassMaster).</summary>
+    /// <summary>UAE on-prem backup DB — read-only fallbacks (usa.dbo.upcbarcodes for
+    /// Tier-3 new-item lookup; datareporting.dbo.vupc_subclass / SubclassMaster for
+    /// hierarchy on items that aren't in the container).</summary>
     private SqlConnection OpenOnPremBackup()
     {
         var c = new SqlConnection(resolver.GetOnPremBackupConnectionString());
@@ -72,35 +82,25 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         if (contno.Length > 50) return new(false, "Container number too long (max 50).");
 
         var country = Country;
+        await using var c = OpenWms();
 
-        // 1a. Has this container already been completed? (Azure WMS)
-        await using (var c = OpenWms())
-        {
-            var built = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-                "SELECT TOP 1 1 FROM dbo.WmsBuildingCompletion WITH (NOLOCK) WHERE Country = @ct AND ContNo = @c",
-                new { ct = country, c = contno }, cancellationToken: ct));
-            if (built == 1) return new(false, $"Container {contno} building is already completed.");
-        }
+        var built = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
+            "SELECT TOP 1 1 FROM dbo.WmsBuildingCompletion WITH (NOLOCK) WHERE Country = @ct AND ContNo = @c",
+            new { ct = country, c = contno }, cancellationToken: ct));
+        if (built == 1) return new(false, $"Container {contno} building is already completed.");
 
-        // 1b. Receipt check goes to the OnPremBackup DB (contreceipt is not migrated).
-        await using (var c = OpenOnPremBackup())
-        {
-            var received = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-                "SELECT TOP 1 1 FROM dbo.contreceipt WITH (NOLOCK) WHERE refno = @c",
-                new { c = contno }, cancellationToken: ct));
-            if (received != 1) return new(false, $"Container {contno} receipt is not done.");
-        }
+        var open = await c.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT TOP 1 Closed FROM dbo.WmsOpenUSACont WITH (NOLOCK) WHERE Country = @ct AND contno = @c",
+            new { ct = country, c = contno }, cancellationToken: ct));
+        if (open is null) return new(false, $"Container {contno} is not open in WmsOpenUSACont.");
+        if (string.Equals(open, "Y", StringComparison.OrdinalIgnoreCase))
+            return new(false, $"Container {contno} is closed in WmsOpenUSACont.");
 
-        // 1c. Is the container open in our open-container table? (Azure WMS)
-        await using (var c = OpenWms())
-        {
-            var open = await c.ExecuteScalarAsync<string?>(new CommandDefinition(
-                "SELECT TOP 1 Closed FROM dbo.WmsOpenUSACont WITH (NOLOCK) WHERE Country = @ct AND contno = @c",
-                new { ct = country, c = contno }, cancellationToken: ct));
-            if (open is null) return new(false, $"Container {contno} is not open in WmsOpenUSACont.");
-            if (string.Equals(open, "Y", StringComparison.OrdinalIgnoreCase))
-                return new(false, $"Container {contno} is closed in WmsOpenUSACont.");
-        }
+        var hasAlloc = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
+            "SELECT TOP 1 1 FROM dbo.WMS_ContAllocationData WITH (NOLOCK) WHERE ContNo = @c",
+            new { c = contno }, cancellationToken: ct));
+        if (hasAlloc != 1)
+            return new(false, $"Container {contno} has no allocation data on Azure — run Data Sync first.");
 
         return new(true, null);
     }
@@ -133,207 +133,393 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
 
         if (parsed.HasPo)
         {
-            // PO validation now reads from WmsPCR (USAOrgFile dropped — PCR carries OraPoNO).
+            // PO validation now reads from WMS_ContAllocationData (sync source of truth).
             var poOk = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-                @"SELECT TOP 1 1 FROM dbo.WmsPCR WITH (NOLOCK)
-                  WHERE Country = @ct AND Contno = @cont AND OraPoNO = @po",
-                new { ct = country, cont = contno, po = parsed.PoNumber }, cancellationToken: ct));
+                @"SELECT TOP 1 1 FROM dbo.WMS_ContAllocationData WITH (NOLOCK)
+                  WHERE ContNo = @cont AND ORAPONo = @po",
+                new { cont = contno, po = parsed.PoNumber }, cancellationToken: ct));
             if (poOk != 1) return new(false, $"PO {parsed.PoNumber} on box does not match container {contno}.", parsed.PoNumber, true);
         }
         return new(true, null, parsed.PoNumber, parsed.HasPo);
     }
 
-    // ==================== 3. One-time photo qty match ====================
-    public async Task<PhotoQtyMatchResult> EnsurePhotoQtyMatchAsync(string contno, CancellationToken ct = default)
-    {
-        var country = Country;
-        await using var c = OpenWms();
-
-        var existing = await c.QueryFirstOrDefaultAsync<(int PhotoQty, int OrgQty, bool Matched)>(new CommandDefinition(
-            @"SELECT PhotoQty, OrgQty, Matched FROM dbo.WmsContainerPhotoCheck
-              WHERE Country = @ct AND Contno = @c",
-            new { ct = country, c = contno }, cancellationToken: ct));
-        if (existing.Matched) return new(true, null, existing.PhotoQty, existing.OrgQty, true);
-
-        // PCR existence check
-        var atLeastOne = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT TOP 1 1 FROM dbo.WmsPCR WITH (NOLOCK) WHERE Country = @ct AND Contno = @c",
-            new { ct = country, c = contno }, cancellationToken: ct));
-        if (atLeastOne != 1) return new(false, $"No WmsPCR rows for container {contno}.", 0, 0, false);
-
-        // Photo qty = allocated so far.
-        var photo = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT ISNULL(SUM(QtyIssue),0) FROM dbo.WmsPCR WITH (NOLOCK) WHERE Country = @ct AND Contno = @c",
-            new { ct = country, c = contno }, cancellationToken: ct)) ?? 0;
-        // Manifest qty = expected (denormalised from old usa.dbo.USAOrgFile.orgqty).
-        var org = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT ISNULL(SUM(ManifestQty),0) FROM dbo.WmsPCR WITH (NOLOCK) WHERE Country = @ct AND Contno = @c",
-            new { ct = country, c = contno }, cancellationToken: ct)) ?? 0;
-        var matched = photo == org;
-
-        await c.ExecuteAsync(new CommandDefinition(
-            @"MERGE dbo.WmsContainerPhotoCheck AS t
-              USING (SELECT @ct AS Country, @c AS Contno) s ON t.Country = s.Country AND t.Contno = s.Contno
-              WHEN MATCHED THEN UPDATE SET PhotoQty=@p, OrgQty=@o, Matched=@m, CheckedTS=SYSDATETIME(), CheckedBy=@u
-              WHEN NOT MATCHED THEN INSERT (Country, Contno, PhotoQty, OrgQty, Matched, CheckedTS, CheckedBy)
-                VALUES (@ct, @c, @p, @o, @m, SYSDATETIME(), @u);",
-            new { ct = country, c = contno, p = photo, o = org, m = matched, u = user.Name }, cancellationToken: ct));
-
-        if (!matched) return new(false, $"Container Allocated Qty : {photo}, Container Manifest Qty : {org}, does not match, Cannot Proceed.", photo, org, false);
-        return new(true, null, photo, org, false);
-    }
-
-    // ==================== 4. Item details ====================
-    // Sourced from WmsPCR (denormalised — has ItemName, Style, Size, Color, Brand,
-    // Season, Gender, Hscode). USAOrgFile/UPCbarcodes/itemgroup dropped.
-    // Subclass details still come from OnPremBackup (upc_subclass + SubclassMaster).
+    // ==================== 3. Item details ====================
+    // Primary source = WMS_ContAllocationData (denormalised — has ItemName,
+    // Style, Size, Color, Brand, Season, Gender, HsCode, Division, Department,
+    // Class, Family, Subclass after Phase B enrichment).
+    // Fallback for items not in the container = usa.dbo.upcbarcodes on
+    // OnPremBackup, with hierarchy from datareporting.
     public async Task<ItemDetails?> GetItemDetailsAsync(string contno, string itemCode, CancellationToken ct = default)
     {
-        var country = Country;
-
         await using var c = OpenWms();
-        var item = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
-            @"SELECT TOP 1 Itemcode, ItemName, Style, Size, Color, Brand, Season, Gender, Hscode
-              FROM dbo.WmsPCR WITH (NOLOCK)
-              WHERE Country = @ct AND Contno = @c AND Itemcode = @i",
-            new { ct = country, c = contno, i = itemCode }, cancellationToken: ct));
+        var inAlloc = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
+            @"SELECT TOP 1 Itemcode, Itemname, Style, [Size], Color, Brand, Season, Gender, HsCode,
+                           GroupCode, Division, Department, [Class], Family, Subclass
+              FROM dbo.WMS_ContAllocationData WITH (NOLOCK)
+              WHERE ContNo = @c AND Itemcode = @i",
+            new { c = contno, i = itemCode }, cancellationToken: ct));
 
-        var availability = ItemAvailability.NotFound;
-        string? itemcode = itemCode, itemname = null, style = null, size = null, color = null,
-                brand = null, season = null, gender = null, hscode = null;
-
-        if (item is not null)
+        if (inAlloc is not null)
         {
-            availability = ItemAvailability.InContainer;
-            itemcode = item.Itemcode; itemname = item.ItemName; style = item.Style;
-            size = item.Size; color = item.Color; brand = item.Brand;
-            season = item.Season; gender = item.Gender; hscode = item.Hscode;
+            return new ItemDetails(
+                (string)inAlloc.Itemcode,
+                (string?)inAlloc.Itemname,
+                (string?)inAlloc.Style,
+                (string?)inAlloc.Size,
+                (string?)inAlloc.Color,
+                (string?)inAlloc.Brand,
+                (string?)inAlloc.Season,
+                (string?)inAlloc.Gender,
+                (string?)inAlloc.HsCode,
+                Lpm: null,
+                (string?)inAlloc.GroupCode,
+                GroupName: null,
+                (string?)inAlloc.Division,
+                (string?)inAlloc.Department,
+                (string?)inAlloc.Class,
+                (string?)inAlloc.Family,
+                (string?)inAlloc.Subclass,
+                ItemAvailability.InContainer);
         }
 
-        // Subclass hierarchy stays on OnPremBackup.
-        string? division = null, dept = null, klass = null, family = null, subclass = null;
-        await using (var b = OpenOnPremBackup())
+        // Not in container — try the item master.
+        var master = await LookupItemMasterAsync(itemCode, ct);
+        if (master is null)
         {
-            var mh4 = await b.ExecuteScalarAsync<int?>(new CommandDefinition(
-                "SELECT TOP 1 MH4ID FROM dbo.upc_subclass WITH (NOLOCK) WHERE itemcode = @i",
-                new { i = itemCode }, cancellationToken: ct));
-            if (mh4 is not null)
-            {
-                var h = await b.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
-                    @"SELECT TOP 1 Division, Department, Class, Family, Subclass
-                      FROM dbo.SubclassMaster WITH (NOLOCK) WHERE MH4ID = @m",
-                    new { m = mh4 }, cancellationToken: ct));
-                if (h is not null)
-                {
-                    division = h.Division; dept = h.Department; klass = h.Class;
-                    family = h.Family; subclass = h.Subclass;
-                }
-            }
+            return new ItemDetails(itemCode, null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, ItemAvailability.NotFound);
         }
 
-        // groupcode + groupName intentionally dropped (Phase 2b decision).
-        return new ItemDetails(itemcode!, itemname, style, size, color, brand, season, gender,
-            hscode, null, null, null, division, dept, klass, family, subclass, availability);
+        return new ItemDetails(
+            itemCode,
+            master.Itemname, master.Style, master.Size, master.Color,
+            master.Brand, master.Season, master.Gender, master.HsCode,
+            Lpm: null, GroupCode: null, GroupName: null,
+            master.Division, master.Department, master.Class, master.Family, master.Subclass,
+            ItemAvailability.InItemMaster);
     }
 
-    // ==================== 5. PCR 4-tier allocation ====================
+    // ==================== 4. Allocation resolution (3 tiers) ====================
     public async Task<AllocationResult> ResolveAllocationAsync(
         string contno, string itemCode, string? poNumber, string? style, CancellationToken ct = default)
     {
-        var country = Country;
-        await using var c = OpenWms();
-        await using var tx = (SqlTransaction)await c.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-
-        var t1Sql = poNumber is null
-            ? @"SELECT TOP 1 IdNO, Result, LPMDT, OraPoNO, ResultType
-                FROM dbo.WmsPCR WITH (UPDLOCK, ROWLOCK)
-                WHERE Country = @ct AND Contno = @c AND Itemcode = @i AND ISNULL(QtyIssue,0) = 0
-                ORDER BY Contno, OraPoNO, LPMDT"
-            : @"SELECT TOP 1 IdNO, Result, LPMDT, OraPoNO, ResultType
-                FROM dbo.WmsPCR WITH (UPDLOCK, ROWLOCK)
-                WHERE Country = @ct AND Contno = @c AND Itemcode = @i AND OraPoNO = @p AND ISNULL(QtyIssue,0) = 0
-                ORDER BY Contno, OraPoNO, LPMDT";
-        var t1 = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
-            t1Sql, new { ct = country, c = contno, i = itemCode, p = poNumber }, transaction: tx, cancellationToken: ct));
-
-        if (t1 is not null)
+        // ----- Tier 1 + Tier 2 inside a single Azure WMS connection/tx -----
+        await using (var c = OpenWms())
+        await using (var tx = (SqlTransaction)await c.BeginTransactionAsync(IsolationLevel.Serializable, ct))
         {
-            await c.ExecuteAsync(new CommandDefinition(
-                "UPDATE dbo.WmsPCR SET QtyIssue = ISNULL(QtyIssue,0) + 1 WHERE Country = @ct AND IdNO = @id",
-                new { ct = country, id = (long)t1.IdNO }, transaction: tx, cancellationToken: ct));
-            await tx.CommitAsync(ct);
-            return new AllocationResult(true, (string)t1.Result, (DateTime?)t1.LPMDT, (string?)t1.OraPoNO,
-                (string?)t1.ResultType, AllocationTier.Tier1_ExactPoQty0, (long)t1.IdNO, 'U');
-        }
-
-        var t2Sql = poNumber is null
-            ? @"SELECT TOP 1 LPMDT, OraPoNO, ResultType FROM dbo.WmsPCR WITH (NOLOCK)
-                WHERE Country = @ct AND Contno = @c AND Itemcode = @i ORDER BY LPMDT"
-            : @"SELECT TOP 1 LPMDT, OraPoNO, ResultType FROM dbo.WmsPCR WITH (NOLOCK)
-                WHERE Country = @ct AND Contno = @c AND Itemcode = @i AND OraPoNO = @p ORDER BY LPMDT";
-        var t2 = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
-            t2Sql, new { ct = country, c = contno, i = itemCode, p = poNumber }, transaction: tx, cancellationToken: ct));
-
-        if (t2 is not null)
-        {
-            var newId = await InsertNewPcrAsync(c, tx, country, contno, itemCode, (string?)t2.OraPoNO ?? poNumber,
-                (DateTime?)t2.LPMDT ?? DateTime.Now.Date, "SHOP", (string?)t2.ResultType, ct);
-            await tx.CommitAsync(ct);
-            return new AllocationResult(true, "SHOP", (DateTime?)t2.LPMDT, (string?)t2.OraPoNO,
-                (string?)t2.ResultType, AllocationTier.Tier2_ExactNoQty, newId, 'I');
-        }
-
-        if (!string.IsNullOrEmpty(style))
-        {
-            var t3sql = @"SELECT TOP 1 LPMDT, OraPoNO, ResultType, Result FROM dbo.WmsPCR WITH (NOLOCK)
-                  WHERE Country = @ct AND Contno = @c AND Style = @s AND (@p IS NULL OR OraPoNO = @p)
-                  ORDER BY LPMDT";
-            DbOpContext.Set("PCR Tier-3 (style fallback) on dbo.WmsPCR", t3sql);
-            var t3 = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
-                t3sql, new { ct = country, c = contno, s = style, p = poNumber },
+            var t1Sql = @"
+                SELECT TOP 1 IdNo, Result, ResultType, LPMDt, ORAPONo, StoreID, Division
+                  FROM dbo.WMS_ContAllocationData WITH (UPDLOCK, ROWLOCK)
+                 WHERE ContNo = @c AND Itemcode = @i
+                   AND (@p IS NULL OR ORAPONo = @p)
+                   AND ISNULL(QtyIssue,0) < ISNULL(Qty,0)
+                 ORDER BY ContNo, ORAPONo, LPMDt, IdNo";
+            DbOpContext.Set("Tier-1 lookup on dbo.WMS_ContAllocationData", t1Sql);
+            var t1 = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
+                t1Sql, new { c = contno, i = itemCode, p = poNumber },
                 transaction: tx, cancellationToken: ct));
-            if (t3 is not null)
+
+            if (t1 is not null)
             {
-                var newId = await InsertNewPcrAsync(c, tx, country, contno, itemCode, (string?)t3.OraPoNO ?? poNumber,
-                    (DateTime?)t3.LPMDT ?? DateTime.Now.Date, (string)t3.Result ?? "SHOP", (string?)t3.ResultType, ct);
+                var id1 = (int)t1.IdNo;
+                await c.ExecuteAsync(new CommandDefinition(
+                    "UPDATE dbo.WMS_ContAllocationData SET QtyIssue = ISNULL(QtyIssue,0) + 1 WHERE IdNo = @id",
+                    new { id = id1 }, transaction: tx, cancellationToken: ct));
                 await tx.CommitAsync(ct);
-                return new AllocationResult(true, (string?)t3.Result ?? "SHOP", (DateTime?)t3.LPMDT,
-                    (string?)t3.OraPoNO, (string?)t3.ResultType, AllocationTier.Tier3_StyleMatch, newId, 'I');
+                return new AllocationResult(
+                    Found: true,
+                    Result: (string?)t1.Result ?? "SHOP",
+                    LpmDt: (DateTime?)t1.LPMDt,
+                    PoNumber: (string?)t1.ORAPONo,
+                    PalletType: (string?)t1.ResultType,
+                    Tier: AllocationTier.Tier1_HasCapacity,
+                    AllocationIdNo: id1,
+                    Action: 'U',
+                    StoreId: (string?)t1.StoreID,
+                    Division: (string?)t1.Division,
+                    Manual: false);
             }
+
+            var anyInContainer = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
+                @"SELECT TOP 1 Division, Brand, Season, Style, [Size], Color, Itemname, GroupCode,
+                               ResultType, LPMDt, ORAPONo, Department, HsCode, Gender,
+                               [Class], Family, Subclass, SalesPrice, BuildingCategory, Country
+                    FROM dbo.WMS_ContAllocationData WITH (NOLOCK)
+                   WHERE ContNo = @c AND Itemcode = @i
+                   ORDER BY IdNo",
+                new { c = contno, i = itemCode }, transaction: tx, cancellationToken: ct));
+
+            if (anyInContainer is not null)
+            {
+                var division2 = (string?)anyInContainer.Division;
+                var store2 = await PickBestStoreAsync(c, tx, contno, division2, ct);
+                if (store2 is null)
+                {
+                    await tx.RollbackAsync(ct);
+                    return new AllocationResult(false, "", null, null, null,
+                        AllocationTier.Tier2_OtsOverflow, null, 'I', null, null, false,
+                        Error: $"No stores with available OTS in container {contno} for division={division2 ?? "(null)"}. Cannot place overflow piece.");
+                }
+
+                var inserted2 = await InsertOverflowRowAsync(
+                    c, tx, contno, itemCode, poNumber, store2, division2,
+                    country:    (string?)anyInContainer.Country,
+                    itemname:   (string?)anyInContainer.Itemname,
+                    style:      (string?)anyInContainer.Style,
+                    size:       (string?)anyInContainer.Size,
+                    color:      (string?)anyInContainer.Color,
+                    brand:      (string?)anyInContainer.Brand,
+                    season:     (string?)anyInContainer.Season,
+                    gender:     (string?)anyInContainer.Gender,
+                    hsCode:     (string?)anyInContainer.HsCode,
+                    groupCode:  (string?)anyInContainer.GroupCode,
+                    klass:      (string?)anyInContainer.Class,
+                    family:     (string?)anyInContainer.Family,
+                    subclass:   (string?)anyInContainer.Subclass,
+                    department: (string?)anyInContainer.Department,
+                    resultType: (string?)anyInContainer.ResultType,
+                    lpmDt:      (DateTime?)anyInContainer.LPMDt,
+                    salesPrice: (decimal?)anyInContainer.SalesPrice,
+                    buildingCategory: (string?)anyInContainer.BuildingCategory,
+                    result: "SHOP",
+                    manual: 'N',
+                    itemSource: null,
+                    ct: ct);
+
+                await tx.CommitAsync(ct);
+                return new AllocationResult(
+                    Found: true, Result: "SHOP",
+                    LpmDt: (DateTime?)anyInContainer.LPMDt,
+                    PoNumber: poNumber,
+                    PalletType: (string?)anyInContainer.ResultType,
+                    Tier: AllocationTier.Tier2_OtsOverflow,
+                    AllocationIdNo: inserted2,
+                    Action: 'I',
+                    StoreId: store2,
+                    Division: division2,
+                    Manual: false);
+            }
+
+            // No item in this container at all — fall through to Tier 3 outside this tx.
+            await tx.RollbackAsync(ct);
         }
 
-        var earliest = await c.QueryFirstOrDefaultAsync<(DateTime? Dt, string? Po, string? Pt)>(new CommandDefinition(
-            @"SELECT TOP 1 LPMDT AS Dt, OraPoNO AS Po, ResultType AS Pt
-              FROM dbo.WmsPCR WITH (NOLOCK)
-              WHERE Country = @ct AND Contno = @c ORDER BY LPMDT",
-            new { ct = country, c = contno }, transaction: tx, cancellationToken: ct));
-        var dt = earliest.Dt ?? DateTime.Now.Date;
-        var po = earliest.Po ?? poNumber;
-        var pt = earliest.Pt;
-        var id4 = await InsertNewPcrAsync(c, tx, country, contno, itemCode, po, dt, "SHOP", pt, ct);
-        await tx.CommitAsync(ct);
-        return new AllocationResult(true, "SHOP", dt, po, pt, AllocationTier.Tier4_NewItem, id4, 'I');
+        // ----- Tier 3: item NOT in container; look up usa.upcbarcodes -----
+        var master = await LookupItemMasterAsync(itemCode, ct);
+        if (master is null)
+        {
+            return new AllocationResult(false, "", null, null, null,
+                AllocationTier.Tier3_ManualNewItem, null, 'I', null, null, false,
+                Error: $"Item {itemCode} is not in container {contno} and not found in item master. Create it via Item Encoding before scanning.");
+        }
+
+        await using (var c3 = OpenWms())
+        await using (var tx3 = (SqlTransaction)await c3.BeginTransactionAsync(IsolationLevel.Serializable, ct))
+        {
+            var store3 = await PickBestStoreAsync(c3, tx3, contno, master.Division, ct);
+            if (store3 is null)
+            {
+                await tx3.RollbackAsync(ct);
+                return new AllocationResult(false, "", null, null, null,
+                    AllocationTier.Tier3_ManualNewItem, null, 'I', null, null, true,
+                    Error: $"Container {contno} has no store eligible for OTS allocation.");
+            }
+
+            var inserted3 = await InsertOverflowRowAsync(
+                c3, tx3, contno, itemCode, poNumber, store3, master.Division,
+                country:    Country,
+                itemname:   master.Itemname,
+                style:      master.Style,
+                size:       master.Size,
+                color:      master.Color,
+                brand:      master.Brand,
+                season:     master.Season,
+                gender:     master.Gender,
+                hsCode:     master.HsCode,
+                groupCode:  null,
+                klass:      master.Class,
+                family:     master.Family,
+                subclass:   master.Subclass,
+                department: master.Department,
+                resultType: null,
+                lpmDt:      null,
+                salesPrice: null,
+                buildingCategory: master.Division,
+                result: "SHOP",
+                manual: 'Y',
+                itemSource: "usa.upcbarcodes",
+                ct: ct);
+
+            await tx3.CommitAsync(ct);
+            return new AllocationResult(
+                Found: true, Result: "SHOP",
+                LpmDt: null, PoNumber: poNumber, PalletType: null,
+                Tier: AllocationTier.Tier3_ManualNewItem,
+                AllocationIdNo: inserted3,
+                Action: 'I',
+                StoreId: store3,
+                Division: master.Division,
+                Manual: true);
+        }
     }
 
-    private async Task<long> InsertNewPcrAsync(SqlConnection c, SqlTransaction tx,
-        string country, string contno, string itemCode, string? po, DateTime lpmDt,
-        string result, string? palletType, CancellationToken ct)
+    // ----- helper: OTS pick (recompute on the fly, division-scoped with container-wide fallback) -----
+    private async Task<string?> PickBestStoreAsync(
+        SqlConnection c, SqlTransaction tx, string contno, string? division, CancellationToken ct)
     {
-        // WmsPCR.IdNO is IDENTITY by design (Phase 2c install script).
-        var sql = @"
-            INSERT INTO dbo.WmsPCR
-              (Country, Contno, Itemcode, OraPoNO, LPMDT, Result, ResultType, QtyIssue)
-            VALUES (@ct, @c, @i, @p, @d, @r, @pt, 1);
-            SELECT CAST(SCOPE_IDENTITY() AS BIGINT);";
-        DbOpContext.Set("PCR INSERT on dbo.WmsPCR (IDENTITY)", sql);
-        var id = await c.ExecuteScalarAsync<long>(new CommandDefinition(
-            sql,
-            new { ct = country, c = contno, i = itemCode, p = po, d = lpmDt, r = result, pt = palletType },
+        if (!string.IsNullOrEmpty(division))
+        {
+            var divSql = @"
+                ;WITH StoreOts AS (
+                    SELECT a.StoreID, MAX(ISNULL(a.OTS, 0)) AS OtsSeed
+                      FROM dbo.WMS_ContAllocationData a WITH (NOLOCK)
+                     WHERE a.ContNo = @c AND a.Division = @d AND a.StoreID IS NOT NULL
+                     GROUP BY a.StoreID
+                ),
+                DivScans AS (
+                    SELECT s.StoreID, COUNT_BIG(*) AS DivScanned
+                      FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
+                     WHERE s.ContNo = @c AND s.Division = @d AND s.Reversed = 'N'
+                     GROUP BY s.StoreID
+                ),
+                AnyScans AS (
+                    SELECT s.StoreID, COUNT_BIG(*) AS TotalScanned
+                      FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
+                     WHERE s.ContNo = @c AND s.Reversed = 'N'
+                     GROUP BY s.StoreID
+                )
+                SELECT TOP 1 o.StoreID
+                  FROM StoreOts o
+                  LEFT JOIN DivScans d ON d.StoreID = o.StoreID
+                  LEFT JOIN AnyScans a ON a.StoreID = o.StoreID
+                 ORDER BY (o.OtsSeed - ISNULL(d.DivScanned,0)) DESC,
+                          ISNULL(a.TotalScanned,0) ASC,
+                          o.StoreID ASC;";
+            DbOpContext.Set("OTS pick (division-scoped)", divSql);
+            var divPick = await c.ExecuteScalarAsync<string?>(new CommandDefinition(
+                divSql, new { c = contno, d = division },
+                transaction: tx, cancellationToken: ct));
+            if (divPick is not null) return divPick;
+        }
+
+        var fbSql = @"
+            ;WITH StoreOts AS (
+                SELECT a.StoreID, MAX(ISNULL(a.OTS, 0)) AS OtsSeed
+                  FROM dbo.WMS_ContAllocationData a WITH (NOLOCK)
+                 WHERE a.ContNo = @c AND a.StoreID IS NOT NULL
+                 GROUP BY a.StoreID
+            ),
+            AnyScans AS (
+                SELECT s.StoreID, COUNT_BIG(*) AS TotalScanned
+                  FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
+                 WHERE s.ContNo = @c AND s.Reversed = 'N'
+                 GROUP BY s.StoreID
+            )
+            SELECT TOP 1 o.StoreID
+              FROM StoreOts o
+              LEFT JOIN AnyScans a ON a.StoreID = o.StoreID
+             ORDER BY (o.OtsSeed - ISNULL(a.TotalScanned,0)) DESC,
+                      ISNULL(a.TotalScanned,0) ASC,
+                      o.StoreID ASC;";
+        DbOpContext.Set("OTS pick (container-wide fallback)", fbSql);
+        return await c.ExecuteScalarAsync<string?>(new CommandDefinition(
+            fbSql, new { c = contno },
             transaction: tx, cancellationToken: ct));
-        return id;
     }
 
-    // ==================== 6a. Find a matching open box (read-only) ====================
+    // ----- helper: insert a Tier 2/3 overflow row into WMS_ContAllocationData -----
+    private async Task<int> InsertOverflowRowAsync(
+        SqlConnection c, SqlTransaction tx,
+        string contno, string itemCode, string? poNumber,
+        string storeId, string? division,
+        string? country,
+        string? itemname, string? style, string? size, string? color,
+        string? brand, string? season, string? gender, string? hsCode,
+        string? groupCode, string? klass, string? family, string? subclass,
+        string? department, string? resultType, DateTime? lpmDt,
+        decimal? salesPrice, string? buildingCategory,
+        string result, char manual, string? itemSource,
+        CancellationToken ct)
+    {
+        var sql = @"
+            INSERT INTO dbo.WMS_ContAllocationData
+                (ContNo, Country, TrnDate, Itemcode, Itemname, Style, [Size], Color, Brand, Season, Gender,
+                 HsCode, GroupCode, Division, Department, [Class], Family, Subclass, ORAPONo,
+                 ResultType, LPMDt, StoreID, Qty, AllocatedQty, QtyIssue, Result, SalesPrice,
+                 BuildingCategory, Manual, ItemSource)
+            OUTPUT INSERTED.IdNo
+            VALUES
+                (@c, @country, CAST(SYSDATETIME() AS DATE), @i, @itemname, @style, @size, @color, @brand, @season, @gender,
+                 @hsCode, @groupCode, @division, @department, @klass, @family, @subclass, @p,
+                 @resultType, @lpmDt, @store, 1, 1, 1, @result, @salesPrice,
+                 @buildingCategory, @manual, @itemSource);";
+
+        DbOpContext.Set("INSERT overflow row on dbo.WMS_ContAllocationData", sql);
+        return await c.ExecuteScalarAsync<int>(new CommandDefinition(
+            sql,
+            new
+            {
+                c = contno, country, i = itemCode, itemname, style, size, color, brand, season,
+                gender, hsCode, groupCode, division, department, klass, family, subclass, p = poNumber,
+                resultType, lpmDt, store = storeId,
+                result, salesPrice, buildingCategory,
+                manual = manual.ToString(),
+                itemSource
+            },
+            transaction: tx, cancellationToken: ct));
+    }
+
+    // ----- helper: usa.upcbarcodes + datareporting hierarchy lookup (Tier-3 fallback) -----
+    private async Task<ItemMasterRow?> LookupItemMasterAsync(string itemCode, CancellationToken ct)
+    {
+        await using var b = OpenOnPremBackup();
+        var head = await b.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
+            @"SELECT TOP 1 ItemName = itemname, Style = style, [Size] = size, Color = color,
+                           Brand = brand, Season = season, Gender = GENDER, HsCode = hscode
+                FROM usa.dbo.upcbarcodes WITH (NOLOCK)
+               WHERE itemcode = @i",
+            new { i = itemCode }, cancellationToken: ct));
+
+        if (head is null) return null;
+
+        string? division = null, dept = null, klass = null, family = null, subclass = null;
+        var sub = await b.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
+            @"SELECT TOP 1 sm.Division, sm.Department, sm.[Class], sm.Family, sm.Subclass
+                FROM datareporting.dbo.vupc_subclass v WITH (NOLOCK)
+                LEFT JOIN datareporting.dbo.SubclassMaster sm WITH (NOLOCK) ON sm.MH4ID = v.MH4ID
+               WHERE v.itemcode = @i",
+            new { i = itemCode }, cancellationToken: ct));
+        if (sub is not null)
+        {
+            division = (string?)sub.Division;
+            dept     = (string?)sub.Department;
+            klass    = (string?)sub.Class;
+            family   = (string?)sub.Family;
+            subclass = (string?)sub.Subclass;
+        }
+
+        return new ItemMasterRow(
+            Itemname:   (string?)head.ItemName,
+            Style:      (string?)head.Style,
+            Size:       (string?)head.Size,
+            Color:      (string?)head.Color,
+            Brand:      (string?)head.Brand,
+            Season:     (string?)head.Season,
+            Gender:     (string?)head.Gender,
+            HsCode:     (string?)head.HsCode,
+            Division:   division,
+            Department: dept,
+            Class:      klass,
+            Family:     family,
+            Subclass:   subclass);
+    }
+
+    private sealed record ItemMasterRow(
+        string? Itemname, string? Style, string? Size, string? Color,
+        string? Brand, string? Season, string? Gender, string? HsCode,
+        string? Division, string? Department, string? Class, string? Family, string? Subclass);
+
+    // ==================== 5. Find a matching open box (read-only) ====================
     public async Task<string?> FindMatchingOpenBoxAsync(
         string contno, string palletType, string? division, string? season, DateTime? lpmDt,
         CancellationToken ct = default)
@@ -350,7 +536,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
             cancellationToken: ct));
     }
 
-    // ==================== 6b. Open a new box with tote attached up front ====================
+    // ==================== 6. Open a new box with tote attached up front ====================
     public async Task<(bool Ok, string? Error, string BoxNo)> CreateNewOpenBoxAsync(
         string contno, string palletType, string? division, string? season, DateTime? lpmDt,
         string? logisticsBoxNo, string toteId, CancellationToken ct = default)
@@ -398,7 +584,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         return (true, null, boxNo);
     }
 
-    // ==================== 6c. Find existing OR create a new open box (no tote required up front) ====================
+    // ==================== 7. Find existing OR create a new open box (no tote required up front) ====================
     public async Task<string> FindOrCreateOpenBoxAsync(
         string contno, string palletType, string? division, string? season, DateTime? lpmDt,
         string? logisticsBoxNo, CancellationToken ct = default)
@@ -439,48 +625,84 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         return boxNo;
     }
 
-    // ==================== 6d. Stage an item into a known open box ====================
+    // ==================== 8. Stage an item into a known open box + record in scan ledger ====================
     public async Task<int> StageItemToBoxAsync(
-        string boxNo, string itemCode, string? result, long? pcrId, char pcrAction,
-        string? size, string? color, string? style, string? groupCode, string? season,
+        string contno, string boxNo, string itemCode,
+        AllocationResult alloc, ItemDetails item,
         CancellationToken ct = default)
     {
+        if (alloc.AllocationIdNo is null)
+            throw new InvalidOperationException("StageItemToBoxAsync called with AllocationResult.AllocationIdNo = null.");
+
         await using var c = OpenWms();
         await using var tx = (SqlTransaction)await c.BeginTransactionAsync(IsolationLevel.ReadCommitted, ct);
 
-        var stageSql = @"DECLARE @sr INT;
-                    SELECT @sr = SrNo FROM dbo.WmsOpenBoxItem WHERE BoxNo = @b AND ItemCode = @i;
-                    IF @sr IS NULL
-                    BEGIN
-                        SELECT @sr = ISNULL(MAX(SrNo),0) + 1 FROM dbo.WmsOpenBoxItem WHERE BoxNo = @b;
-                        INSERT INTO dbo.WmsOpenBoxItem
-                          (BoxNo, ItemCode, Qty, SrNo, Result, PCRowId, Size, Color, Style, GroupCode, Season)
-                        VALUES (@b, @i, 1, @sr, @r, @pcr, @sz, @co, @st, @gc, @se);
-                    END
-                    ELSE
-                    BEGIN
-                        UPDATE dbo.WmsOpenBoxItem SET Qty = Qty + 1, ScannedTS = SYSDATETIME()
-                         WHERE BoxNo = @b AND ItemCode = @i;
-                    END
-                    SELECT @sr;";
-        DbOpContext.Set("Stage item to existing WmsOpenBox", stageSql);
+        // 1) Per-(box,item) aggregate for the UI grid.
+        var stageSql = @"
+            DECLARE @sr INT;
+            SELECT @sr = SrNo FROM dbo.WmsOpenBoxItem WHERE BoxNo = @b AND ItemCode = @i;
+            IF @sr IS NULL
+            BEGIN
+                SELECT @sr = ISNULL(MAX(SrNo),0) + 1 FROM dbo.WmsOpenBoxItem WHERE BoxNo = @b;
+                INSERT INTO dbo.WmsOpenBoxItem
+                  (BoxNo, ItemCode, Qty, SrNo, Result, PCRowId, Size, Color, Style, GroupCode, Season)
+                VALUES (@b, @i, 1, @sr, @r, @alloc, @sz, @co, @st, @gc, @se);
+            END
+            ELSE
+            BEGIN
+                UPDATE dbo.WmsOpenBoxItem SET Qty = Qty + 1, ScannedTS = SYSDATETIME()
+                 WHERE BoxNo = @b AND ItemCode = @i;
+            END
+            SELECT @sr;";
+        DbOpContext.Set("Stage item — WmsOpenBoxItem upsert", stageSql);
         var srNo = await c.ExecuteScalarAsync<int>(new CommandDefinition(
             stageSql,
-            new { b = boxNo, i = itemCode, r = result, pcr = pcrId,
-                  sz = size, co = color, st = style, gc = groupCode, se = season },
+            new
+            {
+                b = boxNo, i = itemCode, r = alloc.Result,
+                alloc = alloc.AllocationIdNo.Value,
+                sz = item.Size, co = item.Color, st = item.Style,
+                gc = item.GroupCode, se = item.Season
+            },
             transaction: tx, cancellationToken: ct));
 
+        // 2) Scan ledger row (one per piece — the audit + reversal source).
+        var tote = await c.ExecuteScalarAsync<string?>(new CommandDefinition(
+            "SELECT TOP 1 ToteID FROM dbo.WmsOpenBox WITH (NOLOCK) WHERE BoxNo = @b",
+            new { b = boxNo }, transaction: tx, cancellationToken: ct));
+
+        var ledgerSql = @"
+            INSERT INTO dbo.WMSContBuildScanData
+                (Country, ContNo, Itemcode, StoreID, Result, Division, BoxNo, ToteID,
+                 AllocationIdNo, Tier, Manual, ScannedBy)
+            VALUES
+                (@country, @c, @i, @store, @result, @division, @b, @tote,
+                 @alloc, @tier, @manual, @user);";
+        DbOpContext.Set("Insert scan ledger row on dbo.WMSContBuildScanData", ledgerSql);
         await c.ExecuteAsync(new CommandDefinition(
-            @"INSERT INTO dbo.WmsOpenBoxScan (BoxNo, ItemCode, PcrAction, PcrId)
-              VALUES (@b, @i, @a, @id);",
-            new { b = boxNo, i = itemCode, a = pcrAction, id = pcrId },
+            ledgerSql,
+            new
+            {
+                country  = Country,
+                c        = contno,
+                i        = itemCode,
+                store    = alloc.StoreId,
+                result   = alloc.Result,
+                division = alloc.Division,
+                b        = boxNo,
+                tote,
+                alloc    = alloc.AllocationIdNo.Value,
+                tier     = (byte)alloc.Tier,
+                manual   = alloc.Manual ? "Y" : (string?)null,
+                user     = user.Name
+            },
             transaction: tx, cancellationToken: ct));
 
         await tx.CommitAsync(ct);
         return srNo;
     }
 
-    // ==================== 6e. Attach a tote to an existing open box ====================
+    // ==================== 9. Attach a tote to an existing open box ====================
     public async Task<(bool Ok, string? Error)> AttachToteToBoxAsync(string boxNo, string toteId, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(toteId)) return (false, "Tote ID is required.");
@@ -515,14 +737,22 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         await c.ExecuteAsync(new CommandDefinition(
             "UPDATE dbo.WmsOpenBox SET ToteID = @t WHERE BoxNo = @b",
             new { t, b = boxNo }, transaction: tx, cancellationToken: ct));
+
+        // Backfill ToteID on this box's unreversed ledger rows so the audit shows
+        // the tote that actually held the piece.
+        await c.ExecuteAsync(new CommandDefinition(
+            @"UPDATE dbo.WMSContBuildScanData
+                 SET ToteID = @t
+               WHERE BoxNo = @b AND Reversed = 'N' AND (ToteID IS NULL OR ToteID = '')",
+            new { t, b = boxNo }, transaction: tx, cancellationToken: ct));
+
         await tx.CommitAsync(ct);
         return (true, null);
     }
 
-    // ==================== 6f. Clear a box — reverse PCR effects + delete staging ====================
+    // ==================== 10. Clear a box — reverse scan ledger effects + delete staging ====================
     public async Task<(bool Ok, string? Error, int ScansReversed)> ClearBoxAsync(string boxNo, CancellationToken ct = default)
     {
-        var country = Country;
         await using var c = OpenWms();
         await using var tx = (SqlTransaction)await c.BeginTransactionAsync(IsolationLevel.Serializable, ct);
 
@@ -533,147 +763,49 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         if (!string.Equals(owner, user.Name, StringComparison.OrdinalIgnoreCase))
             return (false, $"Box {boxNo} belongs to {owner}, not you.", 0);
 
-        var scans = (await c.QueryAsync<(long Id, string ItemCode, char PcrAction, long? PcrId)>(new CommandDefinition(
-            "SELECT Id, ItemCode, PcrAction, PcrId FROM dbo.WmsOpenBoxScan WITH (UPDLOCK, ROWLOCK) WHERE BoxNo = @b ORDER BY Id DESC",
+        var scans = (await c.QueryAsync<(long ScanId, int AllocationIdNo, byte Tier)>(new CommandDefinition(
+            @"SELECT ScanId, AllocationIdNo, Tier
+                FROM dbo.WMSContBuildScanData WITH (UPDLOCK, ROWLOCK)
+               WHERE BoxNo = @b AND Reversed = 'N'
+               ORDER BY ScanId DESC",
             new { b = boxNo }, transaction: tx, cancellationToken: ct))).AsList();
 
         var reversed = 0;
         foreach (var s in scans)
         {
-            if (s.PcrId is null) continue;
-            if (s.PcrAction == 'U')
+            if (s.Tier == (byte)AllocationTier.Tier1_HasCapacity)
             {
                 await c.ExecuteAsync(new CommandDefinition(
-                    @"UPDATE dbo.WmsPCR
+                    @"UPDATE dbo.WMS_ContAllocationData
                          SET QtyIssue = CASE WHEN ISNULL(QtyIssue,0) > 0 THEN QtyIssue - 1 ELSE 0 END
-                       WHERE Country = @ct AND IdNO = @id",
-                    new { ct = country, id = s.PcrId.Value }, transaction: tx, cancellationToken: ct));
-                reversed++;
+                       WHERE IdNo = @id",
+                    new { id = s.AllocationIdNo }, transaction: tx, cancellationToken: ct));
             }
-            else if (s.PcrAction == 'I')
+            else // Tier 2 / Tier 3 — overflow row was inserted with Qty=1, QtyIssue=1.
             {
                 await c.ExecuteAsync(new CommandDefinition(
-                    "DELETE FROM dbo.WmsPCR WHERE Country = @ct AND IdNO = @id",
-                    new { ct = country, id = s.PcrId.Value }, transaction: tx, cancellationToken: ct));
-                reversed++;
+                    "DELETE FROM dbo.WMS_ContAllocationData WHERE IdNo = @id",
+                    new { id = s.AllocationIdNo }, transaction: tx, cancellationToken: ct));
             }
+            reversed++;
         }
 
         await c.ExecuteAsync(new CommandDefinition(
-            @"DELETE FROM dbo.WmsOpenBoxScan  WHERE BoxNo = @b;
-              DELETE FROM dbo.WmsOpenBoxItem  WHERE BoxNo = @b;
-              DELETE FROM dbo.WmsOpenBox      WHERE BoxNo = @b;",
+            @"UPDATE dbo.WMSContBuildScanData
+                 SET Reversed = 'Y', ReversedTS = SYSDATETIME(), ReversedBy = @u
+               WHERE BoxNo = @b AND Reversed = 'N'",
+            new { b = boxNo, u = user.Name }, transaction: tx, cancellationToken: ct));
+
+        await c.ExecuteAsync(new CommandDefinition(
+            @"DELETE FROM dbo.WmsOpenBoxItem WHERE BoxNo = @b;
+              DELETE FROM dbo.WmsOpenBox     WHERE BoxNo = @b;",
             new { b = boxNo }, transaction: tx, cancellationToken: ct));
 
         await tx.CommitAsync(ct);
         return (true, null, reversed);
     }
 
-    // ==================== 6. Stage scan into open box (or open new) — legacy entry point ====================
-    public async Task<StageScanResult> StageScanAsync(StageScanRequest req, CancellationToken ct = default)
-    {
-        await using var c = OpenWms();
-        await using var tx = (SqlTransaction)await c.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-
-        var existing = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
-            @"SELECT TOP 1 BoxNo FROM dbo.WmsOpenBox WITH (UPDLOCK, ROWLOCK)
-              WHERE Contno = @c AND UserId = @u AND PalletType = @p
-                AND ISNULL(Division,'') = ISNULL(@d,'') AND ISNULL(Season,'') = ISNULL(@s,'')
-                AND ISNULL(LPMDt,'1900-01-01') = ISNULL(@l,'1900-01-01')
-              ORDER BY BoxNo",
-            new { c = req.Contno, u = user.Name, p = req.PalletType, d = req.Division, s = req.Season, l = req.LpmDt?.Date },
-            transaction: tx, cancellationToken: ct));
-
-        string boxNo;
-        bool newBox;
-        if (existing is not null)
-        {
-            boxNo = (string)existing.BoxNo;
-            newBox = false;
-        }
-        else
-        {
-            var nextSeq = await c.ExecuteScalarAsync<int>(new CommandDefinition(
-                @"MERGE dbo.WmsBoxSequence WITH (HOLDLOCK) AS t
-                  USING (SELECT @c AS Contno) s ON t.Contno = s.Contno
-                  WHEN MATCHED THEN UPDATE SET NextSeq = NextSeq + 1, UpdatedTS = SYSDATETIME()
-                  WHEN NOT MATCHED THEN INSERT (Contno, NextSeq) VALUES (@c, 2)
-                  OUTPUT CASE WHEN $action = 'INSERT' THEN 1 ELSE inserted.NextSeq - 1 END;",
-                new { c = req.Contno }, transaction: tx, cancellationToken: ct));
-            boxNo = $"{req.Contno}-{nextSeq:D4}";
-            await c.ExecuteAsync(new CommandDefinition(
-                @"INSERT INTO dbo.WmsOpenBox (BoxNo, Contno, UserId, PalletType, Division, Season, LPMDt, ToteID, LogisticsBoxNo)
-                  VALUES (@b, @c, @u, @p, @d, @s, @l, @t, @lb);",
-                new { b = boxNo, c = req.Contno, u = user.Name, p = req.PalletType, d = req.Division,
-                      s = req.Season, l = req.LpmDt?.Date, t = "", lb = req.LogisticsBoxNo },
-                transaction: tx, cancellationToken: ct));
-            newBox = true;
-        }
-
-        var srNo = await c.ExecuteScalarAsync<int>(new CommandDefinition(
-            @"DECLARE @sr INT;
-              SELECT @sr = SrNo FROM dbo.WmsOpenBoxItem WHERE BoxNo = @b AND ItemCode = @i;
-              IF @sr IS NULL
-              BEGIN
-                  SELECT @sr = ISNULL(MAX(SrNo),0) + 1 FROM dbo.WmsOpenBoxItem WHERE BoxNo = @b;
-                  INSERT INTO dbo.WmsOpenBoxItem
-                    (BoxNo, ItemCode, Qty, SrNo, Result, PCRowId, Size, Color, Style, GroupCode, Season)
-                  VALUES (@b, @i, 1, @sr, @r, @pcr, @sz, @co, @st, @gc, @se);
-              END
-              ELSE
-              BEGIN
-                  UPDATE dbo.WmsOpenBoxItem SET Qty = Qty + 1, ScannedTS = SYSDATETIME()
-                   WHERE BoxNo = @b AND ItemCode = @i;
-              END
-              SELECT @sr;",
-            new { b = boxNo, i = req.ItemCode, r = req.Result, pcr = req.PCRowId,
-                  sz = req.Size, co = req.Color, st = req.Style, gc = req.GroupCode, se = req.Season },
-            transaction: tx, cancellationToken: ct));
-
-        await tx.CommitAsync(ct);
-        return new StageScanResult(true, null, boxNo, newBox, srNo);
-    }
-
-    // ==================== 7. Check-in tote on the staged box ====================
-    public async Task<(bool Ok, string? Error)> CheckInToteAsync(string boxNo, string toteId, CancellationToken ct = default)
-    {
-        var country = Country;
-        await using var c = OpenWms();
-        await using var tx = (SqlTransaction)await c.BeginTransactionAsync(IsolationLevel.Serializable, ct);
-
-        var box = await c.QueryFirstOrDefaultAsync<(string Contno, string UserId, string ToteID)>(new CommandDefinition(
-            "SELECT Contno, UserId, ToteID FROM dbo.WmsOpenBox WITH (UPDLOCK, ROWLOCK) WHERE BoxNo = @b",
-            new { b = boxNo }, transaction: tx, cancellationToken: ct));
-        if (box.Contno is null) return (false, $"Open box {boxNo} not found.");
-        if (!string.Equals(box.UserId, user.Name, StringComparison.OrdinalIgnoreCase))
-            return (false, $"Box {boxNo} belongs to {box.UserId}, not you.");
-
-        if (!string.IsNullOrEmpty(box.ToteID) && !string.Equals(box.ToteID, toteId, StringComparison.OrdinalIgnoreCase))
-            return (false, $"Box {boxNo} already checked-in to tote {box.ToteID}; scan that tote to check out.");
-
-        var inMaster = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT TOP 1 1 FROM dbo.WmsBlueToteIDMaster WITH (NOLOCK) WHERE Country = @ct AND ToteID = @t",
-            new { ct = country, t = toteId }, transaction: tx, cancellationToken: ct));
-        if (inMaster != 1) return (false, $"Tote {toteId} is not in WmsBlueToteIDMaster.");
-
-        var otherOpen = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT TOP 1 1 FROM dbo.WmsOpenBox WITH (UPDLOCK, HOLDLOCK) WHERE ToteID = @t AND BoxNo <> @b",
-            new { t = toteId, b = boxNo }, transaction: tx, cancellationToken: ct));
-        if (otherOpen == 1) return (false, $"Tote {toteId} is already used by another open box.");
-
-        var openLpm = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT TOP 1 1 FROM dbo.WmsUPCBoxHead WITH (NOLOCK) WHERE Country = @ct AND ToteID = @t AND Closed = 'N'",
-            new { ct = country, t = toteId }, transaction: tx, cancellationToken: ct));
-        if (openLpm == 1) return (false, $"Tote {toteId} is already attached to an open box in WmsUPCBoxHead.");
-
-        await c.ExecuteAsync(new CommandDefinition(
-            "UPDATE dbo.WmsOpenBox SET ToteID = @t WHERE BoxNo = @b",
-            new { t = toteId, b = boxNo }, transaction: tx, cancellationToken: ct));
-        await tx.CommitAsync(ct);
-        return (true, null);
-    }
-
-    // ==================== 8. Checkout — write WmsUPCBoxHead/Det/Photochecking + update PCR + clear staging ====================
+    // ==================== 11. Checkout — write LPM tables + drop staging ====================
     public async Task<CheckoutResult> CheckoutBoxAsync(string boxNo, string toteId, CancellationToken ct = default)
     {
         var country = Country;
@@ -744,6 +876,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
             (@Country, @Cont, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)), @Item, @Size, @Result, @User, @Pc, @Size,
              '', @Style, @Color, @Gc, '', @WHouse, '', 0,
              @Logi, @Season, @Tote, 'N', '');";
+        var photoRows = 0;
         foreach (var it in items)
         {
             var qty = (int)it.Qty;
@@ -757,35 +890,22 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                           Gc = (string?)it.GroupCode ?? "", WHouse = warehouse,
                           Logi = logisticsBoxNo, Season = (string?)it.Season ?? season, Tote = toteId },
                     transaction: tx, cancellationToken: ct));
+                photoRows++;
             }
         }
 
-        // 4) Update WmsPCR.BoxNo for items in this box+container
-        var pcrSql = @"UPDATE dbo.WmsPCR
-            SET BoxNo = @BoxNo
-            WHERE Country = @Country AND Contno = @Cont AND Itemcode = @Item AND (BoxNo IS NULL OR BoxNo = '')";
-        var pcrUpdated = 0;
-        foreach (var it in items)
-        {
-            DbOpContext.Set("UPDATE dbo.WmsPCR SET BoxNo (checkout step 4)", pcrSql);
-            pcrUpdated += await c.ExecuteAsync(new CommandDefinition(pcrSql,
-                new { Country = country, BoxNo = boxNo, Cont = contno, Item = (string)it.ItemCode },
-                transaction: tx, cancellationToken: ct));
-        }
-
-        // 5) Clear staging
-        DbOpContext.Set("DELETE WMS staging (checkout step 5)", "DELETE WmsOpenBoxItem/Scan/Box");
+        // 4) Clear local staging. Scan ledger rows stay — they're the permanent audit trail.
+        DbOpContext.Set("DELETE WMS staging (checkout step 4)", "DELETE WmsOpenBoxItem/Box");
         await c.ExecuteAsync(new CommandDefinition(
-            @"DELETE FROM dbo.WmsOpenBoxScan  WHERE BoxNo = @b;
-              DELETE FROM dbo.WmsOpenBoxItem  WHERE BoxNo = @b;
-              DELETE FROM dbo.WmsOpenBox      WHERE BoxNo = @b;",
+            @"DELETE FROM dbo.WmsOpenBoxItem WHERE BoxNo = @b;
+              DELETE FROM dbo.WmsOpenBox     WHERE BoxNo = @b;",
             new { b = boxNo }, transaction: tx, cancellationToken: ct));
 
         await tx.CommitAsync(ct);
-        return new(true, null, pcrUpdated);
+        return new(true, null, photoRows);
     }
 
-    // ==================== 9. Read open boxes (resume after reload) ====================
+    // ==================== 12. Read open boxes (resume after reload) ====================
     public async Task<List<OpenBoxRow>> GetOpenBoxesForUserAsync(string contno, CancellationToken ct = default)
     {
         await using var c = OpenWms();
@@ -809,7 +929,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         return rows.AsList();
     }
 
-    // Countries now come from WmsWHMaster instead of bfldata.dbo.DataSettings.
+    // Countries from WmsWHMaster (Azure WMS).
     public async Task<List<string>> GetCountriesAsync(CancellationToken ct = default)
     {
         await using var c = OpenWms();

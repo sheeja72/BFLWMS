@@ -262,7 +262,6 @@ else
 
     private string _contInput = "", _contno = "";
     private bool _contOk;
-    private PhotoQtyMatchResult? _photoMatch;
 
     private string _boxInput = "", _boxLabel = "";
     private bool _boxOk;
@@ -302,9 +301,7 @@ else
             if (string.IsNullOrEmpty(input)) { _globalErr = "Container number is required."; return; }
             var v = await Build.ValidateContainerAsync(input);
             if (!v.Ok) { _globalErr = v.Error; await Beep(); return; }
-            var pm = await Build.EnsurePhotoQtyMatchAsync(input);
-            if (!pm.Ok) { _globalErr = pm.Error; await Beep(); return; }
-            _contno = input; _photoMatch = pm; _contOk = true;
+            _contno = input; _contOk = true;
             await RefreshOpenBoxes();
             await Audit.LogAsync("Building.Container", _contno, 'X', $"Building/{_contno}", new { event_ = "validate" });
             await TryFocus(_boxRef);
@@ -353,10 +350,10 @@ else
             }
 
             var alloc = await Build.ResolveAllocationAsync(_contno, code, _poNumber, item.Style);
-            if (!alloc.Found) { _globalErr = "Could not resolve allocation."; await Beep(); return; }
+            if (!alloc.Found) { _globalErr = alloc.Error ?? "Could not resolve allocation."; await Beep(); return; }
 
             var palletType = alloc.PalletType ?? "STD";
-            var division   = item.Division;
+            var division   = alloc.Division ?? item.Division;
             var season     = item.Season;
             var lpmDt      = alloc.LpmDt;
 
@@ -364,9 +361,8 @@ else
             var boxNo = await Build.FindOrCreateOpenBoxAsync(
                 _contno, palletType, division, season, lpmDt, _boxLabel);
 
-            // Stage the item; logs PCR effect for Clear reversal.
-            await Build.StageItemToBoxAsync(boxNo, code, alloc.Result, alloc.PcrId, alloc.PcrAction,
-                item.Size, item.Color, item.Style, item.GroupCode, item.Season);
+            // Stage the item + record the scan in WMSContBuildScanData (audit + reversal).
+            await Build.StageItemToBoxAsync(_contno, boxNo, code, alloc, item);
 
             _currentBoxNo = boxNo;
             _lastItem = item; _lastAlloc = alloc;
@@ -382,7 +378,8 @@ else
 
             await Audit.LogAsync("Building.Item", $"{_contno}/{boxNo}/{code}", 'I',
                 $"Building/{_contno}/{boxNo}",
-                new { code, alloc.Result, tier = (int)alloc.Tier, pcr_action = alloc.PcrAction.ToString() });
+                new { code, alloc.Result, tier = (int)alloc.Tier, action = alloc.Action.ToString(),
+                      store = alloc.StoreId, manual = alloc.Manual });
 
             _itemInput = "";
             await TryFocus(_itemRef);
@@ -464,7 +461,7 @@ else
 
     private async Task ResetAll()
     {
-        _contInput = ""; _contno = ""; _contOk = false; _photoMatch = null;
+        _contInput = ""; _contno = ""; _contOk = false;
         _boxInput = ""; _boxLabel = ""; _poNumber = null; _boxOk = false;
         _itemInput = ""; _lastItem = null; _lastAlloc = null;
         _currentBoxNo = null; _stagedItems.Clear();
