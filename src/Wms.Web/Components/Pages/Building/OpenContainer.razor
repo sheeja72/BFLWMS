@@ -1,0 +1,151 @@
+@page "/building/open-container"
+@rendermode RenderMode.InteractiveServer
+@using Wms.Core
+@using Wms.Data.Lpm
+@attribute [Authorize(Policy = MenuKeys.OPEN_CONTAINER)]
+@inject OpenContainerService Svc
+@inject ICurrentUser Me
+
+<PageTitle>WMS — Open Container</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Open Container</h2>
+    <p>Mark containers from your country as <b>open</b> so they become eligible for LPM Manual Building. A container shows up here once its allocation has been synced to Azure and isn't already open.</p>
+</div>
+
+@if (!string.IsNullOrEmpty(_message))
+{
+    <div class="aiwms-alert @(_isError ? "error" : "info")">@_message</div>
+}
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px">
+        <span>Available to Open — @_available.Count container(s) for @(Me.Country ?? "(no country)")</span>
+        <button class="aiwms-btn aiwms-btn-secondary" style="font-size:11px; padding:4px 10px" @onclick="ReloadAsync" disabled="@_busy">Refresh</button>
+    </div>
+    @if (_available.Count == 0)
+    {
+        <div style="padding:14px; font-style:italic; color:var(--text-secondary)">No containers waiting to be opened. Run Data Sync first, then refresh.</div>
+    }
+    else
+    {
+        <table class="aiwms-table aiwms-table-dense">
+            <thead>
+                <tr>
+                    <th>ContNo</th>
+                    <th style="text-align:right">Batches</th>
+                    <th style="text-align:right">Total Allocated Qty</th>
+                    <th>Latest Sync</th>
+                    <th>Reason (optional)</th>
+                    <th style="width:110px"></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in _available)
+                {
+                    <tr>
+                        <td style="font-family:var(--font-mono)"><b>@r.ContNo</b></td>
+                        <td style="text-align:right">@r.BatchCount</td>
+                        <td style="text-align:right">@r.TotalAllocatedQty.ToString("N0")</td>
+                        <td>@(r.LatestTrnDate?.ToString("yyyy-MM-dd") ?? "")</td>
+                        <td>
+                            <input @bind="_reasons[r.ContNo]" placeholder="optional"
+                                   style="width:100%; padding:4px 8px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:12px" />
+                        </td>
+                        <td>
+                            <button class="aiwms-btn aiwms-btn-primary" style="padding:4px 10px; font-size:11px"
+                                    @onclick="() => OpenAsync(r.ContNo)" disabled="@_busy">Open</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">Currently Open — @_open.Count container(s)</div>
+    @if (_open.Count == 0)
+    {
+        <div style="padding:14px; font-style:italic; color:var(--text-secondary)">None.</div>
+    }
+    else
+    {
+        <table class="aiwms-table aiwms-table-dense">
+            <thead>
+                <tr>
+                    <th>ContNo</th>
+                    <th>Reason</th>
+                    <th>Description</th>
+                    <th>Opened By</th>
+                    <th>Warehouse</th>
+                    <th>Opened</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in _open)
+                {
+                    <tr>
+                        <td style="font-family:var(--font-mono)"><b>@r.ContNo</b></td>
+                        <td>@r.OpenReason</td>
+                        <td>@r.ContDesc</td>
+                        <td>@r.UserId</td>
+                        <td>@r.Whouse</td>
+                        <td>@(r.Trndate?.ToString("yyyy-MM-dd")) @(r.Time1?.ToString(@"hh\:mm"))</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+@code {
+    private bool _busy;
+    private string _message = "";
+    private bool _isError;
+    private List<AvailableContnoRow> _available = new();
+    private List<OpenContainerRow> _open = new();
+    private Dictionary<string, string> _reasons = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Me.EnsureLoadedAsync();
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        _busy = true; _message = "";
+        try
+        {
+            _available = await Svc.GetAvailableToOpenAsync();
+            _open      = await Svc.GetCurrentlyOpenAsync();
+            // Preserve typed reasons across refreshes for containers still in the list.
+            var keep = _available.Select(a => a.ContNo).ToHashSet();
+            foreach (var k in _reasons.Keys.ToList())
+                if (!keep.Contains(k)) _reasons.Remove(k);
+            foreach (var a in _available)
+                if (!_reasons.ContainsKey(a.ContNo)) _reasons[a.ContNo] = "";
+        }
+        catch (Exception ex) { ShowError($"Failed to load: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private async Task OpenAsync(string contno)
+    {
+        _busy = true; _message = "";
+        try
+        {
+            var reason = _reasons.TryGetValue(contno, out var r) ? r?.Trim() : null;
+            var result = await Svc.OpenAsync(contno, string.IsNullOrEmpty(reason) ? null : reason);
+            if (result.Ok) ShowInfo(result.Message ?? "Opened.");
+            else           ShowError(result.Message ?? "Failed to open.");
+            await ReloadAsync();
+        }
+        catch (Exception ex) { ShowError($"Open failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private void ShowError(string m) { _message = m; _isError = true; }
+    private void ShowInfo(string m)  { _message = m; _isError = false; }
+}
