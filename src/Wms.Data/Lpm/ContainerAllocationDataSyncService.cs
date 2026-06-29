@@ -149,9 +149,27 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
                        d.StoreID, d.TcmContno, d.Itemname, d.BuildingCategory, d.LPMDt, d.LPMBoxNO,
                        d.ORAPONo, d.Division, d.Brand, d.DivCode, d.Department, d.Season, d.Style,
                        [Size] = d.Size,
-                       d.SalesPrice, d.ResultType, d.FinalResult, d.Result, d.Remarks, d.OTS
+                       d.SalesPrice, d.ResultType, d.FinalResult, d.Result, d.Remarks, d.OTS,
+                       Color    = u.color,
+                       Gender   = u.GENDER,
+                       HsCode   = u.hscode,
+                       [Class]  = s.[Class],
+                       Family   = s.Family,
+                       Subclass = s.Subclass
                   FROM LPMSIM.dbo.WMS_ContAllocationData d WITH (NOLOCK)
                   JOIN LPMSIM.dbo.WMS_Cont_Allocation_Header h WITH (NOLOCK) ON h.BatchNo = d.BatchNo
+                  OUTER APPLY (
+                       SELECT TOP 1 uo.color, uo.GENDER, uo.hscode
+                         FROM usa.dbo.usaorgfile uo WITH (NOLOCK)
+                        WHERE uo.ContNo = d.ContNo AND uo.ItemCode = d.Itemcode
+                        ORDER BY uo.TrnDate DESC
+                  ) u
+                  OUTER APPLY (
+                       SELECT TOP 1 sm.[Class], sm.Family, sm.Subclass
+                         FROM datareporting.dbo.vupc_subclass v WITH (NOLOCK)
+                         LEFT JOIN datareporting.dbo.SubclassMaster sm WITH (NOLOCK) ON sm.MH4ID = v.MH4ID
+                        WHERE v.itemcode = d.Itemcode
+                  ) s
                  WHERE h.ContNo = @c AND h.ApprovedDt IS NOT NULL
                  ORDER BY h.BatchNo, d.IdNo",
                 new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToList();
@@ -293,6 +311,12 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         dt.Columns.Add("Result",           typeof(string));
         dt.Columns.Add("Remarks",          typeof(string));
         dt.Columns.Add("OTS",              typeof(double));
+        dt.Columns.Add("Color",            typeof(string));
+        dt.Columns.Add("Gender",           typeof(string));
+        dt.Columns.Add("HsCode",           typeof(string));
+        dt.Columns.Add("Class",            typeof(string));
+        dt.Columns.Add("Family",           typeof(string));
+        dt.Columns.Add("Subclass",         typeof(string));
 
         foreach (var r in rows)
         {
@@ -330,7 +354,13 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
                 (object?)r.FinalResult      ?? DBNull.Value,
                 (object?)r.Result           ?? DBNull.Value,
                 (object?)r.Remarks          ?? DBNull.Value,
-                (object?)r.OTS              ?? DBNull.Value);
+                (object?)r.OTS              ?? DBNull.Value,
+                (object?)r.Color            ?? DBNull.Value,
+                (object?)r.Gender           ?? DBNull.Value,
+                (object?)r.HsCode           ?? DBNull.Value,
+                (object?)r.Class            ?? DBNull.Value,
+                (object?)r.Family           ?? DBNull.Value,
+                (object?)r.Subclass         ?? DBNull.Value);
         }
         return dt;
     }
@@ -440,5 +470,11 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         string?   FinalResult,
         string?   Result,
         string?   Remarks,
-        double?   OTS);
+        double?   OTS,
+        string?   Color,
+        string?   Gender,
+        string?   HsCode,
+        string?   Class,
+        string?   Family,
+        string?   Subclass);
 }
