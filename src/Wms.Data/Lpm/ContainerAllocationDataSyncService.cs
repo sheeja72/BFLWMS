@@ -349,7 +349,7 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
                 (object?)r.Season           ?? DBNull.Value,
                 (object?)r.Style            ?? DBNull.Value,
                 (object?)r.Size             ?? DBNull.Value,
-                (object?)r.SalesPrice       ?? DBNull.Value,
+                ParseDecimalOrDbNull(r.SalesPrice),
                 (object?)r.ResultType       ?? DBNull.Value,
                 (object?)r.FinalResult      ?? DBNull.Value,
                 (object?)r.Result           ?? DBNull.Value,
@@ -415,7 +415,7 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
                 (object?)r.QtyIssue         ?? DBNull.Value,
                 (object?)r.Itemname         ?? DBNull.Value,
                 (object?)r.Barcode          ?? DBNull.Value,
-                r.SalesPrice.HasValue ? (object)r.SalesPrice.Value.ToString("F4") : DBNull.Value,
+                (object?)r.SalesPrice       ?? DBNull.Value,
                 (object?)r.TcmContno        ?? DBNull.Value,
                 (object?)r.BuildingCategory ?? DBNull.Value,
                 (object?)r.LPMDt            ?? DBNull.Value,
@@ -428,6 +428,12 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         return dt;
     }
 
+    private static object ParseDecimalOrDbNull(string? s) =>
+        decimal.TryParse(s, System.Globalization.NumberStyles.Any,
+            System.Globalization.CultureInfo.InvariantCulture, out var v)
+            ? v
+            : (object)DBNull.Value;
+
     private static string DestinationLabel(DataSyncDestination d) => d switch
     {
         DataSyncDestination.AzureWmsDb      => "Azure WMS DB",
@@ -435,46 +441,53 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         _                                   => d.ToString(),
     };
 
-    // Mirror the columns we read out of LPMSIM. Order matches the SQL in SyncAsync.
-    private sealed record SourceRow(
-        int?      BatchNo,
-        string?   ContNo,
-        string?   Country,
-        DateTime? TrnDate,
-        TimeSpan? Time1,
-        string?   UPC,
-        string?   Itemcode,
-        string?   Barcode,
-        string?   GroupCode,
-        int?      Qty,
-        int?      SkuMax,
-        int?      AllocatedQty,
-        int?      PrevAllocatedQty,
-        int?      QtyIssue,
-        string?   StoreID,
-        string?   TcmContno,
-        string?   Itemname,
-        string?   BuildingCategory,
-        DateTime? LPMDt,
-        string?   LPMBoxNO,
-        string?   ORAPONo,
-        string?   Division,
-        string?   Brand,
-        int?      DivCode,
-        string?   Department,
-        string?   Season,
-        string?   Style,
-        string?   Size,
-        decimal?  SalesPrice,
-        string?   ResultType,
-        string?   FinalResult,
-        string?   Result,
-        string?   Remarks,
-        double?   OTS,
-        string?   Color,
-        string?   Gender,
-        string?   HsCode,
-        string?   Class,
-        string?   Family,
-        string?   Subclass);
+    // Mirror the columns we read out of LPMSIM. A class with settable
+    // properties (not a positional record) — Dapper's record-constructor
+    // matching is strict on parameter type, but property-based hydration
+    // does per-column type coercion (string -> decimal etc.), which we
+    // need because LPMSIM's SalesPrice is varchar while the Azure mirror
+    // column is decimal.
+    private sealed class SourceRow
+    {
+        public int?      BatchNo          { get; set; }
+        public string?   ContNo           { get; set; }
+        public string?   Country          { get; set; }
+        public DateTime? TrnDate          { get; set; }
+        public TimeSpan? Time1            { get; set; }
+        public string?   UPC              { get; set; }
+        public string?   Itemcode         { get; set; }
+        public string?   Barcode          { get; set; }
+        public string?   GroupCode        { get; set; }
+        public int?      Qty              { get; set; }
+        public int?      SkuMax           { get; set; }
+        public int?      AllocatedQty     { get; set; }
+        public int?      PrevAllocatedQty { get; set; }
+        public int?      QtyIssue         { get; set; }
+        public string?   StoreID          { get; set; }
+        public string?   TcmContno        { get; set; }
+        public string?   Itemname         { get; set; }
+        public string?   BuildingCategory { get; set; }
+        public DateTime? LPMDt            { get; set; }
+        public string?   LPMBoxNO         { get; set; }
+        public string?   ORAPONo          { get; set; }
+        public string?   Division         { get; set; }
+        public string?   Brand            { get; set; }
+        public int?      DivCode          { get; set; }
+        public string?   Department       { get; set; }
+        public string?   Season           { get; set; }
+        public string?   Style            { get; set; }
+        public string?   Size             { get; set; }
+        public string?   SalesPrice       { get; set; }  // varchar on LPMSIM; parsed to decimal for the Azure mirror
+        public string?   ResultType       { get; set; }
+        public string?   FinalResult      { get; set; }
+        public string?   Result           { get; set; }
+        public string?   Remarks          { get; set; }
+        public double?   OTS              { get; set; }
+        public string?   Color            { get; set; }
+        public string?   Gender           { get; set; }
+        public string?   HsCode           { get; set; }
+        public string?   Class            { get; set; }
+        public string?   Family           { get; set; }
+        public string?   Subclass         { get; set; }
+    }
 }
