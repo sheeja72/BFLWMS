@@ -18,6 +18,7 @@ public interface IOnPremConnectionResolver
     string GetWmsAzureConnectionString();
     string GetCountryConnectionString(string country);
     string GetOnPremBackupConnectionString();
+    string GetWmsProductionDbConnectionString();
     IReadOnlyList<string> GetConfiguredCountries();
 }
 
@@ -47,6 +48,11 @@ public class OnPremConnectionResolver(IConfiguration cfg) : IOnPremConnectionRes
         cfg.GetConnectionString("OnPremBackupDB_ConnectionString")
         ?? throw new InvalidOperationException(
             "ConnectionStrings:OnPremBackupDB_ConnectionString is not configured.");
+
+    public string GetWmsProductionDbConnectionString() =>
+        cfg.GetConnectionString("WmsProductionDb")
+        ?? throw new InvalidOperationException(
+            "ConnectionStrings:WmsProductionDb is not configured.");
 
     public IReadOnlyList<string> GetConfiguredCountries() =>
         _knownCountries

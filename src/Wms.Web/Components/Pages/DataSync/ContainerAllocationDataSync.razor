@@ -1,0 +1,202 @@
+@page "/datasync/container-allocation"
+@rendermode RenderMode.InteractiveServer
+@using Wms.Core
+@using Wms.Data.Lpm
+@attribute [Authorize(Policy = MenuKeys.DATASYNC_CONTAINER_ALLOCATION)]
+@inject ContainerAllocationDataSyncService Svc
+@inject Microsoft.JSInterop.IJSRuntime JS
+
+<PageTitle>WMS — Container Allocation Data Sync</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Container Allocation Data Sync</h2>
+    <p>Copy an approved Container Allocation's detail rows to either the Azure WMS DB mirror or the on-prem WMS-Prod-DB (<code>online.dbo.PhotoCheckingResult</code>). One sync per container — once synced, the container is permanently locked.</p>
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">Sync a container</div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr auto auto; gap:12px; align-items:end">
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">CONTAINER NO *</label>
+            <input @bind="_contno" placeholder="type or pick from list" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-mono); font-size:13px; background:white;" list="approvedContnos" />
+            <datalist id="approvedContnos">
+                @foreach (var a in _approved.Where(a => !a.AlreadySynced))
+                {
+                    <option value="@a.ContNo">@a.ContNo — @a.TotalAllocatedQty.ToString("N0") pcs across @a.BatchCount batch(es)</option>
+                }
+            </datalist>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">DESTINATION *</label>
+            <select @bind="_destination" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-size:13px; background:white;">
+                <option value="AzureWmsDb">Azure WMS DB</option>
+                <option value="WmsProductionDb">WMS-Prod-DB</option>
+            </select>
+        </div>
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="SyncAsync" disabled="@(_busy || string.IsNullOrWhiteSpace(_contno))">Sync</button>
+        <button class="aiwms-btn aiwms-btn-secondary" @onclick="ReloadAsync" disabled="@_busy">Refresh</button>
+    </div>
+
+    @if (_busy)
+    {
+        <div style="margin-top:14px; padding:10px 14px; background:var(--bfl-yellow-lite); border:1px solid var(--bfl-yellow); border-radius:var(--r-sm); font-weight:700; color:var(--bfl-black)">Syncing…</div>
+    }
+
+    @if (!string.IsNullOrEmpty(_message))
+    {
+        <div class="aiwms-alert @(_isError ? "error" : "info")" style="margin-top:12px">@_message</div>
+    }
+</div>
+
+@if (_approved.Count > 0)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header">Approved Containers — @_approved.Count rows</div>
+        <table class="aiwms-table aiwms-table-dense">
+            <thead>
+                <tr>
+                    <th>ContNo</th>
+                    <th style="text-align:right">Batches</th>
+                    <th style="text-align:right">Total Allocated Qty</th>
+                    <th>Latest Approval</th>
+                    <th>Synced?</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in _approved)
+                {
+                    <tr>
+                        <td><a href="#" style="font-family:var(--font-mono)" @onclick:preventDefault @onclick="@(() => _contno = r.ContNo)">@r.ContNo</a></td>
+                        <td style="text-align:right">@r.BatchCount</td>
+                        <td style="text-align:right">@r.TotalAllocatedQty.ToString("N0")</td>
+                        <td>@r.LatestApprovedDt.ToString("yyyy-MM-dd HH:mm")</td>
+                        <td>
+                            @if (r.AlreadySynced)
+                            {
+                                <span class="aiwms-pill tier4">SYNCED</span>
+                            }
+                            else
+                            {
+                                <span class="aiwms-pill tier1">AVAILABLE</span>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px">
+        <span>Recent Sync Activity — last @_activity.Count rows</span>
+        <div style="display:flex; gap:8px; align-items:center">
+            <input @bind="_search" @bind:event="oninput" placeholder="search ContNo…" style="padding:6px 10px; font-size:12px; border:1px solid var(--border-default); border-radius:var(--r-sm); background:white" />
+            <button class="aiwms-btn aiwms-btn-secondary" style="font-size:11px; padding:4px 10px" @onclick="ReloadActivityAsync" disabled="@_busy">Apply</button>
+        </div>
+    </div>
+    @if (_activity.Count == 0)
+    {
+        <div style="padding:14px; font-style:italic; color:var(--text-secondary)">No sync activity yet.</div>
+    }
+    else
+    {
+        <table class="aiwms-table aiwms-table-dense">
+            <thead>
+                <tr>
+                    <th>SyncId</th>
+                    <th>ContNo</th>
+                    <th>BatchNo</th>
+                    <th>Destination</th>
+                    <th style="text-align:right">Total Allocated Qty</th>
+                    <th>Status</th>
+                    <th>By</th>
+                    <th>When</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in _activity)
+                {
+                    <tr>
+                        <td>@r.SyncId</td>
+                        <td style="font-family:var(--font-mono)">@r.ContNo</td>
+                        <td>@r.BatchNo</td>
+                        <td>@FmtDestination(r.Destination)</td>
+                        <td style="text-align:right">@(r.TotalAllocatedQty?.ToString("N0") ?? "")</td>
+                        <td><span class="aiwms-pill @(r.Status == "Success" ? "tier1" : "tier4")">@r.Status</span></td>
+                        <td>@r.SyncedBy</td>
+                        <td>@r.SyncedTS.ToString("yyyy-MM-dd HH:mm")</td>
+                        <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title="@r.ErrorMessage">@r.ErrorMessage</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+@code {
+    private string _contno = "";
+    private string _destination = "AzureWmsDb";
+    private string _search = "";
+    private bool _busy;
+    private string _message = "";
+    private bool _isError;
+    private List<ApprovedContnoRow> _approved = new();
+    private List<DataSyncActivityRow> _activity = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        await ReloadApprovedAsync();
+        await ReloadActivityAsync();
+    }
+
+    private async Task ReloadApprovedAsync()
+    {
+        try { _approved = await Svc.GetApprovedContnosAsync(); }
+        catch (Exception ex) { ShowError($"Failed to load approved containers: {ex.Message}"); }
+    }
+
+    private async Task ReloadActivityAsync()
+    {
+        try { _activity = await Svc.GetRecentActivityAsync(50, _search); }
+        catch (Exception ex) { ShowError($"Failed to load activity: {ex.Message}"); }
+    }
+
+    private async Task SyncAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_contno)) return;
+        var dest = _destination == "WmsProductionDb"
+            ? DataSyncDestination.WmsProductionDb
+            : DataSyncDestination.AzureWmsDb;
+        var confirm = await JS.InvokeAsync<bool>("confirm",
+            $"Sync container {_contno} to {(dest == DataSyncDestination.AzureWmsDb ? "Azure WMS DB" : "WMS-Prod-DB")}?\n\n" +
+            "Once synced, this container cannot be synced again.");
+        if (!confirm) return;
+        _busy = true; _message = ""; await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Svc.SyncAsync(_contno.Trim(), dest);
+            if (result.Ok) ShowInfo(result.Message ?? "Synced.");
+            else           ShowError(result.Message ?? "Sync failed.");
+            await ReloadAsync();
+        }
+        catch (Exception ex) { ShowError($"Sync failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private static string FmtDestination(string d) => d switch
+    {
+        "AzureWmsDb"      => "Azure WMS DB",
+        "WmsProductionDb" => "WMS-Prod-DB",
+        _                 => d,
+    };
+
+    private void ShowError(string msg) { _message = msg; _isError = true; }
+    private void ShowInfo(string msg)  { _message = msg; _isError = false; }
+}

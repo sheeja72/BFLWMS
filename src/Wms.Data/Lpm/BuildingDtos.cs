@@ -44,20 +44,23 @@ public enum ItemAvailability
 
 public record AllocationResult(
     bool Found,
-    string Result,        // SHOP / TERR / etc
+    string Result,           // SHOP / TERR / etc
     DateTime? LpmDt,
     string? PoNumber,
     string? PalletType,
     AllocationTier Tier,
-    long? PcrId,           // identity of lpm.dbo.PhotoCheckingResultLPM row updated/inserted
-    char PcrAction = 'I'); // 'U' = QtyIssue+=1 on existing row; 'I' = inserted new row (tier 2/3/4)
+    int? AllocationIdNo,     // dbo.WMS_ContAllocationData.IdNo (the row updated or inserted)
+    char Action = 'I',       // 'U' = QtyIssue+=1 on existing row; 'I' = inserted new row
+    string? StoreId = null,
+    string? Division = null,
+    bool Manual = false,
+    string? Error = null);
 
 public enum AllocationTier
 {
-    Tier1_ExactPoQty0 = 1,
-    Tier2_ExactNoQty  = 2,
-    Tier3_StyleMatch  = 3,
-    Tier4_NewItem     = 4,
+    Tier1_HasCapacity   = 1,   // existing row, QtyIssue < Qty, incremented
+    Tier2_OtsOverflow   = 2,   // item in container but all rows full; OTS pick + new row
+    Tier3_ManualNewItem = 3,   // item NOT in container; usa.upcbarcodes lookup + OTS pick
 }
 
 public record CheckInResult(bool Ok, string? Error, string? BoxNumber);
