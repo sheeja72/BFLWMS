@@ -9,6 +9,7 @@ public static class MenuKeys
 {
     public const string LPM_MANUAL_BUILDING       = "LPM_MANUAL_BUILDING";
     public const string CONTAINER_ALLOCATION      = "CONTAINER_ALLOCATION";
+    public const string OPEN_CONTAINER            = "OPEN_CONTAINER";
     public const string DATASYNC_CONTAINER_ALLOCATION = "DATASYNC_CONTAINER_ALLOCATION";
     public const string ITEM_ENCODING             = "ITEM_ENCODING";
     public const string LPM_PRODUCTION            = "LPM_PRODUCTION";
@@ -42,6 +43,7 @@ public static class MenuKeys
     {
         new MenuEntry(LPM_MANUAL_BUILDING,   "Container Building",  "LPM Manual Building",       "building/manual",           new[] { Roles.Admin, Roles.WHAssociate, Roles.WHSupervisor, Roles.WHManager }),
         new MenuEntry(CONTAINER_ALLOCATION,  "Container Building",  "Container Allocation",      "building/container-allocation", new[] { Roles.Admin, Roles.WHManager }),
+        new MenuEntry(OPEN_CONTAINER,        "Container Building",  "Open Container",            "building/open-container",   new[] { Roles.Admin, Roles.WHManager, Roles.WHSupervisor }),
 
         new MenuEntry(DATASYNC_CONTAINER_ALLOCATION, "Data Sync",   "Container Allocation Data Sync", "datasync/container-allocation", new[] { Roles.Admin, Roles.WHManager }),
 
