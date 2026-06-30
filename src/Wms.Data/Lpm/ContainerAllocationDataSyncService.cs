@@ -938,4 +938,72 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
             status, note, ct);
         return new(country, dataName, inserted, markedUsed, status, note);
     }
+
+    // ===================== PalletType master sync =====================
+
+    private static readonly string[] PalletTypeColumns = new[]
+    {
+        "PalletType","TypeName","TrnDate","Reserved","GroupType","Exclude","Remarks",
+        "Export","PalletPick","Report","Remarks1","Season","Order1","toTechno",
+        "BuildCategoryMixAllow","PartofHOStock","ShopEligible","BlueBox",
+        "DirectProduction","ShopPalletType","BuildSelItems","NonTrade",
+        "ValidateHoStock","AllowInvalidItem","RegSIMExclude","PalletType_Shop",
+        "NegativePurchase","PalletCategory","ToWHLocation","ExcludeFromLPR"
+    };
+
+    /// <summary>Full refresh of dbo.WmsPalletType from bfldata.dbo.pallettype.
+    /// PalletType master is the same across all countries, so we TRUNCATE +
+    /// bulk-reload on every click — no incremental tracking needed.</summary>
+    public async Task<DataSyncResult> SyncPalletTypeAsync(CancellationToken ct = default)
+    {
+        var cols = string.Join(", ", PalletTypeColumns.Select(c => $"[{c}]"));
+        var srcSql = $"SELECT {cols} FROM bfldata.dbo.pallettype WITH (NOLOCK)";
+
+        int rowsCopied = 0;
+        string? error = null;
+
+        try
+        {
+            // 1. Truncate Azure side first, inside its own connection.
+            await using (var dest0 = OpenWms())
+            {
+                await dest0.ExecuteAsync(new CommandDefinition(
+                    "TRUNCATE TABLE dbo.WmsPalletType",
+                    commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            }
+
+            // 2. Open source reader and bulk-copy into Azure.
+            await using var src = OpenOnPremBackup();
+            using var cmd = new SqlCommand(srcSql, src) { CommandTimeout = CommandTimeoutSeconds };
+            using var reader = await cmd.ExecuteReaderAsync(ct);
+
+            await using var dest = OpenWms();
+            using var bulk = new SqlBulkCopy(dest)
+            {
+                DestinationTableName = "dbo.WmsPalletType",
+                BatchSize            = 1000,
+                BulkCopyTimeout      = CommandTimeoutSeconds,
+                EnableStreaming      = true,
+            };
+            foreach (var c in PalletTypeColumns)
+                bulk.ColumnMappings.Add(c, c);
+            await bulk.WriteToServerAsync(reader, ct);
+            rowsCopied = bulk.RowsCopied;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+
+        var syncId = await WriteLogRowAsync("(PalletType)", null, DataSyncDestination.WMSPalletType,
+            totalAllocatedQty: rowsCopied,
+            status: error is null ? "Success" : "Failed",
+            error: error, ct);
+
+        return error is null
+            ? new DataSyncResult(true,
+                $"PalletType master: {rowsCopied:N0} row(s) reloaded (truncate + insert).",
+                syncId, rowsCopied)
+            : new DataSyncResult(false, $"PalletType master sync failed: {error}", syncId, 0);
+    }
 }

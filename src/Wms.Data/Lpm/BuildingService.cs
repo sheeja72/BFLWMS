@@ -227,20 +227,23 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                     new { id = id1 }, transaction: tx, cancellationToken: ct));
                 var storeId1   = (string?)t1.StoreID;
                 var storeName1 = await StoreNameByIdAsync(c, tx, storeId1, ct);
+                var palletT1   = (string?)t1.ResultType;
+                var palletN1   = await PalletTypeNameByCodeAsync(c, tx, palletT1, ct);
                 await tx.CommitAsync(ct);
                 return new AllocationResult(
                     Found: true,
                     Result: (string?)t1.Result ?? "SHOP",
                     LpmDt: (DateTime?)t1.LPMDt,
                     PoNumber: (string?)t1.ORAPONo,
-                    PalletType: (string?)t1.ResultType,
+                    PalletType: palletT1,
                     Tier: AllocationTier.Tier1_HasCapacity,
                     AllocationIdNo: id1,
                     Action: 'U',
                     StoreId: storeId1,
                     StoreName: storeName1,
                     Division: (string?)t1.Division,
-                    Manual: false);
+                    Manual: false,
+                    PalletTypeName: palletN1);
             }
 
             var anyInContainer = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
@@ -290,19 +293,22 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                     ct: ct);
 
                 var storeName2 = await StoreNameByIdAsync(c, tx, store2, ct);
+                var palletT2   = (string?)anyInContainer.ResultType;
+                var palletN2   = await PalletTypeNameByCodeAsync(c, tx, palletT2, ct);
                 await tx.CommitAsync(ct);
                 return new AllocationResult(
                     Found: true, Result: "SHOP",
                     LpmDt: (DateTime?)anyInContainer.LPMDt,
                     PoNumber: poNumber,
-                    PalletType: (string?)anyInContainer.ResultType,
+                    PalletType: palletT2,
                     Tier: AllocationTier.Tier2_OtsOverflow,
                     AllocationIdNo: inserted2,
                     Action: 'I',
                     StoreId: store2,
                     StoreName: storeName2,
                     Division: division2,
-                    Manual: false);
+                    Manual: false,
+                    PalletTypeName: palletN2);
             }
 
             // No item in this container at all — fall through to Tier 3 outside this tx.
@@ -380,6 +386,18 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
             @"SELECT TOP 1 PBFullname FROM dbo.WMS_DataSettings WITH (NOLOCK)
               WHERE StoreID = @s AND PBFullname IS NOT NULL AND LTRIM(RTRIM(PBFullname)) <> ''",
             new { s = storeId }, transaction: tx, cancellationToken: ct));
+    }
+
+    /// <summary>TypeName lookup on dbo.WmsPalletType for a PalletType code.
+    /// Used by ResolveAllocationAsync to enrich the AllocationResult and by
+    /// the open-box / today-scan queries via OUTER APPLY.</summary>
+    private async Task<string?> PalletTypeNameByCodeAsync(SqlConnection c, SqlTransaction? tx, string? palletType, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(palletType)) return null;
+        return await c.ExecuteScalarAsync<string?>(new CommandDefinition(
+            @"SELECT TOP 1 TypeName FROM dbo.WmsPalletType WITH (NOLOCK)
+              WHERE PalletType = @p AND TypeName IS NOT NULL AND LTRIM(RTRIM(TypeName)) <> ''",
+            new { p = palletType }, transaction: tx, cancellationToken: ct));
     }
 
     // ----- helper: OTS pick (recompute on the fly, division-scoped with container-wide fallback) -----
@@ -929,9 +947,13 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
     {
         await using var c = OpenWms();
         var rows = await c.QueryAsync<OpenBoxRow>(new CommandDefinition(
-            @"SELECT b.BoxNo AS BoxNumber, b.Division, b.PalletType, b.Season, b.LPMDt AS LpmDt, b.ToteID AS ToteId,
+            @"SELECT b.BoxNo AS BoxNumber, b.Division, b.PalletType, pt.TypeName AS PalletTypeName,
+                     b.Season, b.LPMDt AS LpmDt, b.ToteID AS ToteId,
                      ISNULL((SELECT SUM(Qty) FROM dbo.WmsOpenBoxItem i WHERE i.BoxNo = b.BoxNo),0) AS ItemQty
               FROM dbo.WmsOpenBox b
+              OUTER APPLY (
+                   SELECT TOP 1 TypeName FROM dbo.WmsPalletType WITH (NOLOCK) WHERE PalletType = b.PalletType
+              ) pt
               WHERE b.Contno = @c AND b.UserId = @u
               ORDER BY b.BoxNo",
             new { c = contno, u = user.Name }, cancellationToken: ct));
@@ -983,13 +1005,22 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
             SELECT TOP ({top})
                    s.ScanId, s.ScannedTS, s.ContNo, s.Itemcode, s.Result,
                    s.StoreID, ds.PBFullname AS StoreName, s.Division,
-                   s.BoxNo, s.ToteID, s.Tier, s.Manual
+                   s.BoxNo, s.ToteID, s.Tier, s.Manual,
+                   ob.PalletType, pt.TypeName AS PalletTypeName
               FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
               OUTER APPLY (
                    SELECT TOP 1 PBFullname FROM dbo.WMS_DataSettings WITH (NOLOCK)
                     WHERE StoreID = s.StoreID
                       AND PBFullname IS NOT NULL AND LTRIM(RTRIM(PBFullname)) <> ''
               ) ds
+              OUTER APPLY (
+                   SELECT TOP 1 PalletType FROM dbo.WmsOpenBox WITH (NOLOCK)
+                    WHERE BoxNo = s.BoxNo
+              ) ob
+              OUTER APPLY (
+                   SELECT TOP 1 TypeName FROM dbo.WmsPalletType WITH (NOLOCK)
+                    WHERE PalletType = ob.PalletType
+              ) pt
              WHERE s.ScannedBy = @u
                AND s.Reversed = 'N'
                AND CAST(s.ScannedTS AS DATE) = CAST(SYSDATETIME() AS DATE)

@@ -149,7 +149,7 @@ else
             <div class="aiwms-result-meta">
                 <div style="grid-column: span 2"><span class="lbl">Store</span> <b>@(al.StoreId ?? "—")</b>@(string.IsNullOrEmpty(al.StoreName) ? "" : $" — {al.StoreName}")</div>
                 <div><span class="lbl">Division</span> <b>@(al.Division ?? "—")</b></div>
-                <div><span class="lbl">PalletType</span> <b>@(al.PalletType ?? "—")</b></div>
+                <div style="grid-column: span 2"><span class="lbl">PalletType</span> <b>@(al.PalletType ?? "—")</b>@(string.IsNullOrEmpty(al.PalletTypeName) ? "" : $" — {al.PalletTypeName}")</div>
                 <div><span class="lbl">LPMDt</span> <b>@(al.LpmDt?.ToString("yyyy-MM-dd") ?? "—")</b></div>
                 <div><span class="lbl">PO</span> <b>@(al.PoNumber ?? "NA")</b></div>
                 @if (_currentBoxNo is not null) { <div><span class="lbl">Box</span> <b>@_currentBoxNo</b></div> }
@@ -174,7 +174,7 @@ else
                         var isActive = b.BoxNumber == _currentBoxNo;
                         <tr class="@(isActive ? "is-active" : "")" @onclick="() => SelectBox(b.BoxNumber)" style="cursor:pointer">
                             <td><b>@b.BoxNumber</b></td>
-                            <td>@b.PalletType</td>
+                            <td title="@b.PalletTypeName">@b.PalletType@(string.IsNullOrEmpty(b.PalletTypeName) ? "" : " — " + b.PalletTypeName)</td>
                             <td>@b.Division</td>
                             <td>@b.Season</td>
                             <td>@b.LpmDt?.ToString("yyyy-MM-dd")</td>
@@ -278,6 +278,7 @@ else
                         <th>Store</th>
                         <th>Store Name</th>
                         <th>Division</th>
+                        <th>Pallet</th>
                         <th>Box</th>
                         <th>Tote</th>
                     </tr>
@@ -294,6 +295,7 @@ else
                             <td style="font-family:var(--font-mono)">@r.StoreID</td>
                             <td>@r.StoreName</td>
                             <td>@r.Division</td>
+                            <td title="@r.PalletTypeName">@r.PalletType@(string.IsNullOrEmpty(r.PalletTypeName) ? "" : " — " + r.PalletTypeName)</td>
                             <td style="font-family:var(--font-mono)">@r.BoxNo</td>
                             <td style="font-family:var(--font-mono)">@r.ToteID</td>
                         </tr>
