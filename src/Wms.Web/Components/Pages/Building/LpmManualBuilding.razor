@@ -403,6 +403,16 @@ else
             if (!_boxOk) { _globalErr = "Validate box first."; return; }
             if (string.IsNullOrWhiteSpace(raw)) { _globalErr = "Item code is required."; await Beep(); await TryFocus(_itemRef); return; }
 
+            // Tote-required gate: refuse new scans while any of this user's open boxes
+            // in this container has no tote attached. Operator must Check-In tote first.
+            await RefreshOpenBoxes();
+            var noToteBox = _openBoxes.FirstOrDefault(b => string.IsNullOrEmpty(b.ToteId));
+            if (noToteBox is not null)
+            {
+                _globalErr = $"Cannot scan: box {noToteBox.BoxNumber} has no Tote attached. Click Check-In on its row in the Boxes grid first.";
+                await Beep(); await TryFocus(_itemRef); return;
+            }
+
             var iv = ItemCodeValidator.Validate(raw);
             if (!iv.IsValid) { _globalErr = iv.Error; await Beep(); await TryFocus(_itemRef); return; }
             var code = iv.Normalized;
