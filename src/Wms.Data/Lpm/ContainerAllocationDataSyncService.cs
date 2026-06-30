@@ -91,10 +91,11 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
             synced.Contains(r.ContNo))).ToList();
     }
 
-    /// <summary>Last N rows from the sync log. Optional ContNo substring filter
-    /// (so users can search "is AELOC… already synced?").</summary>
+    /// <summary>Last N rows from the sync log. Optional ContNo substring filter,
+    /// optional Destination filter. When destinations is null, returns all rows.</summary>
     public async Task<List<DataSyncActivityRow>> GetRecentActivityAsync(
-        int top = 50, string? searchContno = null, CancellationToken ct = default)
+        int top = 50, string? searchContno = null, string[]? destinations = null,
+        CancellationToken ct = default)
     {
         var like = string.IsNullOrWhiteSpace(searchContno) ? null : "%" + searchContno.Trim() + "%";
         await using var c = OpenWms();
@@ -104,10 +105,28 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
                    Status, ErrorMessage, SyncedBy, SyncedTS
               FROM dbo.WMS_ContAllocationDataSync_Log WITH (NOLOCK)
              WHERE (@s IS NULL OR ContNo LIKE @s)
+               AND (@dests IS NULL OR Destination IN @dests)
              ORDER BY SyncedTS DESC, SyncId DESC",
-            new { s = like }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            new { s = like, dests = destinations }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
+
+    /// <summary>Destination keys (enum names as strings) corresponding to the
+    /// three master-data sync flows. Used to filter Recent Activity tables on
+    /// the Container vs Master sync pages.</summary>
+    public static readonly string[] MasterDestinations = new[]
+    {
+        nameof(DataSyncDestination.WMSDataSettings),
+        nameof(DataSyncDestination.WMSPalletType),
+        nameof(DataSyncDestination.ToteIDMaster),
+    };
+
+    public static readonly string[] ContainerDestinations = new[]
+    {
+        nameof(DataSyncDestination.AzureWmsDb),
+        nameof(DataSyncDestination.WmsProductionDb),
+        nameof(DataSyncDestination.WmsKnbBoxes),
+    };
 
     /// <summary>True if this ContNo has any prior allocation-destination sync log entry
     /// (Q4 gate). KNB-box log rows are NOT counted — KNB sync has its own gate.</summary>
