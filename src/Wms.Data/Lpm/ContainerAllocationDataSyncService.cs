@@ -92,22 +92,33 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
     }
 
     /// <summary>Last N rows from the sync log. Optional ContNo substring filter,
-    /// optional Destination filter. When destinations is null, returns all rows.</summary>
+    /// optional Destination filter. When destinations is null/empty, returns
+    /// all rows (no destination filter applied).</summary>
+    /// <remarks>The destination clause is built at runtime — Dapper's list
+    /// expansion of @dests would clash with a "@dests IS NULL OR …" guard
+    /// (the IN list gets substituted into the IS NULL check too, producing
+    /// "(@p1, @p2, …) IS NULL OR …" which SQL Server rejects with
+    /// "non-boolean type … near ','").</remarks>
     public async Task<List<DataSyncActivityRow>> GetRecentActivityAsync(
         int top = 50, string? searchContno = null, string[]? destinations = null,
         CancellationToken ct = default)
     {
         var like = string.IsNullOrWhiteSpace(searchContno) ? null : "%" + searchContno.Trim() + "%";
-        await using var c = OpenWms();
-        var rows = await c.QueryAsync<DataSyncActivityRow>(new CommandDefinition($@"
+        var destClause = (destinations is { Length: > 0 })
+            ? "AND Destination IN @dests"
+            : "";
+        var sql = $@"
             SELECT TOP ({top})
                    SyncId, ContNo, BatchNo, Destination, TotalAllocatedQty,
                    Status, ErrorMessage, SyncedBy, SyncedTS
               FROM dbo.WMS_ContAllocationDataSync_Log WITH (NOLOCK)
              WHERE (@s IS NULL OR ContNo LIKE @s)
-               AND (@dests IS NULL OR Destination IN @dests)
-             ORDER BY SyncedTS DESC, SyncId DESC",
-            new { s = like, dests = destinations }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+               {destClause}
+             ORDER BY SyncedTS DESC, SyncId DESC";
+        await using var c = OpenWms();
+        var rows = await c.QueryAsync<DataSyncActivityRow>(new CommandDefinition(
+            sql, new { s = like, dests = destinations },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return rows.AsList();
     }
 
