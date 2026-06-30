@@ -1,0 +1,220 @@
+@page "/datasync/master"
+@rendermode RenderMode.InteractiveServer
+@using Wms.Core
+@using Wms.Data.Lpm
+@attribute [Authorize(Policy = MenuKeys.DATASYNC_MASTER)]
+@inject ContainerAllocationDataSyncService Svc
+@inject Microsoft.JSInterop.IJSRuntime JS
+
+<PageTitle>WMS — Master Data Sync</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Master Data Sync</h2>
+    <p>Refresh the supporting master tables on Azure (Data Settings, PalletType, ToteID). These don't change often — typically run after a SIM-side update.</p>
+</div>
+
+@if (!string.IsNullOrEmpty(_message))
+{
+    <div class="aiwms-alert @(_isError ? "error" : "info")">@_message</div>
+}
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">Data Settings master sync</div>
+    <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:13px">
+        Incremental mirror of <code>bfldata.dbo.DataSettings</code> &rarr; <code>dbo.WMS_DataSettings</code> on Azure.
+        Pulls rows with <code>CreateDate</code> later than the highest <code>CreateDate</code> already on Azure
+        (full pull on first run).
+    </p>
+    <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
+        <div style="font-size:12px; color:var(--text-secondary)">
+            Last synced CreateDate on Azure: <b>@(_dsLastSynced?.ToString("yyyy-MM-dd HH:mm") ?? "(never — full pull)")</b>
+        </div>
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="SyncDataSettingsAsync" disabled="@_busy">Sync Data Settings</button>
+    </div>
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">PalletType master sync</div>
+    <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:13px">
+        Full refresh of <code>dbo.WmsPalletType</code> from <code>bfldata.dbo.pallettype</code>. Same master across all countries — TRUNCATE + reload on every click.
+    </p>
+    <button class="aiwms-btn aiwms-btn-primary" @onclick="SyncPalletTypeAsync" disabled="@_busy">Sync PalletType Master</button>
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">ToteID Master sync — all countries</div>
+    <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:13px">
+        Pulls <b>yesterday's</b> totes from each country's <code>BlueToteIDMaster</code> (UAE: <code>bfldata</code>; other countries: <code>{DataName}</code> from <code>WMS_DataSettings</code>) and inserts into <code>dbo.WmsBlueToteIDMaster</code> with <code>Used = 'N'</code>.
+        Then sets <code>Used = 'Y'</code> for any ToteID currently held in <code>racks.dbo.whboxitems</code> (UAE) or <code>{DataName}.dbo.WHboxitemsexport</code> (others).
+        Each country gets its own row in Recent Activity.
+    </p>
+    <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="SyncToteMasterAsync" disabled="@_busy">Sync ToteID Master (all countries)</button>
+    </div>
+
+    @if (_toteResults.Count > 0)
+    {
+        <table class="aiwms-table aiwms-table-dense" style="margin-top:12px">
+            <thead>
+                <tr>
+                    <th>Country</th>
+                    <th>DataName</th>
+                    <th style="text-align:right">Inserted</th>
+                    <th style="text-align:right">Marked Used</th>
+                    <th>Status</th>
+                    <th>Note</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in _toteResults)
+                {
+                    <tr>
+                        <td><b>@r.Country</b></td>
+                        <td style="font-family:var(--font-mono)">@r.DataName</td>
+                        <td style="text-align:right">@r.RowsInserted.ToString("N0")</td>
+                        <td style="text-align:right">@r.RowsMarkedUsed.ToString("N0")</td>
+                        <td><span class="aiwms-pill @(r.Status == "Success" ? "tier1" : r.Status == "Empty" ? "tier3" : "tier4")">@r.Status</span></td>
+                        <td>@r.Message</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px">
+        <span>Recent Master Sync Activity — last @_activity.Count row(s)</span>
+        <button class="aiwms-btn aiwms-btn-secondary" style="font-size:11px; padding:4px 10px"
+                @onclick="ReloadActivityAsync" disabled="@_busy">Refresh</button>
+    </div>
+    @if (_activity.Count == 0)
+    {
+        <div style="padding:14px; font-style:italic; color:var(--text-secondary)">No master sync activity yet.</div>
+    }
+    else
+    {
+        <table class="aiwms-table aiwms-table-dense">
+            <thead>
+                <tr>
+                    <th>SyncId</th>
+                    <th>ContNo / Scope</th>
+                    <th>Destination</th>
+                    <th style="text-align:right">Rows</th>
+                    <th>Status</th>
+                    <th>By</th>
+                    <th>When</th>
+                    <th>Error</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var r in _activity)
+                {
+                    <tr>
+                        <td>@r.SyncId</td>
+                        <td style="font-family:var(--font-mono)">@r.ContNo</td>
+                        <td>@FmtDestination(r.Destination)</td>
+                        <td style="text-align:right">@(r.TotalAllocatedQty?.ToString("N0") ?? "")</td>
+                        <td><span class="aiwms-pill @(r.Status == "Success" ? "tier1" : r.Status == "Empty" ? "tier3" : "tier4")">@r.Status</span></td>
+                        <td>@r.SyncedBy</td>
+                        <td>@r.SyncedTS.ToString("yyyy-MM-dd HH:mm")</td>
+                        <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" title="@r.ErrorMessage">@r.ErrorMessage</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</div>
+
+@code {
+    private bool _busy;
+    private string _message = "";
+    private bool _isError;
+    private DateTime? _dsLastSynced;
+    private List<CountryToteSyncRow> _toteResults = new();
+    private List<DataSyncActivityRow> _activity = new();
+
+    protected override async Task OnInitializedAsync() => await ReloadAllAsync();
+
+    private async Task ReloadAllAsync()
+    {
+        try { _dsLastSynced = await Svc.GetDataSettingsLastSyncedCreateDateAsync(); }
+        catch { _dsLastSynced = null; }
+        await ReloadActivityAsync();
+    }
+
+    private async Task ReloadActivityAsync()
+    {
+        try { _activity = await Svc.GetRecentActivityAsync(top: 50, destinations: ContainerAllocationDataSyncService.MasterDestinations); }
+        catch (Exception ex) { ShowError($"Failed to load activity: {ex.Message}"); }
+    }
+
+    private async Task SyncDataSettingsAsync()
+    {
+        var confirm = await JS.InvokeAsync<bool>("confirm",
+            "Sync DataSettings (bfldata.dbo.DataSettings) into Azure WMS_DataSettings? " +
+            "This pulls only rows with CreateDate newer than what's already on Azure.");
+        if (!confirm) return;
+        _busy = true; _message = ""; await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Svc.SyncDataSettingsAsync();
+            if (result.Ok) ShowInfo(result.Message ?? "Synced.");
+            else           ShowError(result.Message ?? "Sync failed.");
+            await ReloadAllAsync();
+        }
+        catch (Exception ex) { ShowError($"Data Settings sync failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private async Task SyncPalletTypeAsync()
+    {
+        var confirm = await JS.InvokeAsync<bool>("confirm",
+            "Refresh PalletType master from bfldata.dbo.pallettype? This TRUNCATES dbo.WmsPalletType and reloads all rows.");
+        if (!confirm) return;
+        _busy = true; _message = ""; await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Svc.SyncPalletTypeAsync();
+            if (result.Ok) ShowInfo(result.Message ?? "Synced.");
+            else           ShowError(result.Message ?? "Sync failed.");
+            await ReloadActivityAsync();
+        }
+        catch (Exception ex) { ShowError($"PalletType sync failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private async Task SyncToteMasterAsync()
+    {
+        var confirm = await JS.InvokeAsync<bool>("confirm",
+            "Sync ToteID Master across all countries from yesterday's source rows? " +
+            "Existing totes on Azure are skipped; Used='Y' is set for ToteIDs currently held in racks/whboxitemsexport.");
+        if (!confirm) return;
+        _busy = true; _message = ""; _toteResults = new();
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            _toteResults = await Svc.SyncToteIDMasterAsync();
+            var totalIns  = _toteResults.Sum(r => r.RowsInserted);
+            var totalUsed = _toteResults.Sum(r => r.RowsMarkedUsed);
+            var failures  = _toteResults.Count(r => r.Status is "Failed" or "PartialFailed");
+            var msg = $"ToteID Master sync: {_toteResults.Count} country/ies processed — {totalIns:N0} totes inserted, {totalUsed:N0} marked Used='Y'."
+                    + (failures > 0 ? $" {failures} country/ies had failures — see table above." : "");
+            if (failures > 0) ShowError(msg); else ShowInfo(msg);
+            await ReloadActivityAsync();
+        }
+        catch (Exception ex) { ShowError($"ToteID Master sync failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private static string FmtDestination(string d) => d switch
+    {
+        "WMSDataSettings" => "Azure WMS — Data Settings",
+        "WMSPalletType"   => "Azure WMS — PalletType Master",
+        "ToteIDMaster"    => "Azure WMS — ToteID Master",
+        _                 => d,
+    };
+
+    private void ShowError(string m) { _message = m; _isError = true; }
+    private void ShowInfo(string m)  { _message = m; _isError = false; }
+}
