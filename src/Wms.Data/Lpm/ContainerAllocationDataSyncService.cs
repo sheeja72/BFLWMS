@@ -741,4 +741,201 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
             $"Data Settings: {rowsCopied:N0} row(s) synced{sinceText}.",
             syncId, rowsCopied);
     }
+
+    // ===================== ToteID Master sync (per-country) =====================
+
+    private static readonly System.Text.RegularExpressions.Regex SafeDbName =
+        new(@"^[A-Za-z0-9_]+$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>Run the ToteID Master sync across every country present in
+    /// dbo.WMS_DataSettings. Each country gets its own log row in
+    /// WMS_ContAllocationDataSync_Log (Destination='ToteIDMaster',
+    /// ContNo=&lt;country code&gt;), so Recent Activity shows per-country status
+    /// separately. UAE is special-cased (source = bfldata.dbo.BlueToteIDMaster,
+    /// used-flag source = racks.dbo.whboxitems). Other countries read from
+    /// {DataName}.dbo.BlueToteIDMaster and {DataName}.dbo.WHboxitemsexport
+    /// via OnPremBackup using 3-part names.</summary>
+    public async Task<List<CountryToteSyncRow>> SyncToteIDMasterAsync(CancellationToken ct = default)
+    {
+        // 1. Country list from the Azure DataSettings mirror.
+        List<(string SIMCountry, string Dataname)> countries;
+        try
+        {
+            await using var w = OpenWms();
+            countries = (await w.QueryAsync<(string, string)>(new CommandDefinition(@"
+                SELECT DISTINCT SIMCountry, Dataname
+                  FROM dbo.WMS_DataSettings WITH (NOLOCK)
+                 WHERE SIMCountry IS NOT NULL AND LTRIM(RTRIM(SIMCountry)) <> ''
+                   AND Dataname   IS NOT NULL AND LTRIM(RTRIM(Dataname))   <> ''
+                 ORDER BY SIMCountry",
+                commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToList();
+        }
+        catch (Exception ex)
+        {
+            await WriteLogRowAsync("(ToteMaster)", null, DataSyncDestination.ToteIDMaster, 0,
+                "Failed", $"Reading country list from WMS_DataSettings failed: {ex.Message}", ct);
+            return new List<CountryToteSyncRow> {
+                new("(all)", "", 0, 0, "Failed",
+                    $"Cannot read country list from dbo.WMS_DataSettings — run Phase 1 sync first. ({ex.Message})")
+            };
+        }
+
+        if (countries.Count == 0)
+        {
+            await WriteLogRowAsync("(ToteMaster)", null, DataSyncDestination.ToteIDMaster, 0,
+                "Empty", "dbo.WMS_DataSettings has no SIMCountry/Dataname rows yet.", ct);
+            return new List<CountryToteSyncRow> {
+                new("(all)", "", 0, 0, "Empty",
+                    "dbo.WMS_DataSettings has no SIMCountry rows. Run the Data Settings Sync first.")
+            };
+        }
+
+        var results = new List<CountryToteSyncRow>();
+        foreach (var (country, dataName) in countries)
+            results.Add(await SyncToteIDsForOneCountryAsync(country, dataName, ct));
+        return results;
+    }
+
+    private async Task<CountryToteSyncRow> SyncToteIDsForOneCountryAsync(
+        string country, string dataName, CancellationToken ct)
+    {
+        var isUae = string.Equals(country, "UAE", StringComparison.OrdinalIgnoreCase);
+
+        // For non-UAE the DataName is interpolated into SQL — sanitise hard.
+        if (!isUae && !SafeDbName.IsMatch(dataName))
+        {
+            await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, 0,
+                "Failed", $"DataName '{dataName}' contains characters outside [A-Za-z0-9_].", ct);
+            return new(country, dataName, 0, 0, "Failed", "DataName format invalid.");
+        }
+
+        var toteSrc  = isUae ? "bfldata.dbo.BlueToteIDMaster" : $"{dataName}.dbo.BlueToteIDMaster";
+        var usedSrc  = isUae ? "racks.dbo.whboxitems"         : $"{dataName}.dbo.WHboxitemsexport";
+
+        // 1. Read yesterday's totes from source.
+        List<string> sourceTotes;
+        try
+        {
+            await using var src = OpenOnPremBackup();
+            var sql = $@"SELECT DISTINCT ToteID
+                           FROM {toteSrc} WITH (NOLOCK)
+                          WHERE CurrDate >= DATEADD(day, -1, CAST(GETDATE() AS DATE))
+                            AND CurrDate <  CAST(GETDATE() AS DATE)
+                            AND ToteID IS NOT NULL AND LTRIM(RTRIM(ToteID)) <> ''";
+            sourceTotes = (await src.QueryAsync<string>(new CommandDefinition(
+                sql, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToList();
+        }
+        catch (Exception ex)
+        {
+            await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, 0,
+                "Failed", $"Reading {toteSrc} failed: {ex.Message}", ct);
+            return new(country, dataName, 0, 0, "Failed", $"Source read ({toteSrc}): {ex.Message}");
+        }
+
+        // 2. Filter out totes already present on Azure for this country (PK = Country+ToteID).
+        HashSet<string> existing;
+        try
+        {
+            await using var w = OpenWms();
+            existing = (await w.QueryAsync<string>(new CommandDefinition(
+                "SELECT ToteID FROM dbo.WmsBlueToteIDMaster WITH (NOLOCK) WHERE Country = @ct",
+                new { ct = country }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, 0,
+                "Failed", $"Reading existing Azure ToteIDs failed: {ex.Message}", ct);
+            return new(country, dataName, 0, 0, "Failed", $"Azure dedup read: {ex.Message}");
+        }
+
+        var newTotes = sourceTotes.Where(t => !existing.Contains(t)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        int inserted = 0;
+
+        // 3. Bulk-insert the new ones (Used = 'N', Country = SIMCountry).
+        if (newTotes.Count > 0)
+        {
+            try
+            {
+                var dt = new System.Data.DataTable();
+                dt.Columns.Add("Country",  typeof(string));
+                dt.Columns.Add("ToteID",   typeof(string));
+                dt.Columns.Add("CurrDate", typeof(DateTime));
+                dt.Columns.Add("Remarks",  typeof(string));
+                dt.Columns.Add("Used",     typeof(string));
+                var today = DateTime.Today.AddDays(-1);  // yesterday — when SIM created these
+                foreach (var t in newTotes)
+                    dt.Rows.Add(country, t, today, DBNull.Value, "N");
+
+                await using var w = OpenWms();
+                using var bulk = new SqlBulkCopy(w)
+                {
+                    DestinationTableName = "dbo.WmsBlueToteIDMaster",
+                    BatchSize            = 1000,
+                    BulkCopyTimeout      = CommandTimeoutSeconds,
+                };
+                foreach (System.Data.DataColumn col in dt.Columns)
+                    bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
+                await bulk.WriteToServerAsync(dt, ct);
+                inserted = newTotes.Count;
+            }
+            catch (Exception ex)
+            {
+                await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, 0,
+                    "Failed", $"Insert into WmsBlueToteIDMaster failed: {ex.Message}", ct);
+                return new(country, dataName, 0, 0, "Failed", $"Bulk insert: {ex.Message}");
+            }
+        }
+
+        // 4. Mark Used='Y' for any tote in this country whose ToteID is currently
+        //    held in racks/whboxitemsexport. Apply to ALL country rows, not only
+        //    the newly-inserted ones, so older inserts get updated too.
+        int markedUsed = 0;
+        try
+        {
+            await using var src = OpenOnPremBackup();
+            var usedSql = $@"SELECT DISTINCT ToteId
+                               FROM {usedSrc} WITH (NOLOCK)
+                              WHERE ToteId IS NOT NULL AND LTRIM(RTRIM(ToteId)) <> ''";
+            var inUseTotes = (await src.QueryAsync<string>(new CommandDefinition(
+                usedSql, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToList();
+
+            if (inUseTotes.Count > 0)
+            {
+                await using var w = OpenWms();
+                // Chunk to avoid hitting the 2100 sqlparameter limit on IN @list.
+                const int chunkSize = 1000;
+                for (int i = 0; i < inUseTotes.Count; i += chunkSize)
+                {
+                    var chunk = inUseTotes.Skip(i).Take(chunkSize).ToArray();
+                    var n = await w.ExecuteAsync(new CommandDefinition(@"
+                        UPDATE dbo.WmsBlueToteIDMaster
+                           SET Used = 'Y'
+                         WHERE Country = @ct
+                           AND ToteID IN @list
+                           AND (Used IS NULL OR Used = 'N')",
+                        new { ct = country, list = chunk },
+                        commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+                    markedUsed += n;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // The insert may have succeeded — log a "partial" outcome.
+            await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, inserted,
+                "PartialFailed",
+                $"Inserted {inserted}; Used='Y' update failed reading {usedSrc}: {ex.Message}", ct);
+            return new(country, dataName, inserted, 0, "PartialFailed",
+                $"Inserted {inserted}; Used update failed ({usedSrc}): {ex.Message}");
+        }
+
+        var status = inserted == 0 && markedUsed == 0 ? "Empty" : "Success";
+        var note   = sourceTotes.Count == 0
+            ? $"Source has no yesterday rows in {toteSrc}."
+            : $"Source returned {sourceTotes.Count} tote(s); {inserted} inserted, {markedUsed} marked Used='Y'.";
+        await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, inserted,
+            status, note, ct);
+        return new(country, dataName, inserted, markedUsed, status, note);
+    }
 }
