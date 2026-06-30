@@ -80,7 +80,8 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
             synced = (await w.QueryAsync<string>(new CommandDefinition(@"
                 SELECT DISTINCT ContNo
                   FROM dbo.WMS_ContAllocationDataSync_Log WITH (NOLOCK)
-                 WHERE ContNo IN @cs",
+                 WHERE ContNo IN @cs
+                   AND Destination IN ('AzureWmsDb','WmsProductionDb')",
                 new { cs = contnos }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
         }
@@ -108,31 +109,65 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         return rows.AsList();
     }
 
-    /// <summary>True if this ContNo has any sync log entry (Q4 gate).</summary>
+    /// <summary>True if this ContNo has any prior allocation-destination sync log entry
+    /// (Q4 gate). KNB-box log rows are NOT counted — KNB sync has its own gate.</summary>
     public async Task<bool> IsAlreadySyncedAsync(string contno, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(contno)) return false;
         await using var c = OpenWms();
         var hit = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
-            "SELECT TOP 1 1 FROM dbo.WMS_ContAllocationDataSync_Log WITH (NOLOCK) WHERE ContNo = @c",
+            @"SELECT TOP 1 1
+                FROM dbo.WMS_ContAllocationDataSync_Log WITH (NOLOCK)
+               WHERE ContNo = @c
+                 AND Destination IN ('AzureWmsDb','WmsProductionDb')",
             new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        return hit == 1;
+    }
+
+    /// <summary>True if dbo.WmsKNBBoxes already has rows for this Country + ContNo
+    /// — used to skip the KNB pull on subsequent syncs.</summary>
+    public async Task<bool> IsKnbBoxesPulledAsync(string contno, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(contno)) return false;
+        await using var c = OpenWms();
+        var hit = await c.ExecuteScalarAsync<int?>(new CommandDefinition(
+            @"SELECT TOP 1 1 FROM dbo.WmsKNBBoxes WITH (NOLOCK)
+               WHERE Country = @country AND Contno = @c",
+            new { country = user.Country, c = contno },
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return hit == 1;
     }
 
     // ===================== Write-side =====================
 
-    /// <summary>Sync entry point — validates the gate, dispatches to the
-    /// destination-specific copy method, and writes the log row.</summary>
+    /// <summary>Sync entry point — runs the allocation copy AND the KNB-boxes
+    /// pull for the same ContNo. The two have independent gates and produce
+    /// their own log rows; the UI sees both in Recent Activity.</summary>
     public async Task<DataSyncResult> SyncAsync(string contno, DataSyncDestination destination, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(contno))
             return new DataSyncResult(false, "Container number is required.", null, 0);
         contno = contno.Trim();
 
-        // Q4 gate: any prior sync for this ContNo blocks.
+        var alloc = await TryCopyAllocationAsync(contno, destination, ct);
+        var knb   = await TryCopyKnbBoxesAsync(contno, ct);
+
+        // Both produce log rows. Combine for the page banner.
+        var ok      = alloc.Ok || knb.Ok;
+        var parts   = new[] { alloc.Message, knb.Message }.Where(m => !string.IsNullOrEmpty(m));
+        return new DataSyncResult(
+            Ok: ok,
+            Message: string.Join(" | ", parts),
+            SyncId: alloc.SyncId ?? knb.SyncId,
+            RowsCopied: alloc.RowsCopied + knb.RowsCopied);
+    }
+
+    // ----- pass 1: allocation copy (with Q4 gate) -----
+    private async Task<DataSyncResult> TryCopyAllocationAsync(string contno, DataSyncDestination destination, CancellationToken ct)
+    {
         if (await IsAlreadySyncedAsync(contno, ct))
             return new DataSyncResult(false,
-                $"Container {contno} has already been synced. One sync per container is the limit — see the Recent Activity table for who synced it and when.",
+                $"Allocation: container {contno} was already synced before — skipped.",
                 null, 0);
 
         // Source rows from LPMSIM — ALL approved batches for this ContNo. If a
@@ -179,9 +214,8 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         }
 
         if (sourceRows.Count == 0)
-            return new DataSyncResult(false, $"No approved allocation rows found for container {contno}.", null, 0);
+            return new DataSyncResult(false, $"Allocation: no approved rows found for container {contno}.", null, 0);
 
-        // Dispatch.
         string? error = null;
         int rowsCopied = 0;
         try
@@ -193,23 +227,84 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
                 _ => throw new InvalidOperationException($"Unknown destination: {destination}"),
             };
         }
-        catch (Exception ex)
-        {
-            error = ex.Message;
-        }
+        catch (Exception ex) { error = ex.Message; }
 
-        // Log the attempt (success or failure).
         var syncId = await WriteLogRowAsync(
             contno, primaryBatchNo, destination, totalAllocatedQty,
             status: error is null ? "Success" : "Failed", error, ct);
 
         return error is null
             ? new DataSyncResult(true,
-                $"Synced {rowsCopied:N0} rows for {contno} to {DestinationLabel(destination)}.",
+                $"Allocation: {rowsCopied:N0} rows copied to {DestinationLabel(destination)}.",
                 syncId, rowsCopied)
             : new DataSyncResult(false,
-                $"Sync to {DestinationLabel(destination)} failed: {error}",
+                $"Allocation to {DestinationLabel(destination)} failed: {error}",
                 syncId, rowsCopied);
+    }
+
+    // ----- pass 2: KNB boxes copy (independent gate) -----
+    private async Task<DataSyncResult> TryCopyKnbBoxesAsync(string contno, CancellationToken ct)
+    {
+        if (await IsKnbBoxesPulledAsync(contno, ct))
+        {
+            var skipId = await WriteLogRowAsync(
+                contno, null, DataSyncDestination.WmsKnbBoxes, 0,
+                status: "Skipped",
+                error: "dbo.WmsKNBBoxes already has rows for this Country + ContNo.", ct);
+            return new DataSyncResult(true,
+                $"KNB boxes: skipped — Azure mirror already has rows for {contno}.",
+                skipId, 0);
+        }
+
+        List<KnbBoxRow> rows;
+        try
+        {
+            await using var src = OpenOnPremBackup();
+            rows = (await src.QueryAsync<KnbBoxRow>(new CommandDefinition(
+                @"SELECT palletno, Boxno, Contno, trndate, userid, closed, Remarks, whouse
+                    FROM usa.dbo.KNBBoxes WITH (NOLOCK)
+                   WHERE Contno = @c",
+                new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToList();
+        }
+        catch (Exception ex)
+        {
+            var failId = await WriteLogRowAsync(contno, null, DataSyncDestination.WmsKnbBoxes, 0,
+                status: "Failed", error: $"Source read: {ex.Message}", ct);
+            return new DataSyncResult(false, $"KNB boxes read failed: {ex.Message}", failId, 0);
+        }
+
+        if (rows.Count == 0)
+        {
+            var emptyId = await WriteLogRowAsync(contno, null, DataSyncDestination.WmsKnbBoxes, 0,
+                status: "Empty", error: $"usa.dbo.KNBBoxes returned no rows for Contno = {contno}.", ct);
+            return new DataSyncResult(true, $"KNB boxes: source has no rows for {contno}.", emptyId, 0);
+        }
+
+        string? writeError = null;
+        try
+        {
+            var dt = BuildKnbBoxDataTable(user.Country ?? "", rows);
+            await using var conn = OpenWms();
+            using var bulk = new SqlBulkCopy(conn)
+            {
+                DestinationTableName = "dbo.WmsKNBBoxes",
+                BatchSize            = 1000,
+                BulkCopyTimeout      = CommandTimeoutSeconds,
+            };
+            foreach (System.Data.DataColumn col in dt.Columns)
+                bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
+            await bulk.WriteToServerAsync(dt, ct);
+        }
+        catch (Exception ex) { writeError = ex.Message; }
+
+        var logId = await WriteLogRowAsync(contno, null, DataSyncDestination.WmsKnbBoxes,
+            totalAllocatedQty: rows.Count,
+            status: writeError is null ? "Success" : "Failed",
+            error: writeError, ct);
+
+        return writeError is null
+            ? new DataSyncResult(true,  $"KNB boxes: {rows.Count:N0} row(s) pulled.", logId, rows.Count)
+            : new DataSyncResult(false, $"KNB boxes write failed: {writeError}",       logId, 0);
     }
 
     // ----- destination writers -----
@@ -438,8 +533,52 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
     {
         DataSyncDestination.AzureWmsDb      => "Azure WMS DB",
         DataSyncDestination.WmsProductionDb => "WMS-Prod-DB",
+        DataSyncDestination.WmsKnbBoxes     => "Azure WMS — KNB Boxes",
         _                                   => d.ToString(),
     };
+
+    private static System.Data.DataTable BuildKnbBoxDataTable(string country, List<KnbBoxRow> rows)
+    {
+        var dt = new System.Data.DataTable();
+        dt.Columns.Add("Country",  typeof(string));
+        dt.Columns.Add("palletno", typeof(string));
+        dt.Columns.Add("Boxno",    typeof(string));
+        dt.Columns.Add("Contno",   typeof(string));
+        dt.Columns.Add("trndate",  typeof(DateTime));
+        dt.Columns.Add("userid",   typeof(string));
+        dt.Columns.Add("closed",   typeof(string));
+        dt.Columns.Add("Remarks",  typeof(string));
+        dt.Columns.Add("whouse",   typeof(string));
+
+        foreach (var r in rows)
+        {
+            dt.Rows.Add(
+                country ?? "",
+                (object?)r.palletno ?? DBNull.Value,
+                r.Boxno  ?? "",                       // PK component — must be non-null
+                r.Contno ?? "",                       // PK component — must be non-null
+                (object?)r.trndate  ?? DBNull.Value,
+                (object?)r.userid   ?? DBNull.Value,
+                (object?)r.closed   ?? DBNull.Value,
+                (object?)r.Remarks  ?? DBNull.Value,
+                (object?)r.whouse   ?? DBNull.Value);
+        }
+        return dt;
+    }
+
+    // Materialised from usa.dbo.KNBBoxes — class (not record) so Dapper does
+    // per-column type coercion, matching the SourceRow pattern.
+    private sealed class KnbBoxRow
+    {
+        public string?   palletno { get; set; }
+        public string?   Boxno    { get; set; }
+        public string?   Contno   { get; set; }
+        public DateTime? trndate  { get; set; }
+        public string?   userid   { get; set; }
+        public string?   closed   { get; set; }
+        public string?   Remarks  { get; set; }
+        public string?   whouse   { get; set; }
+    }
 
     // Mirror the columns we read out of LPMSIM. A class with settable
     // properties (not a positional record) — Dapper's record-constructor
