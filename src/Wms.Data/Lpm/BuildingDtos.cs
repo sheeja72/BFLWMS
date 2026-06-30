@@ -52,9 +52,26 @@ public record AllocationResult(
     int? AllocationIdNo,     // dbo.WMS_ContAllocationData.IdNo (the row updated or inserted)
     char Action = 'I',       // 'U' = QtyIssue+=1 on existing row; 'I' = inserted new row
     string? StoreId = null,
+    string? StoreName = null,// PBFullname from dbo.WMS_DataSettings, looked up by StoreId
     string? Division = null,
     bool Manual = false,
     string? Error = null);
+
+/// <summary>One row in the LPM Manual Building "My Activity Today" grid —
+/// today's scans by the current user, newest first.</summary>
+public record TodayScanRow(
+    long      ScanId,
+    DateTime  ScannedTS,
+    string    ContNo,
+    string    Itemcode,
+    string?   Result,
+    string?   StoreID,
+    string?   StoreName,    // PBFullname
+    string?   Division,
+    string    BoxNo,
+    string?   ToteID,
+    byte      Tier,
+    string?   Manual);
 
 public enum AllocationTier
 {
