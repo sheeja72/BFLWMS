@@ -55,7 +55,8 @@ public record AllocationResult(
     string? StoreName = null,// PBFullname from dbo.WMS_DataSettings, looked up by StoreId
     string? Division = null,
     bool Manual = false,
-    string? Error = null);
+    string? Error = null,
+    string? PalletTypeName = null);  // TypeName from dbo.WmsPalletType, looked up by PalletType code
 
 /// <summary>One row in the LPM Manual Building "My Activity Today" grid —
 /// today's scans by the current user, newest first.</summary>
@@ -71,7 +72,9 @@ public record TodayScanRow(
     string    BoxNo,
     string?   ToteID,
     byte      Tier,
-    string?   Manual);
+    string?   Manual,
+    string?   PalletType,
+    string?   PalletTypeName);
 
 public enum AllocationTier
 {
@@ -88,6 +91,7 @@ public record OpenBoxRow(
     string BoxNumber,
     string? Division,
     string? PalletType,
+    string? PalletTypeName,
     string? Season,
     DateTime? LpmDt,
     string? ToteId,

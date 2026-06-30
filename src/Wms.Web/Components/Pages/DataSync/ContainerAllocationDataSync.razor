@@ -64,6 +64,14 @@
 </div>
 
 <div class="aiwms-section">
+    <div class="aiwms-card-header">PalletType master sync</div>
+    <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:13px">
+        Full refresh of <code>dbo.WmsPalletType</code> from <code>bfldata.dbo.pallettype</code>. Same master across all countries — TRUNCATE + reload on every click.
+    </p>
+    <button class="aiwms-btn aiwms-btn-primary" @onclick="SyncPalletTypeAsync" disabled="@_busy">Sync PalletType Master</button>
+</div>
+
+<div class="aiwms-section">
     <div class="aiwms-card-header">ToteID Master sync — all countries</div>
     <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:13px">
         Pulls <b>yesterday's</b> totes from each country's <code>BlueToteIDMaster</code> (UAE: <code>bfldata</code>; other countries: <code>{DataName}</code> from <code>WMS_DataSettings</code>) and inserts into <code>dbo.WmsBlueToteIDMaster</code> with <code>Used = 'N'</code>.
@@ -221,6 +229,23 @@
         catch { _dsLastSynced = null; }
     }
 
+    private async Task SyncPalletTypeAsync()
+    {
+        var confirm = await JS.InvokeAsync<bool>("confirm",
+            "Refresh PalletType master from bfldata.dbo.pallettype? This TRUNCATES dbo.WmsPalletType and reloads all rows.");
+        if (!confirm) return;
+        _busy = true; _message = ""; await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Svc.SyncPalletTypeAsync();
+            if (result.Ok) ShowInfo(result.Message ?? "Synced.");
+            else           ShowError(result.Message ?? "Sync failed.");
+            await ReloadActivityAsync();
+        }
+        catch (Exception ex) { ShowError($"PalletType sync failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
     private async Task SyncToteMasterAsync()
     {
         var confirm = await JS.InvokeAsync<bool>("confirm",
@@ -304,6 +329,7 @@
         "WmsKnbBoxes"     => "Azure WMS — KNB Boxes",
         "WMSDataSettings" => "Azure WMS — Data Settings",
         "ToteIDMaster"    => "Azure WMS — ToteID Master",
+        "WMSPalletType"   => "Azure WMS — PalletType Master",
         _                 => d,
     };
 
