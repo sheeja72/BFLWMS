@@ -133,14 +133,14 @@ public class OpenContainerService(IOnPremConnectionResolver resolver, ICurrentUs
                ON tg.Country = src.Country AND tg.contno = src.contno
             WHEN MATCHED THEN
                 UPDATE SET Closed     = 'N',
-                           Trndate    = CAST(SYSDATETIME() AS DATE),
-                           Time1      = CAST(SYSDATETIME() AS TIME(0)),
+                           Trndate    = CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE),
+                           Time1      = CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS TIME(0)),
                            Userid     = @userid,
                            Whouse     = @whouse,
                            OpenReason = @reason
             WHEN NOT MATCHED THEN
                 INSERT (Country, contno, Closed, Trndate, Time1, Userid, Whouse, OpenReason)
-                VALUES (@country, @c,    'N',    CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)), @userid, @whouse, @reason);";
+                VALUES (@country, @c,    'N',    CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE), CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS TIME(0)), @userid, @whouse, @reason);";
         await c.ExecuteAsync(new CommandDefinition(
             sql, new { country, c = contno, userid, whouse, reason },
             transaction: tx, cancellationToken: ct));

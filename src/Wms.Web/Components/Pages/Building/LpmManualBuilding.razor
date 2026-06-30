@@ -99,8 +99,17 @@ else
             </div>
         </div>
 
-        <div class="aiwms-input-actions">
+        <div class="aiwms-input-actions" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
             <button class="aiwms-btn aiwms-btn-secondary" @onclick="ResetAll">Reset all</button>
+            <div style="font-size:13px; color:var(--text-secondary)">
+                Box qty: <b style="font-size:14px; color:var(--text-primary)">@_stagedItems.Sum(x => x.Qty)</b>
+            </div>
+            <div style="flex:1"></div>
+            <button class="aiwms-btn aiwms-btn-danger" @onclick="CloseLogisticsAsync"
+                    disabled="@(!_boxOk || _busy)"
+                    title="Mark this logistics box closed in WmsKNBBoxes">
+                Close Logistics
+            </button>
         </div>
     </div>
 
@@ -133,7 +142,7 @@ else
 
         @if (_lastAlloc is { } al)
         {
-            <div class="aiwms-result-row">
+            <div class="aiwms-result-row" style="background:#a7f3d0; padding:8px 10px; border-radius:var(--r-sm); border:1px solid #6ee7b7">
                 <div class="aiwms-result-tag">RESULT</div>
                 <div class="aiwms-result-value">
                     @al.Result @(_lastItem?.Season is { Length: > 0 } s ? " - " + s : "")
@@ -198,7 +207,8 @@ else
                                         <button class="aiwms-btn @(string.IsNullOrEmpty(b.ToteId) ? "aiwms-btn-primary" : "aiwms-btn-secondary")"
                                                 style="padding:3px 10px;font-size:11px"
                                                 @onclick='() => StartRowEdit(b.BoxNumber, b.ToteId, "checkin")'
-                                                title="@(string.IsNullOrEmpty(b.ToteId) ? "Scan tote to attach" : "Re-attach tote")">Check-In</button>
+                                                disabled="@(!string.IsNullOrEmpty(b.ToteId))"
+                                                title="@(string.IsNullOrEmpty(b.ToteId) ? "Scan tote to attach" : "Tote already attached — locked. Clear the box to re-tote.")">Check-In</button>
                                         <span style="width:1px;height:20px;background:var(--border);margin:0 4px"></span>
                                         <button class="aiwms-btn aiwms-btn-success"
                                                 style="padding:3px 10px;font-size:11px"
@@ -280,6 +290,7 @@ else
                         <th>Division</th>
                         <th>Pallet</th>
                         <th>Box</th>
+                        <th>Logistics Box</th>
                         <th>Tote</th>
                     </tr>
                 </thead>
@@ -297,6 +308,7 @@ else
                             <td>@r.Division</td>
                             <td title="@r.PalletTypeName">@r.PalletType@(string.IsNullOrEmpty(r.PalletTypeName) ? "" : " — " + r.PalletTypeName)</td>
                             <td style="font-family:var(--font-mono)">@r.BoxNo</td>
+                            <td style="font-family:var(--font-mono)">@r.LogisticsBoxNo</td>
                             <td style="font-family:var(--font-mono)">@r.ToteID</td>
                         </tr>
                     }
@@ -400,6 +412,12 @@ else
     {
         ClearTransient(); _busy = true;
         var raw = _itemInput ?? "";
+
+        // Clear the previous item's details + result immediately so the panel
+        // doesn't show stale data while the new fetch runs.
+        _lastItem = null; _lastAlloc = null;
+        await InvokeAsync(StateHasChanged);
+
         try
         {
             if (!_boxOk) { _globalErr = "Validate box first."; return; }
@@ -466,6 +484,36 @@ else
             await TryFocus(_itemRef);
         }
         catch (Exception ex) { CaptureException(ex, $"ScanItem failed (item='{raw}', cont='{_contno}', box='{_boxLabel}')"); await Beep(); }
+        finally { _busy = false; }
+    }
+
+    private async Task CloseLogisticsAsync()
+    {
+        if (!_boxOk || string.IsNullOrWhiteSpace(_boxLabel)) return;
+        ClearTransient();
+        int pcs = 0;
+        try { pcs = await Build.GetLogisticsBoxScanCountAsync(_contno, _boxLabel); } catch { }
+        var ok = await ConfirmAsync(
+            $"Close logistics box {_boxLabel}?\n\n" +
+            $"{pcs} piece(s) scanned into this logistics box so far. " +
+            "This marks it Closed='Y' in WmsKNBBoxes. The corresponding WMS open boxes are NOT closed by this — they still need Check-Out.");
+        if (!ok) return;
+        _busy = true;
+        try
+        {
+            var result = await Build.CloseLogisticsBoxAsync(_contno, _boxLabel);
+            if (!result.Ok) { _globalErr = result.Error; await Beep(); return; }
+            _globalInfo = $"Logistics box {_boxLabel} closed ({result.PcsScanned} pcs recorded).";
+            await Audit.LogAsync("Building.CloseLogistics", $"{_contno}/{_boxLabel}", 'U',
+                $"Building/{_contno}/{_boxLabel}", new { pcs = result.PcsScanned });
+            // Box label is now closed — reset the local box state so the operator
+            // is prompted to scan the next logistics label.
+            _boxInput = ""; _boxLabel = ""; _poNumber = null; _boxOk = false;
+            _itemInput = ""; _lastItem = null; _lastAlloc = null;
+            _currentBoxNo = null; _stagedItems.Clear();
+            await TryFocus(_boxRef);
+        }
+        catch (Exception ex) { CaptureException(ex, $"CloseLogistics failed (cont='{_contno}', box='{_boxLabel}')"); await Beep(); }
         finally { _busy = false; }
     }
 

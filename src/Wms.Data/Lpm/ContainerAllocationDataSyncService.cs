@@ -49,6 +49,17 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         return c;
     }
 
+    /// <summary>Opens the per-country on-prem connection (Bahrain/KSA/Kuwait/MALAYSIA/Qatar).
+    /// Throws InvalidOperationException if {Country}_DB_ConnectionString is not configured —
+    /// caller should catch and convert to a "Skipped" log entry for countries we don't
+    /// have a connection for (e.g. ECOM, Ex2Locations, OMAN today).</summary>
+    private SqlConnection OpenCountry(string country)
+    {
+        var c = new SqlConnection(WithConnectTimeout(resolver.GetCountryConnectionString(country)));
+        c.Open();
+        return c;
+    }
+
     // ===================== Read-side =====================
 
     /// <summary>Approved containers, newest approval first. Joins the sync log to
@@ -821,36 +832,77 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         }
 
         var results = new List<CountryToteSyncRow>();
-        foreach (var (country, dataName) in countries)
-            results.Add(await SyncToteIDsForOneCountryAsync(country, dataName, ct));
+
+        // UAE: process ONCE regardless of how many UAE DataNames are in WMS_DataSettings.
+        // Source: bfldata.dbo.BlueToteIDMaster on OnPremBackup. Used flag: racks.dbo.whboxitems.
+        if (countries.Any(r => string.Equals(r.SIMCountry, "UAE", StringComparison.OrdinalIgnoreCase)))
+        {
+            results.Add(await SyncOneCountryAsync(
+                country:        "UAE",
+                sourceLabel:    "bfldata",
+                toteSrcTable:   "bfldata.dbo.BlueToteIDMaster",
+                usedSrcTable:   "racks.dbo.whboxitems",
+                openSourceConn: () => OpenOnPremBackup(),
+                ct: ct));
+        }
+
+        // Non-UAE: one iteration per (SIMCountry, Dataname). Each country uses its OWN
+        // connection string ({Country}_DB_ConnectionString) — the source 3-part name
+        // resolves on that country's server, not OnPremBackup.
+        foreach (var (country, dataName) in countries
+                     .Where(r => !string.Equals(r.SIMCountry, "UAE", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (!SafeDbName.IsMatch(dataName))
+            {
+                await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, 0,
+                    "Failed", $"DataName '{dataName}' contains characters outside [A-Za-z0-9_].", ct);
+                results.Add(new(country, dataName, 0, 0, "Failed", "DataName format invalid."));
+                continue;
+            }
+
+            // If {Country}_DB_ConnectionString isn't configured (ECOM, Ex2Locations,
+            // OMAN today), skip cleanly rather than blowing up on Invalid object name.
+            try { _ = resolver.GetCountryConnectionString(country); }
+            catch (InvalidOperationException)
+            {
+                var msg = $"Skipped: no {country}_DB_ConnectionString configured in App Service.";
+                await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, 0,
+                    "Skipped", msg, ct);
+                results.Add(new(country, dataName, 0, 0, "Skipped", msg));
+                continue;
+            }
+
+            results.Add(await SyncOneCountryAsync(
+                country:        country,
+                sourceLabel:    dataName,
+                toteSrcTable:   $"{dataName}.dbo.BlueToteIDMaster",
+                usedSrcTable:   $"{dataName}.dbo.WHboxitemsexport",
+                openSourceConn: () => OpenCountry(country),
+                ct: ct));
+        }
+
         return results;
     }
 
-    private async Task<CountryToteSyncRow> SyncToteIDsForOneCountryAsync(
-        string country, string dataName, CancellationToken ct)
+    /// <summary>Shared per-country sync body. Reads yesterday's totes from
+    /// `toteSrcTable` via `openSourceConn`, dedups vs Azure, bulk-inserts new
+    /// rows (Used='N', Country=country), then reads `usedSrcTable` via the same
+    /// source connection and marks matching Azure rows Used='Y'.</summary>
+    private async Task<CountryToteSyncRow> SyncOneCountryAsync(
+        string country, string sourceLabel,
+        string toteSrcTable, string usedSrcTable,
+        Func<SqlConnection> openSourceConn,
+        CancellationToken ct)
     {
-        var isUae = string.Equals(country, "UAE", StringComparison.OrdinalIgnoreCase);
-
-        // For non-UAE the DataName is interpolated into SQL — sanitise hard.
-        if (!isUae && !SafeDbName.IsMatch(dataName))
-        {
-            await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, 0,
-                "Failed", $"DataName '{dataName}' contains characters outside [A-Za-z0-9_].", ct);
-            return new(country, dataName, 0, 0, "Failed", "DataName format invalid.");
-        }
-
-        var toteSrc  = isUae ? "bfldata.dbo.BlueToteIDMaster" : $"{dataName}.dbo.BlueToteIDMaster";
-        var usedSrc  = isUae ? "racks.dbo.whboxitems"         : $"{dataName}.dbo.WHboxitemsexport";
-
         // 1. Read yesterday's totes from source.
         List<string> sourceTotes;
         try
         {
-            await using var src = OpenOnPremBackup();
+            await using var src = openSourceConn();
             var sql = $@"SELECT DISTINCT ToteID
-                           FROM {toteSrc} WITH (NOLOCK)
-                          WHERE CurrDate >= DATEADD(day, -1, CAST(GETDATE() AS DATE))
-                            AND CurrDate <  CAST(GETDATE() AS DATE)
+                           FROM {toteSrcTable} WITH (NOLOCK)
+                          WHERE CurrDate >= DATEADD(day, -1, CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE))
+                            AND CurrDate <  CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE)
                             AND ToteID IS NOT NULL AND LTRIM(RTRIM(ToteID)) <> ''";
             sourceTotes = (await src.QueryAsync<string>(new CommandDefinition(
                 sql, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToList();
@@ -858,8 +910,8 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         catch (Exception ex)
         {
             await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, 0,
-                "Failed", $"Reading {toteSrc} failed: {ex.Message}", ct);
-            return new(country, dataName, 0, 0, "Failed", $"Source read ({toteSrc}): {ex.Message}");
+                "Failed", $"Reading {toteSrcTable} failed: {ex.Message}", ct);
+            return new(country, sourceLabel, 0, 0, "Failed", $"Source read ({toteSrcTable}): {ex.Message}");
         }
 
         // 2. Filter out totes already present on Azure for this country (PK = Country+ToteID).
@@ -876,7 +928,7 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         {
             await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, 0,
                 "Failed", $"Reading existing Azure ToteIDs failed: {ex.Message}", ct);
-            return new(country, dataName, 0, 0, "Failed", $"Azure dedup read: {ex.Message}");
+            return new(country, sourceLabel, 0, 0, "Failed", $"Azure dedup read: {ex.Message}");
         }
 
         var newTotes = sourceTotes.Where(t => !existing.Contains(t)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -893,7 +945,7 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
                 dt.Columns.Add("CurrDate", typeof(DateTime));
                 dt.Columns.Add("Remarks",  typeof(string));
                 dt.Columns.Add("Used",     typeof(string));
-                var today = DateTime.Today.AddDays(-1);  // yesterday — when SIM created these
+                var today = DateTime.UtcNow.AddHours(4).Date.AddDays(-1);  // yesterday (GST) — when SIM created these
                 foreach (var t in newTotes)
                     dt.Rows.Add(country, t, today, DBNull.Value, "N");
 
@@ -913,19 +965,19 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
             {
                 await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, 0,
                     "Failed", $"Insert into WmsBlueToteIDMaster failed: {ex.Message}", ct);
-                return new(country, dataName, 0, 0, "Failed", $"Bulk insert: {ex.Message}");
+                return new(country, sourceLabel, 0, 0, "Failed", $"Bulk insert: {ex.Message}");
             }
         }
 
         // 4. Mark Used='Y' for any tote in this country whose ToteID is currently
-        //    held in racks/whboxitemsexport. Apply to ALL country rows, not only
-        //    the newly-inserted ones, so older inserts get updated too.
+        //    held in the used-source table (UAE: racks; others: WHboxitemsexport).
+        //    Apply to ALL country rows so older inserts get updated too.
         int markedUsed = 0;
         try
         {
-            await using var src = OpenOnPremBackup();
+            await using var src = openSourceConn();
             var usedSql = $@"SELECT DISTINCT ToteId
-                               FROM {usedSrc} WITH (NOLOCK)
+                               FROM {usedSrcTable} WITH (NOLOCK)
                               WHERE ToteId IS NOT NULL AND LTRIM(RTRIM(ToteId)) <> ''";
             var inUseTotes = (await src.QueryAsync<string>(new CommandDefinition(
                 usedSql, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToList();
@@ -955,18 +1007,18 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
             // The insert may have succeeded — log a "partial" outcome.
             await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, inserted,
                 "PartialFailed",
-                $"Inserted {inserted}; Used='Y' update failed reading {usedSrc}: {ex.Message}", ct);
-            return new(country, dataName, inserted, 0, "PartialFailed",
-                $"Inserted {inserted}; Used update failed ({usedSrc}): {ex.Message}");
+                $"Inserted {inserted}; Used='Y' update failed reading {usedSrcTable}: {ex.Message}", ct);
+            return new(country, sourceLabel, inserted, 0, "PartialFailed",
+                $"Inserted {inserted}; Used update failed ({usedSrcTable}): {ex.Message}");
         }
 
         var status = inserted == 0 && markedUsed == 0 ? "Empty" : "Success";
         var note   = sourceTotes.Count == 0
-            ? $"Source has no yesterday rows in {toteSrc}."
+            ? $"Source has no yesterday rows in {toteSrcTable}."
             : $"Source returned {sourceTotes.Count} tote(s); {inserted} inserted, {markedUsed} marked Used='Y'.";
         await WriteLogRowAsync(country, null, DataSyncDestination.ToteIDMaster, inserted,
             status, note, ct);
-        return new(country, dataName, inserted, markedUsed, status, note);
+        return new(country, sourceLabel, inserted, markedUsed, status, note);
     }
 
     // ===================== PalletType master sync =====================

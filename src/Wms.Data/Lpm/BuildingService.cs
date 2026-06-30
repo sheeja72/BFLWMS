@@ -486,7 +486,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                  BuildingCategory, Manual, ItemSource)
             OUTPUT INSERTED.IdNo
             VALUES
-                (@c, @country, CAST(SYSDATETIME() AS DATE), @i, @itemname, @style, @size, @color, @brand, @season, @gender,
+                (@c, @country, CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE), @i, @itemname, @style, @size, @color, @brand, @season, @gender,
                  @hsCode, @groupCode, @division, @department, @klass, @family, @subclass, @p,
                  @resultType, @lpmDt, @store, 1, 1, 1, @result, @salesPrice,
                  @buildingCategory, @manual, @itemSource);";
@@ -603,7 +603,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         var nextSeq = await c.ExecuteScalarAsync<int>(new CommandDefinition(
             @"MERGE dbo.WmsBoxSequence WITH (HOLDLOCK) AS tg
               USING (SELECT @c AS Contno) src ON tg.Contno = src.Contno
-              WHEN MATCHED THEN UPDATE SET NextSeq = NextSeq + 1, UpdatedTS = SYSDATETIME()
+              WHEN MATCHED THEN UPDATE SET NextSeq = NextSeq + 1, UpdatedTS = DATEADD(hour, 4, SYSUTCDATETIME())
               WHEN NOT MATCHED THEN INSERT (Contno, NextSeq) VALUES (@c, 2)
               OUTPUT CASE WHEN $action = 'INSERT' THEN 1 ELSE inserted.NextSeq - 1 END;",
             new { c = contno }, transaction: tx, cancellationToken: ct));
@@ -644,7 +644,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         var nextSeq = await c.ExecuteScalarAsync<int>(new CommandDefinition(
             @"MERGE dbo.WmsBoxSequence WITH (HOLDLOCK) AS tg
               USING (SELECT @c AS Contno) src ON tg.Contno = src.Contno
-              WHEN MATCHED THEN UPDATE SET NextSeq = NextSeq + 1, UpdatedTS = SYSDATETIME()
+              WHEN MATCHED THEN UPDATE SET NextSeq = NextSeq + 1, UpdatedTS = DATEADD(hour, 4, SYSUTCDATETIME())
               WHEN NOT MATCHED THEN INSERT (Contno, NextSeq) VALUES (@c, 2)
               OUTPUT CASE WHEN $action = 'INSERT' THEN 1 ELSE inserted.NextSeq - 1 END;",
             new { c = contno }, transaction: tx, cancellationToken: ct));
@@ -687,7 +687,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
             END
             ELSE
             BEGIN
-                UPDATE dbo.WmsOpenBoxItem SET Qty = Qty + 1, ScannedTS = SYSDATETIME()
+                UPDATE dbo.WmsOpenBoxItem SET Qty = Qty + 1, ScannedTS = DATEADD(hour, 4, SYSUTCDATETIME())
                  WHERE BoxNo = @b AND ItemCode = @i;
             END
             SELECT @sr;";
@@ -829,7 +829,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
 
         await c.ExecuteAsync(new CommandDefinition(
             @"UPDATE dbo.WMSContBuildScanData
-                 SET Reversed = 'Y', ReversedTS = SYSDATETIME(), ReversedBy = @u
+                 SET Reversed = 'Y', ReversedTS = DATEADD(hour, 4, SYSUTCDATETIME()), ReversedBy = @u
                WHERE BoxNo = @b AND Reversed = 'N'",
             new { b = boxNo, u = user.Name }, transaction: tx, cancellationToken: ct));
 
@@ -869,7 +869,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         var palletType = (string)box.PalletType;
         var division = (string?)box.Division ?? "";
         var season = (string?)box.Season ?? "";
-        var lpmDt = (DateTime?)box.LPMDt ?? DateTime.Now.Date;
+        var lpmDt = (DateTime?)box.LPMDt ?? DateTime.UtcNow.AddHours(4).Date;
         var logisticsBoxNo = (string?)box.LogisticsBoxNo ?? "";
         var checkInUser = (string)box.UserId;
         var checkoutUser = user.Name;
@@ -882,7 +882,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
              GroupCode, OldBoxNo, Prepared1, Prepared2, WHouse, FWType, FPreparedBy, FPalletType,
              ISize, Gender, ToteID, LPMDT)
           VALUES
-            (@Country, @BoxNo, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)), 'Y', @CheckOut, 'from WMS', @CheckIn, @Pallet, 'N',
+            (@Country, @BoxNo, CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE), CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS TIME(0)), 'Y', @CheckOut, 'from WMS', @CheckIn, @Pallet, 'N',
              '', '', @CheckOut, @Division, @WHouse, '', @CheckOut, @Pallet,
              '', '', @Tote, @LPMDt);";
         DbOpContext.Set("INSERT dbo.WmsUPCBoxHead (checkout step 1)", headSql);
@@ -910,7 +910,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
              Photo, Style, Color, GroupCode, ItemName, Warehouse, PhotoCheckType, RRP,
              Logistics_BoxNo, Season, ToteID, RoboStatus, BarCode)
           VALUES
-            (@Country, @Cont, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)), @Item, @Size, @Result, @User, @Pc, @Size,
+            (@Country, @Cont, CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE), CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS TIME(0)), @Item, @Size, @Result, @User, @Pc, @Size,
              '', @Style, @Color, @Gc, '', @WHouse, '', 0,
              @Logi, @Season, @Tote, 'N', '');";
         var photoRows = 0;
@@ -1006,7 +1006,8 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                    s.ScanId, s.ScannedTS, s.ContNo, s.Itemcode, s.Result,
                    s.StoreID, ds.PBFullname AS StoreName, s.Division,
                    s.BoxNo, s.ToteID, s.Tier, s.Manual,
-                   ob.PalletType, pt.TypeName AS PalletTypeName
+                   ob.PalletType, pt.TypeName AS PalletTypeName,
+                   ob.LogisticsBoxNo
               FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
               OUTER APPLY (
                    SELECT TOP 1 PBFullname FROM dbo.WMS_DataSettings WITH (NOLOCK)
@@ -1014,7 +1015,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                       AND PBFullname IS NOT NULL AND LTRIM(RTRIM(PBFullname)) <> ''
               ) ds
               OUTER APPLY (
-                   SELECT TOP 1 PalletType FROM dbo.WmsOpenBox WITH (NOLOCK)
+                   SELECT TOP 1 PalletType, LogisticsBoxNo FROM dbo.WmsOpenBox WITH (NOLOCK)
                     WHERE BoxNo = s.BoxNo
               ) ob
               OUTER APPLY (
@@ -1023,9 +1024,71 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
               ) pt
              WHERE s.ScannedBy = @u
                AND s.Reversed = 'N'
-               AND CAST(s.ScannedTS AS DATE) = CAST(SYSDATETIME() AS DATE)
+               AND CAST(s.ScannedTS AS DATE) = CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE)
              ORDER BY s.ScanId DESC",
             new { u = user.Name }, cancellationToken: ct));
         return rows.AsList();
+    }
+
+    // ==================== 14. Close Logistics Box ====================
+    /// <summary>How many non-reversed pieces have been scanned into WmsOpenBox(es)
+    /// whose LogisticsBoxNo matches the given logistics-box label for this
+    /// container. Used by the LpmManualBuilding "Close Logistics" confirm dialog.</summary>
+    public async Task<int> GetLogisticsBoxScanCountAsync(string contno, string logisticsBoxNo, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(logisticsBoxNo)) return 0;
+        await using var c = OpenWms();
+        return await c.ExecuteScalarAsync<int>(new CommandDefinition(
+            @"SELECT COUNT_BIG(*)
+                FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
+                JOIN dbo.WmsOpenBox b WITH (NOLOCK) ON b.BoxNo = s.BoxNo
+               WHERE s.ContNo = @c AND b.LogisticsBoxNo = @lb AND s.Reversed = 'N'",
+            new { c = contno, lb = logisticsBoxNo }, cancellationToken: ct));
+    }
+
+    /// <summary>Close the SIM-side logistics box: writes one audit row to
+    /// dbo.WmsLogisticsBoxClosure_Log and flips dbo.WmsKNBBoxes.closed='Y'
+    /// for (Country + Contno + Boxno). Returns the piece count that was
+    /// recorded in the log row.</summary>
+    public async Task<CloseLogisticsResult> CloseLogisticsBoxAsync(string contno, string logisticsBoxNo, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(contno) || string.IsNullOrWhiteSpace(logisticsBoxNo))
+            return new(false, "Container and logistics box are required.", 0);
+
+        var country = Country;
+        logisticsBoxNo = logisticsBoxNo.Trim();
+        await using var c = OpenWms();
+        await using var tx = (SqlTransaction)await c.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+
+        var current = await c.QueryFirstOrDefaultAsync<(string? Boxno, string? closed)>(new CommandDefinition(
+            @"SELECT Boxno, closed FROM dbo.WmsKNBBoxes WITH (UPDLOCK, ROWLOCK)
+              WHERE Country = @ct AND Contno = @c AND Boxno = @b",
+            new { ct = country, c = contno, b = logisticsBoxNo }, transaction: tx, cancellationToken: ct));
+        if (current.Boxno is null) return new(false, $"Logistics box {logisticsBoxNo} not found in WmsKNBBoxes.", 0);
+        if (string.Equals(current.closed, "Y", StringComparison.OrdinalIgnoreCase))
+            return new(false, $"Logistics box {logisticsBoxNo} is already closed.", 0);
+
+        var pcs = await c.ExecuteScalarAsync<int>(new CommandDefinition(
+            @"SELECT COUNT_BIG(*)
+                FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
+                JOIN dbo.WmsOpenBox b WITH (NOLOCK) ON b.BoxNo = s.BoxNo
+               WHERE s.ContNo = @c AND b.LogisticsBoxNo = @b AND s.Reversed = 'N'",
+            new { c = contno, b = logisticsBoxNo }, transaction: tx, cancellationToken: ct));
+
+        await c.ExecuteAsync(new CommandDefinition(
+            @"INSERT INTO dbo.WmsLogisticsBoxClosure_Log
+                  (Country, ContNo, Boxno, PcsScanned, ClosedBy)
+              VALUES (@ct, @c, @b, @pcs, @u)",
+            new { ct = country, c = contno, b = logisticsBoxNo, pcs, u = user.Name },
+            transaction: tx, cancellationToken: ct));
+
+        await c.ExecuteAsync(new CommandDefinition(
+            @"UPDATE dbo.WmsKNBBoxes SET closed = 'Y'
+               WHERE Country = @ct AND Contno = @c AND Boxno = @b",
+            new { ct = country, c = contno, b = logisticsBoxNo },
+            transaction: tx, cancellationToken: ct));
+
+        await tx.CommitAsync(ct);
+        return new(true, null, pcs);
     }
 }

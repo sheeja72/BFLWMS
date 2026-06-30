@@ -58,6 +58,12 @@ public record AllocationResult(
     string? Error = null,
     string? PalletTypeName = null);  // TypeName from dbo.WmsPalletType, looked up by PalletType code
 
+/// <summary>Outcome of the LPM Manual Building "Close Logistics" button —
+/// flips WmsKNBBoxes.closed='Y' and writes a row to WmsLogisticsBoxClosure_Log.
+/// PcsScanned is the count of non-reversed scans WMSContBuildScanData rows
+/// landed in any WmsOpenBox whose LogisticsBoxNo matches.</summary>
+public record CloseLogisticsResult(bool Ok, string? Error, int PcsScanned);
+
 /// <summary>One row in the LPM Manual Building "My Activity Today" grid —
 /// today's scans by the current user, newest first.</summary>
 public record TodayScanRow(
@@ -74,7 +80,8 @@ public record TodayScanRow(
     byte      Tier,
     string?   Manual,
     string?   PalletType,
-    string?   PalletTypeName);
+    string?   PalletTypeName,
+    string?   LogisticsBoxNo);  // WmsOpenBox.LogisticsBoxNo (SIM-side label, e.g. AELOC6928-406330/001/010)
 
 public enum AllocationTier
 {
