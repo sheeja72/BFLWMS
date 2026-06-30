@@ -43,5 +43,16 @@ public enum DataSyncDestination
     AzureWmsDb       = 0,   // bfl-wms Azure SQL — dbo.WMS_ContAllocationData
     WmsProductionDb  = 1,   // On-prem WmsProductionDb — online.dbo.PhotoCheckingResult
     WmsKnbBoxes      = 2,   // bfl-wms Azure SQL — dbo.WmsKNBBoxes (auxiliary, runs alongside allocation sync)
-    WMSDataSettings  = 3    // bfl-wms Azure SQL — dbo.WMS_DataSettings (incremental on CreateDate)
+    WMSDataSettings  = 3,   // bfl-wms Azure SQL — dbo.WMS_DataSettings (incremental on CreateDate)
+    ToteIDMaster     = 4    // bfl-wms Azure SQL — dbo.WmsBlueToteIDMaster (per-country, yesterday's totes + in-use flag)
 }
+
+/// <summary>One row per country processed in the ToteID Master sync — used by
+/// the page to render a per-country mini-summary right after the click.</summary>
+public record CountryToteSyncRow(
+    string  Country,
+    string  DataName,
+    int     RowsInserted,
+    int     RowsMarkedUsed,
+    string  Status,
+    string? Message);
