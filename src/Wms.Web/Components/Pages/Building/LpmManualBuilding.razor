@@ -114,23 +114,20 @@ else
         else
         {
             var it = _lastItem;
-            <div class="aiwms-upc-display">@it.ItemCode</div>
-            <div class="aiwms-item-grid">
-                <div class="cell"><div class="lbl">Description</div><div class="val">@it.ItemName</div></div>
-                <div class="cell"><div class="lbl">Group</div><div class="val">@it.GroupCode @(it.GroupName is null ? "" : "— " + it.GroupName)</div></div>
-                <div class="cell"><div class="lbl">Style</div><div class="val">@it.Style</div></div>
-                <div class="cell"><div class="lbl">Size</div><div class="val">@it.Size</div></div>
-                <div class="cell"><div class="lbl">Color</div><div class="val">@it.Color</div></div>
-                <div class="cell"><div class="lbl">Brand</div><div class="val">@it.Brand</div></div>
-                <div class="cell"><div class="lbl">Gender</div><div class="val">@it.Gender</div></div>
-                <div class="cell"><div class="lbl">Season</div><div class="val">@it.Season</div></div>
-                <div class="cell"><div class="lbl">HS Code</div><div class="val">@it.HsCode</div></div>
-                <div class="cell"><div class="lbl">LPM</div><div class="val">@it.Lpm</div></div>
-                <div class="cell"><div class="lbl">Division</div><div class="val">@it.Division</div></div>
-                <div class="cell"><div class="lbl">Department</div><div class="val">@it.Department</div></div>
-                <div class="cell"><div class="lbl">Class</div><div class="val">@it.Class</div></div>
-                <div class="cell"><div class="lbl">Family</div><div class="val">@it.Family</div></div>
-                <div class="cell"><div class="lbl">Subclass</div><div class="val">@it.Subclass</div></div>
+            <div class="aiwms-upc-display" style="font-size:14px; padding:4px 8px">@it.ItemCode</div>
+            <div class="aiwms-item-grid" style="grid-template-columns: repeat(3, 1fr); gap:4px 12px; font-size:11px">
+                <div class="cell"><div class="lbl" style="font-size:9px">Description</div><div class="val" style="font-size:11px; line-height:1.2">@it.ItemName</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">Style</div><div class="val" style="font-size:11px; line-height:1.2">@it.Style</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">Size</div><div class="val" style="font-size:11px; line-height:1.2">@it.Size</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">Color</div><div class="val" style="font-size:11px; line-height:1.2">@it.Color</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">Brand</div><div class="val" style="font-size:11px; line-height:1.2">@it.Brand</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">Gender</div><div class="val" style="font-size:11px; line-height:1.2">@it.Gender</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">Season</div><div class="val" style="font-size:11px; line-height:1.2">@it.Season</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">HS Code</div><div class="val" style="font-size:11px; line-height:1.2">@it.HsCode</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">Division</div><div class="val" style="font-size:11px; line-height:1.2">@it.Division</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">Department</div><div class="val" style="font-size:11px; line-height:1.2">@it.Department</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">Class</div><div class="val" style="font-size:11px; line-height:1.2">@it.Class</div></div>
+                <div class="cell"><div class="lbl" style="font-size:9px">Family / Subclass</div><div class="val" style="font-size:11px; line-height:1.2">@it.Family @(string.IsNullOrEmpty(it.Subclass) ? "" : " / " + it.Subclass)</div></div>
             </div>
         }
 
@@ -150,7 +147,7 @@ else
                 </div>
             </div>
             <div class="aiwms-result-meta">
-                <div><span class="lbl">Store</span> <b>@(al.StoreId ?? "—")</b></div>
+                <div style="grid-column: span 2"><span class="lbl">Store</span> <b>@(al.StoreId ?? "—")</b>@(string.IsNullOrEmpty(al.StoreName) ? "" : $" — {al.StoreName}")</div>
                 <div><span class="lbl">Division</span> <b>@(al.Division ?? "—")</b></div>
                 <div><span class="lbl">PalletType</span> <b>@(al.PalletType ?? "—")</b></div>
                 <div><span class="lbl">LPMDt</span> <b>@(al.LpmDt?.ToString("yyyy-MM-dd") ?? "—")</b></div>
@@ -257,6 +254,56 @@ else
 
 </div>
 
+<div class="aiwms-section" style="margin-top:14px">
+    <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px">
+        <span>My Activity Today — @_todayScans.Count scan(s) by @(Me.Name ?? "you")</span>
+        <button class="aiwms-btn aiwms-btn-secondary" style="font-size:11px; padding:4px 10px"
+                @onclick="RefreshTodayScansAsync" disabled="@_busy">Refresh</button>
+    </div>
+    @if (_todayScans.Count == 0)
+    {
+        <div style="padding:14px; font-style:italic; color:var(--text-secondary)">No scans recorded for you today yet.</div>
+    }
+    else
+    {
+        <div style="max-height:340px; overflow:auto">
+            <table class="aiwms-table aiwms-table-dense" style="font-size:11px">
+                <thead style="position:sticky; top:0; background:white; z-index:1">
+                    <tr>
+                        <th>Time</th>
+                        <th>ContNo</th>
+                        <th>ItemCode</th>
+                        <th>Result</th>
+                        <th>Tier</th>
+                        <th>Store</th>
+                        <th>Store Name</th>
+                        <th>Division</th>
+                        <th>Box</th>
+                        <th>Tote</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in _todayScans)
+                    {
+                        <tr>
+                            <td>@r.ScannedTS.ToString("HH:mm:ss")</td>
+                            <td style="font-family:var(--font-mono)">@r.ContNo</td>
+                            <td style="font-family:var(--font-mono)"><b>@r.Itemcode</b></td>
+                            <td>@r.Result @(r.Manual == "Y" ? "★" : "")</td>
+                            <td><span class="aiwms-pill tier@(r.Tier)" style="font-size:10px; padding:1px 6px">@r.Tier</span></td>
+                            <td style="font-family:var(--font-mono)">@r.StoreID</td>
+                            <td>@r.StoreName</td>
+                            <td>@r.Division</td>
+                            <td style="font-family:var(--font-mono)">@r.BoxNo</td>
+                            <td style="font-family:var(--font-mono)">@r.ToteID</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+</div>
+
 }
 
 @code {
@@ -286,8 +333,19 @@ else
     private RowEdit? _rowEdit;
 
     private List<OpenBoxRow> _openBoxes = new();
+    private List<TodayScanRow> _todayScans = new();
 
-    protected override async Task OnInitializedAsync() => await Me.EnsureLoadedAsync();
+    protected override async Task OnInitializedAsync()
+    {
+        await Me.EnsureLoadedAsync();
+        await RefreshTodayScansAsync();
+    }
+
+    private async Task RefreshTodayScansAsync()
+    {
+        try { _todayScans = await Build.GetTodayScansAsync(); }
+        catch { /* keep prior list; surface via _globalErr if needed */ }
+    }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -376,6 +434,7 @@ else
             _lastItem = item; _lastAlloc = alloc;
             _stagedItems = await Build.GetStagedItemsAsync(boxNo);
             await RefreshOpenBoxes();
+            await RefreshTodayScansAsync();
 
             // Surface the tote requirement only if THIS box still has no tote attached.
             var thisBox = _openBoxes.FirstOrDefault(b => b.BoxNumber == boxNo);
@@ -412,6 +471,7 @@ else
                 $"Building/{_contno}/{boxNo}", new { reversed });
             if (_currentBoxNo == boxNo) { _currentBoxNo = null; _stagedItems.Clear(); _lastItem = null; _lastAlloc = null; }
             await RefreshOpenBoxes();
+            await RefreshTodayScansAsync();
         }
         catch (Exception ex) { CaptureException(ex, $"ClearBox failed (box='{boxNo}')"); }
         finally { _busy = false; }
@@ -464,6 +524,7 @@ else
             }
             _rowEdit = null;
             await RefreshOpenBoxes();
+            await RefreshTodayScansAsync();
         }
         catch (Exception ex) { CaptureException(ex, $"ApplyRowEdit failed ({_rowEdit?.Action} on {_rowEdit?.BoxNo})"); await Beep(); }
         finally { _busy = false; }

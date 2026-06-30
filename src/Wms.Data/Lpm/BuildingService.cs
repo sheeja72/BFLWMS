@@ -225,6 +225,8 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                 await c.ExecuteAsync(new CommandDefinition(
                     "UPDATE dbo.WMS_ContAllocationData SET QtyIssue = ISNULL(QtyIssue,0) + 1 WHERE IdNo = @id",
                     new { id = id1 }, transaction: tx, cancellationToken: ct));
+                var storeId1   = (string?)t1.StoreID;
+                var storeName1 = await StoreNameByIdAsync(c, tx, storeId1, ct);
                 await tx.CommitAsync(ct);
                 return new AllocationResult(
                     Found: true,
@@ -235,7 +237,8 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                     Tier: AllocationTier.Tier1_HasCapacity,
                     AllocationIdNo: id1,
                     Action: 'U',
-                    StoreId: (string?)t1.StoreID,
+                    StoreId: storeId1,
+                    StoreName: storeName1,
                     Division: (string?)t1.Division,
                     Manual: false);
             }
@@ -257,7 +260,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                 {
                     await tx.RollbackAsync(ct);
                     return new AllocationResult(false, "", null, null, null,
-                        AllocationTier.Tier2_OtsOverflow, null, 'I', null, null, false,
+                        AllocationTier.Tier2_OtsOverflow, null, 'I', null, null, null, false,
                         Error: $"No stores with available OTS in container {contno} for division={division2 ?? "(null)"}. Cannot place overflow piece.");
                 }
 
@@ -286,6 +289,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                     itemSource: null,
                     ct: ct);
 
+                var storeName2 = await StoreNameByIdAsync(c, tx, store2, ct);
                 await tx.CommitAsync(ct);
                 return new AllocationResult(
                     Found: true, Result: "SHOP",
@@ -296,6 +300,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                     AllocationIdNo: inserted2,
                     Action: 'I',
                     StoreId: store2,
+                    StoreName: storeName2,
                     Division: division2,
                     Manual: false);
             }
@@ -309,7 +314,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         if (master is null)
         {
             return new AllocationResult(false, "", null, null, null,
-                AllocationTier.Tier3_ManualNewItem, null, 'I', null, null, false,
+                AllocationTier.Tier3_ManualNewItem, null, 'I', null, null, null, false,
                 Error: $"Item {itemCode} is not in container {contno} and not found in item master. Create it via Item Encoding before scanning.");
         }
 
@@ -321,7 +326,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
             {
                 await tx3.RollbackAsync(ct);
                 return new AllocationResult(false, "", null, null, null,
-                    AllocationTier.Tier3_ManualNewItem, null, 'I', null, null, true,
+                    AllocationTier.Tier3_ManualNewItem, null, 'I', null, null, null, true,
                     Error: $"Container {contno} has no store eligible for OTS allocation.");
             }
 
@@ -350,6 +355,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                 itemSource: "usa.upcbarcodes",
                 ct: ct);
 
+            var storeName3 = await StoreNameByIdAsync(c3, tx3, store3, ct);
             await tx3.CommitAsync(ct);
             return new AllocationResult(
                 Found: true, Result: "SHOP",
@@ -358,9 +364,22 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                 AllocationIdNo: inserted3,
                 Action: 'I',
                 StoreId: store3,
+                StoreName: storeName3,
                 Division: master.Division,
                 Manual: true);
         }
+    }
+
+    /// <summary>PBFullname lookup on dbo.WMS_DataSettings for a StoreID. Used
+    /// by ResolveAllocationAsync to enrich the AllocationResult and by
+    /// GetTodayScansAsync via an OUTER APPLY on the activity grid query.</summary>
+    private async Task<string?> StoreNameByIdAsync(SqlConnection c, SqlTransaction? tx, string? storeId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(storeId)) return null;
+        return await c.ExecuteScalarAsync<string?>(new CommandDefinition(
+            @"SELECT TOP 1 PBFullname FROM dbo.WMS_DataSettings WITH (NOLOCK)
+              WHERE StoreID = @s AND PBFullname IS NOT NULL AND LTRIM(RTRIM(PBFullname)) <> ''",
+            new { s = storeId }, transaction: tx, cancellationToken: ct));
     }
 
     // ----- helper: OTS pick (recompute on the fly, division-scoped with container-wide fallback) -----
@@ -951,5 +970,31 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                WHERE SIMCountry IS NOT NULL AND LTRIM(RTRIM(SIMCountry)) <> ''
                ORDER BY SIMCountry", cancellationToken: ct));
         return list.AsList();
+    }
+
+    // ==================== 13. My Activity Today (LPM Manual Building) ====================
+    /// <summary>Today's scans by the current user across all containers.
+    /// Joins WMS_DataSettings.PBFullname (StoreID) for the StoreName column.
+    /// Newest scan first; reversed rows excluded.</summary>
+    public async Task<List<TodayScanRow>> GetTodayScansAsync(int top = 200, CancellationToken ct = default)
+    {
+        await using var c = OpenWms();
+        var rows = await c.QueryAsync<TodayScanRow>(new CommandDefinition($@"
+            SELECT TOP ({top})
+                   s.ScanId, s.ScannedTS, s.ContNo, s.Itemcode, s.Result,
+                   s.StoreID, ds.PBFullname AS StoreName, s.Division,
+                   s.BoxNo, s.ToteID, s.Tier, s.Manual
+              FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
+              OUTER APPLY (
+                   SELECT TOP 1 PBFullname FROM dbo.WMS_DataSettings WITH (NOLOCK)
+                    WHERE StoreID = s.StoreID
+                      AND PBFullname IS NOT NULL AND LTRIM(RTRIM(PBFullname)) <> ''
+              ) ds
+             WHERE s.ScannedBy = @u
+               AND s.Reversed = 'N'
+               AND CAST(s.ScannedTS AS DATE) = CAST(SYSDATETIME() AS DATE)
+             ORDER BY s.ScanId DESC",
+            new { u = user.Name }, cancellationToken: ct));
+        return rows.AsList();
     }
 }
