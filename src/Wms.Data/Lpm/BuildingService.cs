@@ -486,7 +486,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                  BuildingCategory, Manual, ItemSource)
             OUTPUT INSERTED.IdNo
             VALUES
-                (@c, @country, CAST(SYSDATETIME() AS DATE), @i, @itemname, @style, @size, @color, @brand, @season, @gender,
+                (@c, @country, CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE), @i, @itemname, @style, @size, @color, @brand, @season, @gender,
                  @hsCode, @groupCode, @division, @department, @klass, @family, @subclass, @p,
                  @resultType, @lpmDt, @store, 1, 1, 1, @result, @salesPrice,
                  @buildingCategory, @manual, @itemSource);";
@@ -603,7 +603,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         var nextSeq = await c.ExecuteScalarAsync<int>(new CommandDefinition(
             @"MERGE dbo.WmsBoxSequence WITH (HOLDLOCK) AS tg
               USING (SELECT @c AS Contno) src ON tg.Contno = src.Contno
-              WHEN MATCHED THEN UPDATE SET NextSeq = NextSeq + 1, UpdatedTS = SYSDATETIME()
+              WHEN MATCHED THEN UPDATE SET NextSeq = NextSeq + 1, UpdatedTS = DATEADD(hour, 4, SYSUTCDATETIME())
               WHEN NOT MATCHED THEN INSERT (Contno, NextSeq) VALUES (@c, 2)
               OUTPUT CASE WHEN $action = 'INSERT' THEN 1 ELSE inserted.NextSeq - 1 END;",
             new { c = contno }, transaction: tx, cancellationToken: ct));
@@ -644,7 +644,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         var nextSeq = await c.ExecuteScalarAsync<int>(new CommandDefinition(
             @"MERGE dbo.WmsBoxSequence WITH (HOLDLOCK) AS tg
               USING (SELECT @c AS Contno) src ON tg.Contno = src.Contno
-              WHEN MATCHED THEN UPDATE SET NextSeq = NextSeq + 1, UpdatedTS = SYSDATETIME()
+              WHEN MATCHED THEN UPDATE SET NextSeq = NextSeq + 1, UpdatedTS = DATEADD(hour, 4, SYSUTCDATETIME())
               WHEN NOT MATCHED THEN INSERT (Contno, NextSeq) VALUES (@c, 2)
               OUTPUT CASE WHEN $action = 'INSERT' THEN 1 ELSE inserted.NextSeq - 1 END;",
             new { c = contno }, transaction: tx, cancellationToken: ct));
@@ -687,7 +687,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
             END
             ELSE
             BEGIN
-                UPDATE dbo.WmsOpenBoxItem SET Qty = Qty + 1, ScannedTS = SYSDATETIME()
+                UPDATE dbo.WmsOpenBoxItem SET Qty = Qty + 1, ScannedTS = DATEADD(hour, 4, SYSUTCDATETIME())
                  WHERE BoxNo = @b AND ItemCode = @i;
             END
             SELECT @sr;";
@@ -829,7 +829,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
 
         await c.ExecuteAsync(new CommandDefinition(
             @"UPDATE dbo.WMSContBuildScanData
-                 SET Reversed = 'Y', ReversedTS = SYSDATETIME(), ReversedBy = @u
+                 SET Reversed = 'Y', ReversedTS = DATEADD(hour, 4, SYSUTCDATETIME()), ReversedBy = @u
                WHERE BoxNo = @b AND Reversed = 'N'",
             new { b = boxNo, u = user.Name }, transaction: tx, cancellationToken: ct));
 
@@ -869,7 +869,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         var palletType = (string)box.PalletType;
         var division = (string?)box.Division ?? "";
         var season = (string?)box.Season ?? "";
-        var lpmDt = (DateTime?)box.LPMDt ?? DateTime.Now.Date;
+        var lpmDt = (DateTime?)box.LPMDt ?? DateTime.UtcNow.AddHours(4).Date;
         var logisticsBoxNo = (string?)box.LogisticsBoxNo ?? "";
         var checkInUser = (string)box.UserId;
         var checkoutUser = user.Name;
@@ -882,7 +882,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
              GroupCode, OldBoxNo, Prepared1, Prepared2, WHouse, FWType, FPreparedBy, FPalletType,
              ISize, Gender, ToteID, LPMDT)
           VALUES
-            (@Country, @BoxNo, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)), 'Y', @CheckOut, 'from WMS', @CheckIn, @Pallet, 'N',
+            (@Country, @BoxNo, CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE), CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS TIME(0)), 'Y', @CheckOut, 'from WMS', @CheckIn, @Pallet, 'N',
              '', '', @CheckOut, @Division, @WHouse, '', @CheckOut, @Pallet,
              '', '', @Tote, @LPMDt);";
         DbOpContext.Set("INSERT dbo.WmsUPCBoxHead (checkout step 1)", headSql);
@@ -910,7 +910,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
              Photo, Style, Color, GroupCode, ItemName, Warehouse, PhotoCheckType, RRP,
              Logistics_BoxNo, Season, ToteID, RoboStatus, BarCode)
           VALUES
-            (@Country, @Cont, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)), @Item, @Size, @Result, @User, @Pc, @Size,
+            (@Country, @Cont, CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE), CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS TIME(0)), @Item, @Size, @Result, @User, @Pc, @Size,
              '', @Style, @Color, @Gc, '', @WHouse, '', 0,
              @Logi, @Season, @Tote, 'N', '');";
         var photoRows = 0;
@@ -1006,7 +1006,8 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                    s.ScanId, s.ScannedTS, s.ContNo, s.Itemcode, s.Result,
                    s.StoreID, ds.PBFullname AS StoreName, s.Division,
                    s.BoxNo, s.ToteID, s.Tier, s.Manual,
-                   ob.PalletType, pt.TypeName AS PalletTypeName
+                   ob.PalletType, pt.TypeName AS PalletTypeName,
+                   ob.LogisticsBoxNo
               FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
               OUTER APPLY (
                    SELECT TOP 1 PBFullname FROM dbo.WMS_DataSettings WITH (NOLOCK)
@@ -1014,7 +1015,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                       AND PBFullname IS NOT NULL AND LTRIM(RTRIM(PBFullname)) <> ''
               ) ds
               OUTER APPLY (
-                   SELECT TOP 1 PalletType FROM dbo.WmsOpenBox WITH (NOLOCK)
+                   SELECT TOP 1 PalletType, LogisticsBoxNo FROM dbo.WmsOpenBox WITH (NOLOCK)
                     WHERE BoxNo = s.BoxNo
               ) ob
               OUTER APPLY (
@@ -1023,7 +1024,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
               ) pt
              WHERE s.ScannedBy = @u
                AND s.Reversed = 'N'
-               AND CAST(s.ScannedTS AS DATE) = CAST(SYSDATETIME() AS DATE)
+               AND CAST(s.ScannedTS AS DATE) = CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE)
              ORDER BY s.ScanId DESC",
             new { u = user.Name }, cancellationToken: ct));
         return rows.AsList();

@@ -404,8 +404,8 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                        ISNULL(s.MerchNeedMonth, 0) AS MerchNeedMonth
                 FROM dbo.LPM_EOM_Output s WITH (NOLOCK)
                 WHERE s.DivCode IN @divs
-                  AND s.Month1  = MONTH(SYSDATETIME())
-                  AND s.Year1   = YEAR(SYSDATETIME())
+                  AND s.Month1  = MONTH(DATEADD(hour, 4, SYSUTCDATETIME()))
+                  AND s.Year1   = YEAR(DATEADD(hour, 4, SYSUTCDATETIME()))
                   AND s.VolumeGroup IS NOT NULL
                   AND (@noCountryFilter = 1 OR s.Country IN @countries)",
                 new { divs = distinctDivs,
@@ -450,7 +450,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                                               ORDER BY o.OTSDate DESC) AS rn
                     FROM dbo.LPM_OTS_Output o WITH (NOLOCK)
                     WHERE o.DivCode IN @divs
-                      AND o.OTSDate < CAST(SYSDATETIME() AS DATE)
+                      AND o.OTSDate < CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE)
                 )
                 SELECT StoreID, DivCode, targetEOM, SOH, SalesTgtWk, trfSum
                   FROM ranked WHERE rn = 1",
@@ -680,7 +680,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         await c.ExecuteAsync(new CommandDefinition(@"
             INSERT INTO LPMSIM.dbo.WMS_ContAllocationDraftHeader
                 (Country, ContNo, Warehouse, RunOption, RowCount1, TotalQty, SavedTS, SavedBy)
-            VALUES (@ct, @c, @wh, @ro, @rc, @tq, SYSDATETIME(), @u);",
+            VALUES (@ct, @c, @wh, @ro, @rc, @tq, DATEADD(hour, 4, SYSUTCDATETIME()), @u);",
             new { ct = country, c = contno, wh = warehouse, ro = runOption.ToString(),
                   rc = rows.Count, tq = totalQty, u = user.Name },
             commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
@@ -708,7 +708,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         dt.Columns.Add("Division",         typeof(string));
         dt.Columns.Add("Remarks",          typeof(string));
 
-        var now = DateTime.Now;
+        var now = DateTime.UtcNow.AddHours(4);  // GST stamp for Trndate/Time1
         var trnDate = now.Date;
         var time1 = new TimeSpan(now.Hour, now.Minute, now.Second);
 
@@ -912,7 +912,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         dt.Columns.Add("Remarks",          typeof(string));
         dt.Columns.Add("OTS",              typeof(double));
 
-        var now = DateTime.Now;
+        var now = DateTime.UtcNow.AddHours(4);  // GST stamp for Trndate/Time1
         var trnDate = now.Date;
         var time1 = new TimeSpan(now.Hour, now.Minute, now.Second);
 
@@ -1107,7 +1107,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             (ContNo, TrnDate, Time1, UPC, Itemcode, GroupCode, Division, Qty, QtyIssue,
              StoreID, TcmContno, ORAPONo, LPMDt, Itemname, BuildingCategory, Remarks)
           VALUES
-            (@ContNo, CAST(SYSDATETIME() AS DATE), CAST(SYSDATETIME() AS TIME(0)),
+            (@ContNo, CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE), CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS TIME(0)),
              @UPC, @ItemCode, @GroupCode, @Division, @Qty, 0,
              @StoreID, @ContNo, @OraPONo, @LPMDt, @ItemName, @Country, @Remarks);";
         var affected = 0;
@@ -1206,7 +1206,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         await using var c = OpenOnPremBackup();
         var n = await c.ExecuteAsync(new CommandDefinition(@"
             UPDATE LPMSIM.dbo.WMS_Cont_Allocation_Header
-               SET ApprovedDt = SYSDATETIME(),
+               SET ApprovedDt = DATEADD(hour, 4, SYSUTCDATETIME()),
                    ApprovedBy = @u
              WHERE GenCountry = @gc AND ContNo = @c AND RunOption = @ro
                AND ApprovedDt IS NULL",
@@ -1307,7 +1307,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 SELECT StoreID, DivCode, ISNULL(MerchNeedMonth, 0) AS MerchNeedMonth
                   FROM dbo.LPM_EOM_Output WITH (NOLOCK)
                  WHERE StoreID IN @stores AND DivCode IN @divs
-                   AND Month1 = MONTH(SYSDATETIME()) AND Year1 = YEAR(SYSDATETIME())",
+                   AND Month1 = MONTH(DATEADD(hour, 4, SYSUTCDATETIME())) AND Year1 = YEAR(DATEADD(hour, 4, SYSUTCDATETIME()))",
                 new { stores = distinctStores, divs = distinctDivs }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
             foreach (var m in merchRows) merchByKey[(m.StoreID, m.DivCode)] = m.MerchNeedMonth;
         }

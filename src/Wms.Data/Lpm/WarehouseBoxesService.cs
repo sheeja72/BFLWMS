@@ -232,7 +232,7 @@ public class WarehouseBoxesService(IOnPremConnectionResolver resolver)
         var (whereExtra, _, parms) = BuildFilterClauses(filter, divDeptInHaving: false);
 
         var sql = $@"
-            DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1));
+            DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(DATEADD(hour, 4, SYSUTCDATETIME())), MONTH(DATEADD(hour, 4, SYSUTCDATETIME())), 1));
             {SummarySelect("div", src, whereExtra)}
              GROUP BY sm.Division
              ORDER BY sm.Division";
@@ -257,7 +257,7 @@ public class WarehouseBoxesService(IOnPremConnectionResolver resolver)
         var (whereExtra, _, parms) = BuildFilterClauses(filter, divDeptInHaving: false);
 
         var sql = $@"
-            DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1));
+            DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(DATEADD(hour, 4, SYSUTCDATETIME())), MONTH(DATEADD(hour, 4, SYSUTCDATETIME())), 1));
             {SummarySelect("dept", src, whereExtra)}
              GROUP BY sm.Division, sm.Department
              ORDER BY sm.Division, sm.Department";
@@ -283,7 +283,7 @@ public class WarehouseBoxesService(IOnPremConnectionResolver resolver)
         var (whereExtra, _, parms) = BuildFilterClauses(filter, divDeptInHaving: false);
 
         var sql = $@"
-            DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1));
+            DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(DATEADD(hour, 4, SYSUTCDATETIME())), MONTH(DATEADD(hour, 4, SYSUTCDATETIME())), 1));
             {SummarySelect("brand", src, whereExtra)}
              GROUP BY sm.Division, sm.Department, w.Brand
              ORDER BY sm.Division, sm.Department, w.Brand";
@@ -345,7 +345,7 @@ public class WarehouseBoxesService(IOnPremConnectionResolver resolver)
             while (await rdr.ReadAsync(ct)) countries.Add(rdr.GetString(0));
 
         const string sqlTemplate = @"
-            DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1));
+            DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(DATEADD(hour, 4, SYSUTCDATETIME())), MONTH(DATEADD(hour, 4, SYSUTCDATETIME())), 1));
             SELECT
                 CASE WHEN UPPER(ISNULL(w.Season,'')) = 'W' THEN 'Winter' ELSE 'Summer' END                                        AS Season,
                 SUM(CASE WHEN w.LPMDt IS NOT NULL AND w.LPMDt <  @nextMonthStart THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LPMCurrentQty,

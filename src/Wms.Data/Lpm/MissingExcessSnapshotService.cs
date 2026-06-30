@@ -73,10 +73,10 @@ public class MissingExcessSnapshotService(IOnPremConnectionResolver resolver, IC
             USING (SELECT @c AS Country) AS s
               ON t.Country = s.Country
             WHEN MATCHED THEN
-              UPDATE SET IsActive = @a, UpdatedTS = SYSDATETIME(), UpdatedBy = @u
+              UPDATE SET IsActive = @a, UpdatedTS = DATEADD(hour, 4, SYSUTCDATETIME()), UpdatedBy = @u
             WHEN NOT MATCHED THEN
               INSERT (Country, IsActive, UpdatedTS, UpdatedBy)
-              VALUES (@c, @a, SYSDATETIME(), @u);",
+              VALUES (@c, @a, DATEADD(hour, 4, SYSUTCDATETIME()), @u);",
             new { c = country, a = isActive, u = user.Name },
             commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
     }
@@ -89,7 +89,7 @@ public class MissingExcessSnapshotService(IOnPremConnectionResolver resolver, IC
         var id = await c.ExecuteScalarAsync<long>(new CommandDefinition(@"
             INSERT INTO dbo.WmsRptJobRun (JobName, Country, Mode, StartTS, Status, TriggeredBy)
             OUTPUT INSERTED.RunId
-            VALUES (@j, @c, @m, SYSDATETIME(), 'Running', @t);",
+            VALUES (@j, @c, @m, DATEADD(hour, 4, SYSUTCDATETIME()), 'Running', @t);",
             new { j = JobName, c = country, m = mode, t = triggeredBy },
             commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
         return id;
@@ -100,7 +100,7 @@ public class MissingExcessSnapshotService(IOnPremConnectionResolver resolver, IC
         await using var c = OpenWms();
         await c.ExecuteAsync(new CommandDefinition(@"
             UPDATE dbo.WmsRptJobRun
-               SET EndTS = SYSDATETIME(), Status = @s, RowsProcessed = @r,
+               SET EndTS = DATEADD(hour, 4, SYSUTCDATETIME()), Status = @s, RowsProcessed = @r,
                    DatesProcessed = @d, ErrorMessage = @e
              WHERE RunId = @id;",
             new { id = runId, s = status, r = rowsProcessed, d = datesProcessed, e = errorMessage },

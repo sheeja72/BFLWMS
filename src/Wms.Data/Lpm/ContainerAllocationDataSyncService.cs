@@ -890,8 +890,8 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
             await using var src = openSourceConn();
             var sql = $@"SELECT DISTINCT ToteID
                            FROM {toteSrcTable} WITH (NOLOCK)
-                          WHERE CurrDate >= DATEADD(day, -1, CAST(GETDATE() AS DATE))
-                            AND CurrDate <  CAST(GETDATE() AS DATE)
+                          WHERE CurrDate >= DATEADD(day, -1, CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE))
+                            AND CurrDate <  CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE)
                             AND ToteID IS NOT NULL AND LTRIM(RTRIM(ToteID)) <> ''";
             sourceTotes = (await src.QueryAsync<string>(new CommandDefinition(
                 sql, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct))).ToList();
@@ -934,7 +934,7 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
                 dt.Columns.Add("CurrDate", typeof(DateTime));
                 dt.Columns.Add("Remarks",  typeof(string));
                 dt.Columns.Add("Used",     typeof(string));
-                var today = DateTime.Today.AddDays(-1);  // yesterday — when SIM created these
+                var today = DateTime.UtcNow.AddHours(4).Date.AddDays(-1);  // yesterday (GST) — when SIM created these
                 foreach (var t in newTotes)
                     dt.Rows.Add(country, t, today, DBNull.Value, "N");
 

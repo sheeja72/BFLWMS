@@ -74,7 +74,8 @@ public record TodayScanRow(
     byte      Tier,
     string?   Manual,
     string?   PalletType,
-    string?   PalletTypeName);
+    string?   PalletTypeName,
+    string?   LogisticsBoxNo);  // WmsOpenBox.LogisticsBoxNo (SIM-side label, e.g. AELOC6928-406330/001/010)
 
 public enum AllocationTier
 {

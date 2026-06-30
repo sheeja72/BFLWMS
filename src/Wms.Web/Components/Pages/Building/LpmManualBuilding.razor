@@ -280,6 +280,7 @@ else
                         <th>Division</th>
                         <th>Pallet</th>
                         <th>Box</th>
+                        <th>Logistics Box</th>
                         <th>Tote</th>
                     </tr>
                 </thead>
@@ -297,6 +298,7 @@ else
                             <td>@r.Division</td>
                             <td title="@r.PalletTypeName">@r.PalletType@(string.IsNullOrEmpty(r.PalletTypeName) ? "" : " — " + r.PalletTypeName)</td>
                             <td style="font-family:var(--font-mono)">@r.BoxNo</td>
+                            <td style="font-family:var(--font-mono)">@r.LogisticsBoxNo</td>
                             <td style="font-family:var(--font-mono)">@r.ToteID</td>
                         </tr>
                     }
