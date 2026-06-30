@@ -1029,4 +1029,66 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
             new { u = user.Name }, cancellationToken: ct));
         return rows.AsList();
     }
+
+    // ==================== 14. Close Logistics Box ====================
+    /// <summary>How many non-reversed pieces have been scanned into WmsOpenBox(es)
+    /// whose LogisticsBoxNo matches the given logistics-box label for this
+    /// container. Used by the LpmManualBuilding "Close Logistics" confirm dialog.</summary>
+    public async Task<int> GetLogisticsBoxScanCountAsync(string contno, string logisticsBoxNo, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(logisticsBoxNo)) return 0;
+        await using var c = OpenWms();
+        return await c.ExecuteScalarAsync<int>(new CommandDefinition(
+            @"SELECT COUNT_BIG(*)
+                FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
+                JOIN dbo.WmsOpenBox b WITH (NOLOCK) ON b.BoxNo = s.BoxNo
+               WHERE s.ContNo = @c AND b.LogisticsBoxNo = @lb AND s.Reversed = 'N'",
+            new { c = contno, lb = logisticsBoxNo }, cancellationToken: ct));
+    }
+
+    /// <summary>Close the SIM-side logistics box: writes one audit row to
+    /// dbo.WmsLogisticsBoxClosure_Log and flips dbo.WmsKNBBoxes.closed='Y'
+    /// for (Country + Contno + Boxno). Returns the piece count that was
+    /// recorded in the log row.</summary>
+    public async Task<CloseLogisticsResult> CloseLogisticsBoxAsync(string contno, string logisticsBoxNo, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(contno) || string.IsNullOrWhiteSpace(logisticsBoxNo))
+            return new(false, "Container and logistics box are required.", 0);
+
+        var country = Country;
+        logisticsBoxNo = logisticsBoxNo.Trim();
+        await using var c = OpenWms();
+        await using var tx = (SqlTransaction)await c.BeginTransactionAsync(IsolationLevel.Serializable, ct);
+
+        var current = await c.QueryFirstOrDefaultAsync<(string? Boxno, string? closed)>(new CommandDefinition(
+            @"SELECT Boxno, closed FROM dbo.WmsKNBBoxes WITH (UPDLOCK, ROWLOCK)
+              WHERE Country = @ct AND Contno = @c AND Boxno = @b",
+            new { ct = country, c = contno, b = logisticsBoxNo }, transaction: tx, cancellationToken: ct));
+        if (current.Boxno is null) return new(false, $"Logistics box {logisticsBoxNo} not found in WmsKNBBoxes.", 0);
+        if (string.Equals(current.closed, "Y", StringComparison.OrdinalIgnoreCase))
+            return new(false, $"Logistics box {logisticsBoxNo} is already closed.", 0);
+
+        var pcs = await c.ExecuteScalarAsync<int>(new CommandDefinition(
+            @"SELECT COUNT_BIG(*)
+                FROM dbo.WMSContBuildScanData s WITH (NOLOCK)
+                JOIN dbo.WmsOpenBox b WITH (NOLOCK) ON b.BoxNo = s.BoxNo
+               WHERE s.ContNo = @c AND b.LogisticsBoxNo = @b AND s.Reversed = 'N'",
+            new { c = contno, b = logisticsBoxNo }, transaction: tx, cancellationToken: ct));
+
+        await c.ExecuteAsync(new CommandDefinition(
+            @"INSERT INTO dbo.WmsLogisticsBoxClosure_Log
+                  (Country, ContNo, Boxno, PcsScanned, ClosedBy)
+              VALUES (@ct, @c, @b, @pcs, @u)",
+            new { ct = country, c = contno, b = logisticsBoxNo, pcs, u = user.Name },
+            transaction: tx, cancellationToken: ct));
+
+        await c.ExecuteAsync(new CommandDefinition(
+            @"UPDATE dbo.WmsKNBBoxes SET closed = 'Y'
+               WHERE Country = @ct AND Contno = @c AND Boxno = @b",
+            new { ct = country, c = contno, b = logisticsBoxNo },
+            transaction: tx, cancellationToken: ct));
+
+        await tx.CommitAsync(ct);
+        return new(true, null, pcs);
+    }
 }
