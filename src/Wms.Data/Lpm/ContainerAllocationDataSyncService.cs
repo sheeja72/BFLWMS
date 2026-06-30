@@ -629,4 +629,116 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         public string?   Family           { get; set; }
         public string?   Subclass         { get; set; }
     }
+
+    // ===================== Data Settings sync (standalone) =====================
+
+    /// <summary>The 138 mirror columns of bfldata.dbo.DataSettings, in source
+    /// order. Drives both the SELECT and the per-column SqlBulkCopy mapping so
+    /// the two stay aligned.</summary>
+    private static readonly string[] DataSettingsColumns = new[]
+    {
+        "ShopName","Dataname","UnitCode","FCCode","FCRate","CeilingType",
+        "CostCodeFrom","LocCodeFrom","CostCodeTo","LocCodeTo","Decimals",
+        "TCMItemCode","USAItemCode","Transfer","TargetServer","TargetDatabase",
+        "CostCode","Import","TargetPath","CalcInv","AttendancePath","ExportData",
+        "BranchCode","Form69F","barshopname","barcompname","DailyQuota","RepRowNo",
+        "USA","Add1","Add2","Add3","Add4","Add5","Add6","MaxQtyField","Itemdisc",
+        "TCMTarget","ShopLetter","CurrStock","SalesQty","TCMHTarget","TCMCTarget",
+        "TCMWTarget","PRCreditCode","Transport","DueToFromAc","NewTCMPrice","MaxQty",
+        "TrfQty","StopDel","TCMStock","OpenDate","RFId","RFTag","Area","Size",
+        "Active","OracleLocation","MaxQtyW","CurrStockW","TrfQtyW","MaxQtyH",
+        "CurrStockH","TrfQtyH","AmzDb","PalletPrefix","Production","PalletType",
+        "RetailNext","StoreID","ERPCostcode","ShopSizeSQFt","EmaarStore",
+        "Emaar_TenantCode","DefaultMinQty","ShopEmail","OnlineCountryId","erploccode",
+        "Company","MUYShop","CollectionSize","Remarks","DraftORPercMax",
+        "ExportActive","MixMaxFLAG","GRPMIXFLAG","CollectionDay","ShopInShop",
+        "R1ToGo","AnyP","MuyStoreID","IAQtyField","IATrfQtyField","AddSalesPricePerc",
+        "R1Prod","ShopGrade","shift","SalesIntegrated","PrintWasNow","CountryCode",
+        "AttendancePort","POS","BANK","Country","CalcVat","ExportWH",
+        "ExportCountryCode","ERPLedgerID","SizeSqMtTotal","SizeTCMSqMt","ExportP2",
+        "ProductionRWH","PalletTypeW","SalesIntegration","RouteId","ISOCountryCode",
+        "VATPerc","ShopCode","ShopSupervisor","bckbarshopname","TelNo",
+        "ProdActiveFromJafza","GradeLetter","ShopType","RoboShopId","spcode",
+        "ActiveStore","RMSStoreID","CoffeeShopLetter","OnlinePriceAPI","ExpDataName",
+        "ExpCostCode","PrintFcCode","PrintPriceSticker","ExpLocCode","PBFullname",
+        "CalcVatForOnlineReturn","ExpInterCompAc","Concept","CloseDate","GcpOpenDate",
+        "CreateDate","MFCSSOH","CountryID","SIMCountry"
+    };
+
+    /// <summary>Get the high-water mark used by the incremental sync. Returns
+    /// NULL if the Azure mirror is empty (first-run full pull).</summary>
+    public async Task<DateTime?> GetDataSettingsLastSyncedCreateDateAsync(CancellationToken ct = default)
+    {
+        await using var c = OpenWms();
+        return await c.ExecuteScalarAsync<DateTime?>(new CommandDefinition(
+            "SELECT MAX(CreateDate) FROM dbo.WMS_DataSettings WITH (NOLOCK)",
+            commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+    }
+
+    /// <summary>Pull bfldata.dbo.DataSettings rows with CreateDate &gt; the Azure
+    /// high-water mark (or all rows on first run) and SqlBulkCopy them into
+    /// dbo.WMS_DataSettings. Logs one row to WMS_ContAllocationDataSync_Log
+    /// with ContNo='(DataSettings)' and Destination='WMSDataSettings'.</summary>
+    public async Task<DataSyncResult> SyncDataSettingsAsync(CancellationToken ct = default)
+    {
+        DateTime? lastMax;
+        try
+        {
+            lastMax = await GetDataSettingsLastSyncedCreateDateAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            var failId = await WriteLogRowAsync("(DataSettings)", null, DataSyncDestination.WMSDataSettings, 0,
+                "Failed", $"Reading high-water mark on Azure failed: {ex.Message}", ct);
+            return new DataSyncResult(false, $"Data Settings: cannot read MAX(CreateDate) on Azure ({ex.Message}).", failId, 0);
+        }
+
+        var cols    = string.Join(", ", DataSettingsColumns.Select(c => $"[{c}]"));
+        var where   = lastMax.HasValue ? "WHERE CreateDate > @lastMax" : "";
+        var orderBy = "ORDER BY CreateDate";
+        var sql     = $"SELECT {cols} FROM bfldata.dbo.DataSettings WITH (NOLOCK) {where} {orderBy}";
+
+        int rowsCopied = 0;
+        string? error = null;
+        try
+        {
+            await using var src = OpenOnPremBackup();
+            using var cmd = new SqlCommand(sql, src) { CommandTimeout = CommandTimeoutSeconds };
+            if (lastMax.HasValue) cmd.Parameters.Add(new SqlParameter("@lastMax", System.Data.SqlDbType.DateTime) { Value = lastMax.Value });
+            using var reader = await cmd.ExecuteReaderAsync(ct);
+
+            await using var dest = OpenWms();
+            using var bulk = new SqlBulkCopy(dest)
+            {
+                DestinationTableName = "dbo.WMS_DataSettings",
+                BatchSize            = 1000,
+                BulkCopyTimeout      = CommandTimeoutSeconds,
+                EnableStreaming      = true,
+            };
+            foreach (var col in DataSettingsColumns)
+                bulk.ColumnMappings.Add(col, col);
+
+            await bulk.WriteToServerAsync(reader, ct);
+            rowsCopied = bulk.RowsCopied;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+
+        var syncId = await WriteLogRowAsync("(DataSettings)", null, DataSyncDestination.WMSDataSettings,
+            totalAllocatedQty: rowsCopied,
+            status: error is null ? "Success" : "Failed",
+            error: error, ct);
+
+        if (error is not null)
+            return new DataSyncResult(false, $"Data Settings sync failed: {error}", syncId, 0);
+
+        var sinceText = lastMax.HasValue
+            ? $" (since {lastMax.Value:yyyy-MM-dd HH:mm})"
+            : " (full mirror — first run)";
+        return new DataSyncResult(true,
+            $"Data Settings: {rowsCopied:N0} row(s) synced{sinceText}.",
+            syncId, rowsCopied);
+    }
 }

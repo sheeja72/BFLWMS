@@ -48,6 +48,21 @@
     }
 </div>
 
+<div class="aiwms-section">
+    <div class="aiwms-card-header">Data Settings master sync</div>
+    <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:13px">
+        Incremental mirror of <code>bfldata.dbo.DataSettings</code> &rarr; <code>dbo.WMS_DataSettings</code> on Azure.
+        Pulls rows with <code>CreateDate</code> later than the highest <code>CreateDate</code> already on Azure
+        (full pull on first run).
+    </p>
+    <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap">
+        <div style="font-size:12px; color:var(--text-secondary)">
+            Last synced CreateDate on Azure: <b>@(_dsLastSynced?.ToString("yyyy-MM-dd HH:mm") ?? "(never — full pull)")</b>
+        </div>
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="SyncDataSettingsAsync" disabled="@_busy">Sync Data Settings</button>
+    </div>
+</div>
+
 @if (_approved.Count > 0)
 {
     <div class="aiwms-section">
@@ -144,6 +159,7 @@
     private bool _isError;
     private List<ApprovedContnoRow> _approved = new();
     private List<DataSyncActivityRow> _activity = new();
+    private DateTime? _dsLastSynced;
 
     protected override async Task OnInitializedAsync()
     {
@@ -154,6 +170,32 @@
     {
         await ReloadApprovedAsync();
         await ReloadActivityAsync();
+        await ReloadDataSettingsHighWaterAsync();
+    }
+
+    private async Task ReloadDataSettingsHighWaterAsync()
+    {
+        try { _dsLastSynced = await Svc.GetDataSettingsLastSyncedCreateDateAsync(); }
+        catch { _dsLastSynced = null; }
+    }
+
+    private async Task SyncDataSettingsAsync()
+    {
+        var confirm = await JS.InvokeAsync<bool>("confirm",
+            "Sync DataSettings (bfldata.dbo.DataSettings) into Azure WMS_DataSettings? " +
+            "This pulls only rows with CreateDate newer than what's already on Azure.");
+        if (!confirm) return;
+        _busy = true; _message = ""; await InvokeAsync(StateHasChanged);
+        try
+        {
+            var result = await Svc.SyncDataSettingsAsync();
+            if (result.Ok) ShowInfo(result.Message ?? "Synced.");
+            else           ShowError(result.Message ?? "Sync failed.");
+            await ReloadDataSettingsHighWaterAsync();
+            await ReloadActivityAsync();
+        }
+        catch (Exception ex) { ShowError($"Data Settings sync failed: {ex.Message}"); }
+        finally { _busy = false; }
     }
 
     private async Task ReloadApprovedAsync()
@@ -195,6 +237,7 @@
         "AzureWmsDb"      => "Azure WMS DB",
         "WmsProductionDb" => "WMS-Prod-DB",
         "WmsKnbBoxes"     => "Azure WMS — KNB Boxes",
+        "WMSDataSettings" => "Azure WMS — Data Settings",
         _                 => d,
     };
 

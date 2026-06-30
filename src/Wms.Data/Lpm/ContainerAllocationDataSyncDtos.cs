@@ -36,10 +36,12 @@ public record DataSyncResult(
 /// <summary>The destinations the Data Sync page can write to. AzureWmsDb /
 /// WmsProductionDb are user-selectable in the UI for the allocation copy.
 /// WmsKnbBoxes is internal — written as part of the same Sync click but
-/// always targets dbo.WmsKNBBoxes on Azure WMS.</summary>
+/// always targets dbo.WmsKNBBoxes on Azure WMS. WMSDataSettings is a
+/// standalone sync (its own button) into dbo.WMS_DataSettings.</summary>
 public enum DataSyncDestination
 {
     AzureWmsDb       = 0,   // bfl-wms Azure SQL — dbo.WMS_ContAllocationData
     WmsProductionDb  = 1,   // On-prem WmsProductionDb — online.dbo.PhotoCheckingResult
-    WmsKnbBoxes      = 2    // bfl-wms Azure SQL — dbo.WmsKNBBoxes (auxiliary, runs alongside allocation sync)
+    WmsKnbBoxes      = 2,   // bfl-wms Azure SQL — dbo.WmsKNBBoxes (auxiliary, runs alongside allocation sync)
+    WMSDataSettings  = 3    // bfl-wms Azure SQL — dbo.WMS_DataSettings (incremental on CreateDate)
 }
