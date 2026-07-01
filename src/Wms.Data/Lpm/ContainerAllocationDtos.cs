@@ -83,7 +83,7 @@ public record AllocationStatus(
     int  RoundRobinRows);
 
 /// <summary>How to distribute qty across eligible stores.</summary>
-public enum RunOption { FillSKUMax = 0, RoundRobin = 1 }
+public enum RunOption { FillSKUMax = 0, RoundRobin = 1, FillSKUMaxRoundRobin = 2 }
 
 /// <summary>What ProcessAllocationAsync returns — allocations + the
 /// (item, store) pairs blocked by LPM_StoreDeptAccess / LPM_StoreDivAccess.</summary>

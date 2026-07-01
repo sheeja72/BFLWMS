@@ -37,6 +37,7 @@
             <select @bind="_runOption" @bind:after="OnRunOptionChangedAsync" style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-body); font-size:13px; background:white;">
                 <option value="FillSKUMax">Fill SKUMax</option>
                 <option value="RoundRobin">Round Robin</option>
+                <option value="FillSKUMaxRoundRobin">Fill SKUMax + Round Robin</option>
             </select>
         </div>
         <div>
@@ -604,7 +605,12 @@
             });
             // If allocations already exist for THIS RunOption, just load and show.
             await RefreshStatusAsync();
-            var ro = _runOption == "RoundRobin" ? RunOption.RoundRobin : RunOption.FillSKUMax;
+            var ro = _runOption switch
+            {
+                "RoundRobin"           => RunOption.RoundRobin,
+                "FillSKUMaxRoundRobin" => RunOption.FillSKUMaxRoundRobin,
+                _                      => RunOption.FillSKUMax,
+            };
             var existing = ro == RunOption.RoundRobin ? (_status?.RoundRobinRows ?? 0) : (_status?.FillSkuMaxRows ?? 0);
             if (existing > 0)
             {
