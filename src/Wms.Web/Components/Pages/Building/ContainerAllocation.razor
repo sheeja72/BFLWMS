@@ -672,7 +672,12 @@
 
     private async Task DeleteAsync()
     {
-        var ro = _runOption == "RoundRobin" ? RunOption.RoundRobin : RunOption.FillSKUMax;
+        var ro = _runOption switch
+        {
+            "RoundRobin"           => RunOption.RoundRobin,
+            "FillSKUMaxRoundRobin" => RunOption.FillSKUMaxRoundRobin,
+            _                      => RunOption.FillSKUMax,
+        };
         var rowsForRo = ro == RunOption.RoundRobin ? (_status?.RoundRobinRows ?? 0) : (_status?.FillSkuMaxRows ?? 0);
         if (rowsForRo == 0) return;
         var ok = await JS.InvokeAsync<bool>("confirm",
