@@ -125,10 +125,9 @@ public class ManualAllocationService(IOnPremConnectionResolver resolver, ICurren
 
         // 1) Division + DivCode per itemcode.
         var divByItem = (await src.QueryAsync<(string Itemcode, int? DivCode, string? Division)>(new CommandDefinition(
-            @"SELECT v.itemcode, sm.DivCode, sm.Division
-                FROM Datareporting.dbo.vUpc_subclass v WITH (NOLOCK)
-                LEFT JOIN Datareporting.dbo.SubclassMaster sm WITH (NOLOCK) ON sm.MH4ID = v.MH4ID
-               WHERE v.itemcode IN @codes",
+            @"SELECT itemcode, DivID AS DivCode, Division
+                FROM datareporting.dbo.vupc_subclass WITH (NOLOCK)
+               WHERE itemcode IN @codes",
             new { codes }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)))
             .GroupBy(r => r.Itemcode, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
@@ -169,14 +168,14 @@ public class ManualAllocationService(IOnPremConnectionResolver resolver, ICurren
             new { s = storeId, m = month, y = year }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)))
             .ToDictionary(r => r.DivCode, r => r.TargetEOM);
 
-        // 6) Div SOH per Division text for this StoreID.
+        // 6) Div SOH per Division text for this StoreID. vupc_subclass carries
+        // Division text directly so no SubclassMaster join needed.
         var sohByDiv = (await src.QueryAsync<(string Division, int Qty)>(new CommandDefinition(
-            @"SELECT sm.Division, SUM(CAST(ISNULL(ls.Qty,0) AS INT)) AS Qty
+            @"SELECT v.Division, SUM(CAST(ISNULL(ls.Qty,0) AS INT)) AS Qty
                 FROM racks.dbo.LPM_locstock ls WITH (NOLOCK)
-                JOIN Datareporting.dbo.vUpc_subclass v WITH (NOLOCK) ON v.itemcode = ls.itemcode
-                JOIN Datareporting.dbo.SubclassMaster sm WITH (NOLOCK) ON sm.MH4ID = v.MH4ID
-               WHERE ls.storeid = @s AND sm.Division IS NOT NULL
-               GROUP BY sm.Division",
+                JOIN datareporting.dbo.vupc_subclass v WITH (NOLOCK) ON v.itemcode = ls.itemcode
+               WHERE ls.storeid = @s AND v.Division IS NOT NULL
+               GROUP BY v.Division",
             new { s = storeId }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct)))
             .Where(r => !string.IsNullOrEmpty(r.Division))
             .ToDictionary(r => r.Division!, r => r.Qty, StringComparer.OrdinalIgnoreCase);
