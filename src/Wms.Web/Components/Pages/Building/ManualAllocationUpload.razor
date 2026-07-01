@@ -240,22 +240,41 @@
         var last = ws.LastRowUsed();
         if (last is null) return new();
 
-        // Locate header columns by name — tolerant to column order.
+        // Locate header columns by name — tolerant to column order, extra
+        // spaces / underscores / punctuation / invisible characters (BOM,
+        // non-breaking space, etc.). Normalise to letters+digits only,
+        // lowercased, before comparing.
         var header = ws.Row(1);
+        var headerLast = header.LastCellUsed();
+        if (headerLast is null)
+            throw new InvalidOperationException($"Worksheet '{ws.Name}' row 1 has no cells — cannot parse headers.");
+
         int colStore = 0, colCont = 0, colItem = 0, colQty = 0;
-        for (int col = 1; col <= header.LastCellUsed()!.Address.ColumnNumber; col++)
+        var seenHeaders = new List<string>();
+        for (int col = 1; col <= headerLast.Address.ColumnNumber; col++)
         {
-            var h = (header.Cell(col).GetString() ?? "").Trim().ToLowerInvariant();
-            switch (h)
+            var raw = (header.Cell(col).GetString() ?? "").Trim();
+            seenHeaders.Add($"col {col}='{raw}'");
+            var normalised = new string(raw.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+            switch (normalised)
             {
-                case "storeid": case "store id":                       colStore = col; break;
-                case "contno":  case "cont no": case "container":      colCont  = col; break;
-                case "itemcode": case "item code":                     colItem  = col; break;
-                case "allocationqty": case "allocation qty": case "qty": colQty = col; break;
+                case "storeid":                     colStore = col; break;
+                case "contno": case "container":    colCont  = col; break;
+                case "itemcode":                    colItem  = col; break;
+                case "allocationqty":               colQty   = col; break;
+                case "qty":                         if (colQty == 0) colQty = col; break;
             }
         }
         if (colStore == 0 || colCont == 0 || colItem == 0 || colQty == 0)
-            throw new InvalidOperationException("Header row must include: StoreID, ContNo, Itemcode, AllocationQty.");
+        {
+            var missing = new List<string>();
+            if (colStore == 0) missing.Add("StoreID");
+            if (colCont  == 0) missing.Add("ContNo");
+            if (colItem  == 0) missing.Add("Itemcode");
+            if (colQty   == 0) missing.Add("AllocationQty");
+            throw new InvalidOperationException(
+                $"Header row missing: {string.Join(", ", missing)}. Sheet '{ws.Name}' row 1 contained: {string.Join(" | ", seenHeaders)}.");
+        }
 
         var rows = new List<ManualAllocationUploadRow>();
         for (int r = 2; r <= last.RowNumber(); r++)
