@@ -64,6 +64,10 @@ public record AllocationResult(
 /// landed in any WmsOpenBox whose LogisticsBoxNo matches.</summary>
 public record CloseLogisticsResult(bool Ok, string? Error, int PcsScanned);
 
+/// <summary>One row in the LPM Manual Building "Exception" dropdown —
+/// PalletType master rows where BuildingException = 'Y'.</summary>
+public record ExceptionPalletTypeRow(string PalletType, string TypeName);
+
 /// <summary>One row in the LPM Manual Building "My Activity Today" grid —
 /// today's scans by the current user, newest first.</summary>
 public record TodayScanRow(

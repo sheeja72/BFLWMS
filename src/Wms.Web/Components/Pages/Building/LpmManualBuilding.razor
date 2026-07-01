@@ -86,9 +86,23 @@ else
                        placeholder="AEINT6078-406330/001/010" autocomplete="off"
                        disabled="@(!_contOk || _busy)" />
             </div>
-            <div class="aiwms-input-row">
-                <label class="aiwms-input-lbl">PO No</label>
-                <input class="aiwms-input" value="@(_poNumber ?? (_boxOk ? "NA" : ""))" disabled />
+            <div class="aiwms-input-row" style="display:grid; grid-template-columns: minmax(0,150px) minmax(0,1fr); gap:12px">
+                <div>
+                    <label class="aiwms-input-lbl">PO No</label>
+                    <input class="aiwms-input" value="@(_poNumber ?? (_boxOk ? "NA" : ""))" disabled />
+                </div>
+                <div>
+                    <label class="aiwms-input-lbl">Exception</label>
+                    <select class="aiwms-input" @bind="_exceptionSelected"
+                            disabled="@(!_boxOk || _busy || _exceptionOptions.Count == 0)"
+                            title="Applies to the next scan only, then auto-clears">
+                        <option value="">— none —</option>
+                        @foreach (var e in _exceptionOptions)
+                        {
+                            <option value="@e.PalletType">@e.PalletType — @e.TypeName</option>
+                        }
+                    </select>
+                </div>
             </div>
             <div class="aiwms-input-row">
                 <label class="aiwms-input-lbl">Itemcode (UPC) <span class="req">*</span></label>
@@ -142,16 +156,25 @@ else
 
         @if (_lastAlloc is { } al)
         {
-            <div class="aiwms-result-row" style="background:#a7f3d0; padding:8px 10px; border-radius:var(--r-sm); border:1px solid #6ee7b7">
-                <div class="aiwms-result-tag">RESULT</div>
+            <div class="aiwms-result-row" style="background:@(_lastAppliedException is null ? "#a7f3d0" : "#fde68a"); padding:8px 10px; border-radius:var(--r-sm); border:1px solid @(_lastAppliedException is null ? "#6ee7b7" : "#f59e0b")">
+                <div class="aiwms-result-tag">@(_lastAppliedException is null ? "RESULT" : "EXCEPTION")</div>
                 <div class="aiwms-result-value">
-                    @al.Result @(_lastItem?.Season is { Length: > 0 } s ? " - " + s : "")
-                    <span class="aiwms-pill tier@((int)al.Tier)" style="margin-left:10px;font-size:11px"
-                          title="@TierTitle(al.Tier)">Tier @((int)al.Tier) — @TierShort(al.Tier)</span>
-                    @if (al.Manual)
+                    @if (_lastAppliedException is (var exPt, var exName))
                     {
-                        <span class="aiwms-pill tier4" style="margin-left:6px;font-size:11px;background:#fff3cd;color:#664d03;border:1px solid #ffe69c"
-                              title="Item not in container — added from usa.upcbarcodes at scan time">MANUAL</span>
+                        <b>@exPt@(string.IsNullOrEmpty(exName) ? "" : " — " + exName)</b>
+                        <span class="aiwms-pill tier@((int)al.Tier)" style="margin-left:10px;font-size:11px"
+                              title="Underlying Tier — allocation row @al.AllocationIdNo was tagged with the exception">Tier @((int)al.Tier)</span>
+                    }
+                    else
+                    {
+                        @al.Result @(_lastItem?.Season is { Length: > 0 } s ? " - " + s : "")
+                        <span class="aiwms-pill tier@((int)al.Tier)" style="margin-left:10px;font-size:11px"
+                              title="@TierTitle(al.Tier)">Tier @((int)al.Tier) — @TierShort(al.Tier)</span>
+                        @if (al.Manual)
+                        {
+                            <span class="aiwms-pill tier4" style="margin-left:6px;font-size:11px;background:#fff3cd;color:#664d03;border:1px solid #ffe69c"
+                                  title="Item not in container — added from usa.upcbarcodes at scan time">MANUAL</span>
+                        }
                     }
                 </div>
             </div>
@@ -355,10 +378,17 @@ else
     private List<OpenBoxRow> _openBoxes = new();
     private List<TodayScanRow> _todayScans = new();
 
+    // Exception dropdown — one-shot: applies to next scan, then auto-clears.
+    private List<ExceptionPalletTypeRow> _exceptionOptions = new();
+    private string _exceptionSelected = "";
+    private (string PalletType, string? TypeName)? _lastAppliedException;
+
     protected override async Task OnInitializedAsync()
     {
         await Me.EnsureLoadedAsync();
-        // No refresh on init — the grid is scoped to the current container,
+        try { _exceptionOptions = await Build.GetExceptionPalletTypesAsync(); }
+        catch { _exceptionOptions = new(); }
+        // No activity refresh on init — the grid is scoped to the current container,
         // so it stays empty until ValidateContainer succeeds.
     }
 
@@ -424,7 +454,7 @@ else
 
         // Clear the previous item's details + result immediately so the panel
         // doesn't show stale data while the new fetch runs.
-        _lastItem = null; _lastAlloc = null;
+        _lastItem = null; _lastAlloc = null; _lastAppliedException = null;
         await InvokeAsync(StateHasChanged);
 
         try
@@ -456,6 +486,26 @@ else
 
             var alloc = await Build.ResolveAllocationAsync(_contno, code, _poNumber, item.Style);
             if (!alloc.Found) { _globalErr = alloc.Error ?? "Could not resolve allocation."; await Beep(); return; }
+
+            // One-shot exception: if operator picked an Exception, stamp
+            // FinalResult + Remarks on the resolved WMS_ContAllocationData row,
+            // then clear the dropdown.
+            if (!string.IsNullOrEmpty(_exceptionSelected) && alloc.AllocationIdNo is int aid)
+            {
+                var exOpt = _exceptionOptions.FirstOrDefault(e => e.PalletType == _exceptionSelected);
+                var exName = exOpt?.TypeName;
+                var (exOk, exErr) = await Build.ApplyExceptionToAllocationAsync(aid, _exceptionSelected, exName);
+                if (!exOk)
+                {
+                    _globalErr = $"Exception apply failed: {exErr}. Item scan will still record without the exception.";
+                    await Beep();
+                }
+                else
+                {
+                    _lastAppliedException = (_exceptionSelected, exName);
+                }
+                _exceptionSelected = ""; // one-shot: always clear after attempt
+            }
 
             var palletType = alloc.PalletType ?? "STD";
             var division   = alloc.Division ?? item.Division;
