@@ -997,9 +997,17 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
     // ==================== 13. My Activity Today (LPM Manual Building) ====================
     /// <summary>Today's scans by the current user across all containers.
     /// Joins WMS_DataSettings.PBFullname (StoreID) for the StoreName column.
-    /// Newest scan first; reversed rows excluded.</summary>
-    public async Task<List<TodayScanRow>> GetTodayScansAsync(int top = 200, CancellationToken ct = default)
+    /// Newest scan first; reversed rows excluded. When `contno` is provided,
+    /// filters to that container (no day filter — full history for the
+    /// container). When `contno` is null/empty, keeps the legacy behaviour of
+    /// "today's scans across all containers" so callers don't break.</summary>
+    public async Task<List<TodayScanRow>> GetTodayScansAsync(int top = 200, string? contno = null, CancellationToken ct = default)
     {
+        var hasContno = !string.IsNullOrWhiteSpace(contno);
+        var filterClause = hasContno
+            ? "AND s.ContNo = @c"
+            : "AND CAST(s.ScannedTS AS DATE) = CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE)";
+
         await using var c = OpenWms();
         var rows = await c.QueryAsync<TodayScanRow>(new CommandDefinition($@"
             SELECT TOP ({top})
@@ -1024,9 +1032,9 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
               ) pt
              WHERE s.ScannedBy = @u
                AND s.Reversed = 'N'
-               AND CAST(s.ScannedTS AS DATE) = CAST(DATEADD(hour, 4, SYSUTCDATETIME()) AS DATE)
+               {filterClause}
              ORDER BY s.ScanId DESC",
-            new { u = user.Name }, cancellationToken: ct));
+            new { u = user.Name, c = contno }, cancellationToken: ct));
         return rows.AsList();
     }
 
