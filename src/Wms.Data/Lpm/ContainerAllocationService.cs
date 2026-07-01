@@ -113,7 +113,7 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             return new ContainerAllocationValidationResult(false, steps);
         }
         contno = contno.Trim();
-        const int TOTAL = 5;
+        const int TOTAL = 7;
 
         await using (var c = OpenOnPremBackup())
         {
@@ -155,14 +155,16 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
             if (!qtyOk) return new ContainerAllocationValidationResult(false, steps);
         }
 
-        // 4+5: WmsOpenBox + WmsBuildingCompletion — combined into ONE round-trip.
+        // 4+5+6+7: Azure WMS build/sync status — one round-trip, 4 sub-counts.
         progress?.Report(new AllocationProgress(4, TOTAL, "Validating: build status"));
         await using (var w = OpenWms())
         {
-            var status = await w.QueryFirstAsync<(int Building, int Completed)>(new CommandDefinition(@"
+            var status = await w.QueryFirstAsync<(int Building, int Completed, int AllocSynced, int Scanned)>(new CommandDefinition(@"
                 SELECT
                     (SELECT COUNT(*) FROM dbo.WmsOpenBox            WITH (NOLOCK) WHERE Contno = @c)                                 AS Building,
-                    (SELECT COUNT(*) FROM dbo.WmsBuildingCompletion WITH (NOLOCK) WHERE Country = @ct AND ContNo = @c)                AS Completed",
+                    (SELECT COUNT(*) FROM dbo.WmsBuildingCompletion WITH (NOLOCK) WHERE Country = @ct AND ContNo = @c)                AS Completed,
+                    (SELECT COUNT(*) FROM dbo.WMS_ContAllocationData WITH (NOLOCK) WHERE ContNo = @c)                                 AS AllocSynced,
+                    (SELECT COUNT(*) FROM dbo.WMSContBuildScanData  WITH (NOLOCK) WHERE ContNo = @c)                                 AS Scanned",
                 new { ct = country, c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
 
             var building = status.Building > 0;
@@ -179,6 +181,26 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                 !completed,
                 completed ? $"Container {contno} already completed for country {country}." : null));
             if (completed) return new ContainerAllocationValidationResult(false, steps);
+
+            progress?.Report(new AllocationProgress(6, TOTAL, "Validating: allocation not yet synced to Azure"));
+            var allocSynced = status.AllocSynced > 0;
+            steps.Add(new ValidationStep(
+                "Container not yet synced to Azure allocation (no WMS_ContAllocationData row)",
+                !allocSynced,
+                allocSynced
+                    ? $"Container {contno} already has {status.AllocSynced} row(s) in dbo.WMS_ContAllocationData — its allocation was already approved and synced. Delete those first if you really want to re-allocate."
+                    : null));
+            if (allocSynced) return new ContainerAllocationValidationResult(false, steps);
+
+            progress?.Report(new AllocationProgress(7, TOTAL, "Validating: no prior building scans"));
+            var scanned = status.Scanned > 0;
+            steps.Add(new ValidationStep(
+                "No prior building scans (no WMSContBuildScanData row)",
+                !scanned,
+                scanned
+                    ? $"Container {contno} already has {status.Scanned} scan row(s) in dbo.WMSContBuildScanData — building has started. Cannot re-run allocation."
+                    : null));
+            if (scanned) return new ContainerAllocationValidationResult(false, steps);
         }
 
         return new ContainerAllocationValidationResult(true, steps);
