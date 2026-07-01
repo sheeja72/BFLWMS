@@ -213,7 +213,7 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
                  WHERE ContNo = @c AND Itemcode = @i
                    AND (@p IS NULL OR ORAPONo = @p)
                    AND ISNULL(QtyIssue,0) < ISNULL(Qty,0)
-                 ORDER BY ContNo, ORAPONo, LPMDt, IdNo";
+                 ORDER BY ORAPONo, LPMDt, StoreID, ISNULL(OTS,0) DESC";
             DbOpContext.Set("Tier-1 lookup on dbo.WMS_ContAllocationData", t1Sql);
             var t1 = await c.QueryFirstOrDefaultAsync<dynamic>(new CommandDefinition(
                 t1Sql, new { c = contno, i = itemCode, p = poNumber },
