@@ -1194,10 +1194,37 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
     /// Reset Final: deletes all rows from LPMSIM.dbo.WMS_ContAllocationData for the
     /// given container so the page unlocks and Process can run again. Destructive —
     /// caller is responsible for confirming with the user. Returns rows deleted.
+    ///
+    /// Refuses if any of the downstream Azure WMS state exists for this ContNo:
+    ///   - dbo.WMS_ContAllocationData rows (allocation was already synced)
+    ///   - dbo.WmsOpenBox rows            (building is open)
+    ///   - dbo.WMSContBuildScanData rows  (someone already scanned pieces)
+    /// Deleting the SIM-side allocation while any of these exist would leave
+    /// the building side pointing at a phantom allocation.
     /// </summary>
     public async Task<int> ResetFinalAsync(string genCountry, string contno, RunOption runOption, CancellationToken ct = default)
     {
         var roTag = runOption.ToString();
+
+        // Pre-check Azure downstream state. Refuse if anything exists.
+        await using (var w = OpenWms())
+        {
+            var status = await w.QueryFirstAsync<(int AllocSynced, int OpenBoxes, int Scanned)>(new CommandDefinition(@"
+                SELECT
+                    (SELECT COUNT(*) FROM dbo.WMS_ContAllocationData WITH (NOLOCK) WHERE ContNo = @c) AS AllocSynced,
+                    (SELECT COUNT(*) FROM dbo.WmsOpenBox             WITH (NOLOCK) WHERE Contno = @c) AS OpenBoxes,
+                    (SELECT COUNT(*) FROM dbo.WMSContBuildScanData   WITH (NOLOCK) WHERE ContNo = @c) AS Scanned",
+                new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+
+            var blockers = new List<string>();
+            if (status.AllocSynced > 0) blockers.Add($"{status.AllocSynced} row(s) in dbo.WMS_ContAllocationData (already synced to Azure)");
+            if (status.OpenBoxes   > 0) blockers.Add($"{status.OpenBoxes} row(s) in dbo.WmsOpenBox (building is open)");
+            if (status.Scanned     > 0) blockers.Add($"{status.Scanned} row(s) in dbo.WMSContBuildScanData (building has started)");
+            if (blockers.Count > 0)
+                throw new InvalidOperationException(
+                    $"Cannot delete allocation for {contno} — {string.Join("; ", blockers)}. Clear the Azure side first.");
+        }
+
         await using var c = OpenOnPremBackup();
         var batches = (await c.QueryAsync<int>(new CommandDefinition(@"
             SELECT BatchNo FROM LPMSIM.dbo.WMS_Cont_Allocation_Header
