@@ -463,6 +463,72 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         // OTS refresh between items. Starts at zero; grows as we allocate.
         var runningAlloc = new Dictionary<(string StoreID, int DivCode), int>();
 
+        // ============ FillSKUMaxRoundRobin: extra prefetches ============
+        // Only paid when the operator actually picked this run option. Nothing
+        // for FillSKUMax / RoundRobin.
+        Dictionary<(string StoreID, string ItemCode), int> initialAllocByKey = new();  // keys normalised to UPPER on both insert + lookup
+        Dictionary<(string StoreID, int DivCode), int?> priorityByStoreDiv = new();
+        DateTime? containerReceiptDt = null;
+        int fillRRTopN = 25;
+        if (runOption == RunOption.FillSKUMaxRoundRobin)
+        {
+            progress?.Report(new AllocationProgress(0, 0, "Prefetching: Initial Allocation + EOM priority + receipt date"));
+
+            // Initial allocation per (StoreID, Itemcode) from Azure WMS.
+            await using (var wms = new SqlConnection(resolver.GetWmsAzureConnectionString()))
+            {
+                await wms.OpenAsync(ct);
+                var rows = await wms.QueryAsync<(string StoreID, string Itemcode, int AllocationQty)>(new CommandDefinition(
+                    @"SELECT StoreID, Itemcode, AllocationQty
+                        FROM dbo.WmsManualAllocation WITH (NOLOCK)
+                       WHERE ContNo = @c",
+                    new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+                foreach (var r in rows)
+                    initialAllocByKey[(r.StoreID.ToUpperInvariant(), r.Itemcode.ToUpperInvariant())] = r.AllocationQty;
+
+                var cfg = await wms.ExecuteScalarAsync<string?>(new CommandDefinition(
+                    @"SELECT TOP 1 ConfigValue FROM dbo.WmsAppConfig WITH (NOLOCK)
+                       WHERE ConfigKey = 'ContainerAlloc.FillSKUMaxRoundRobin.TopN'",
+                    commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+                if (int.TryParse(cfg, out var t) && t > 0) fillRRTopN = t;
+            }
+
+            // Division Priority per (StoreID, DivCode) — lower priorityranking = higher priority.
+            var nowGst = DateTime.UtcNow.AddHours(4);
+            var pRows = await c.QueryAsync<(string StoreID, int DivCode, int? priorityranking)>(new CommandDefinition(
+                @"SELECT StoreId AS StoreID, DivCode, priorityranking
+                    FROM LPMSIM.dbo.LPM_EOM_Output WITH (NOLOCK)
+                   WHERE Month1 = @m AND Year1 = @y",
+                new { m = nowGst.Month, y = nowGst.Year },
+                commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+            foreach (var p in pRows)
+                priorityByStoreDiv[(p.StoreID, p.DivCode)] = p.priorityranking;
+
+            // Container receipt date from bfldata.dbo.contreceipt (receiptdt column).
+            containerReceiptDt = await c.ExecuteScalarAsync<DateTime?>(new CommandDefinition(
+                @"SELECT TOP 1 receiptdt FROM bfldata.dbo.contreceipt WITH (NOLOCK)
+                   WHERE refno = @c
+                   ORDER BY receiptdt DESC",
+                new { c = contno }, commandTimeout: CommandTimeoutSeconds, cancellationToken: ct));
+        }
+
+        // Effective SKU Max = MIN(baseSkuMax, InitialAlloc for (store, item))
+        //                    when InitialAlloc exists; else baseSkuMax.
+        int EffectiveSkuMax(int baseCap, string sid, string itemCode) =>
+            initialAllocByKey.TryGetValue((sid.ToUpperInvariant(), itemCode.ToUpperInvariant()), out var ini)
+                ? Math.Min(baseCap, ini) : baseCap;
+
+        // Whether a given line-item's LPMDt is within the "current + N months"
+        // window (Condition A) or after it (Condition B).
+        bool IsWithinLpmWindow(DateTime? lpmDt)
+        {
+            if (containerReceiptDt is null || lpmDt is null) return true; // fall through to Condition A
+            var n = containerReceiptDt.Value.Day < 15 ? 1 : 2;
+            var now = DateTime.UtcNow.AddHours(4);
+            var upper = new DateTime(now.Year, now.Month, 1).AddMonths(n + 1).AddDays(-1);
+            return lpmDt.Value <= upper;
+        }
+
         double? ComputeOts(string sid, int div)
         {
             if (!otsRawByKey.TryGetValue((sid, div), out var raw) || raw.targetEOM == 0) return null;
@@ -586,6 +652,121 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
                         if (take <= 0) continue;
                         allocs[s.StoreID] = MakeRow(s.StoreID, s.Country, s.VolumeGroup, s.MerchNeedMonth, s.SKUMax, take, 0);
                         remaining -= take;
+                    }
+                }
+                else if (runOption == RunOption.FillSKUMaxRoundRobin)
+                {
+                    // ================= FillSKUMax + RoundRobin =================
+                    // Two conditions per line item, driven by whether the item's
+                    // LPMDt falls inside the container's LPM window (Scenario 1
+                    // = receipt<15 -> N=1, Scenario 2 = receipt>=15 -> N=2).
+                    var conditionA = IsWithinLpmWindow(line.LPMDt);
+
+                    if (conditionA)
+                    {
+                        // 1. Priority rank by LPM_EOM_Output.priorityranking for
+                        //    (StoreID, DivCode). Lower rank number = higher priority.
+                        //    Stores with no ranking sink to the bottom.
+                        var ranked = stores
+                            .Select(s => new {
+                                Store = s,
+                                Priority = priorityByStoreDiv.TryGetValue((s.StoreID, divCode), out var pr) ? pr : null,
+                            })
+                            .OrderBy(x => x.Priority.HasValue ? 0 : 1)
+                            .ThenBy(x => x.Priority ?? int.MaxValue)
+                            .ToList();
+
+                        var top = ranked.Take(fillRRTopN).Select(x => x.Store).ToList();
+                        var rest = ranked.Skip(fillRRTopN).Select(x => x.Store).ToList();
+
+                        // 2. Fill Top-N by OTS DESC up to Effective SKU Max.
+                        var topByOts = top
+                            .OrderBy(s => s.Ots.HasValue ? 0 : 1)
+                            .ThenByDescending(s => s.Ots)
+                            .ToList();
+                        foreach (var s in topByOts)
+                        {
+                            if (remaining <= 0) break;
+                            var cap  = EffectiveSkuMax(s.SKUMax, s.StoreID, line.ItemCode);
+                            var take = Math.Min(cap, remaining);
+                            if (take <= 0) continue;
+                            allocs[s.StoreID] = MakeRow(s.StoreID, s.Country, s.VolumeGroup, s.MerchNeedMonth, cap, take, 0);
+                            remaining -= take;
+                        }
+
+                        // 3. Round-Robin remaining stores by OTS DESC up to Effective SKU Max.
+                        var restByOts = rest
+                            .OrderBy(s => s.Ots.HasValue ? 0 : 1)
+                            .ThenByDescending(s => s.Ots)
+                            .ToList();
+                        while (remaining > 0 && restByOts.Count > 0)
+                        {
+                            bool any = false;
+                            foreach (var s in restByOts)
+                            {
+                                if (remaining <= 0) break;
+                                var cap = EffectiveSkuMax(s.SKUMax, s.StoreID, line.ItemCode);
+                                var current = allocs.TryGetValue(s.StoreID, out var row) ? row.AllocQty : 0;
+                                if (current >= cap) continue;
+                                allocs[s.StoreID] = row is null
+                                    ? MakeRow(s.StoreID, s.Country, s.VolumeGroup, s.MerchNeedMonth, cap, 1, 0)
+                                    : row with { AllocQty = current + 1 };
+                                remaining--;
+                                any = true;
+                            }
+                            if (!any) break;
+                        }
+
+                        // 4. Overflow: allocate leftover ignoring SKU Max caps —
+                        //    RR across ALL stores by OTS DESC.
+                        if (remaining > 0)
+                        {
+                            var allByOts = stores
+                                .OrderBy(s => s.Ots.HasValue ? 0 : 1)
+                                .ThenByDescending(s => s.Ots)
+                                .ToList();
+                            int idx = 0;
+                            while (remaining > 0 && allByOts.Count > 0)
+                            {
+                                var s = allByOts[idx % allByOts.Count];
+                                var cap = EffectiveSkuMax(s.SKUMax, s.StoreID, line.ItemCode);
+                                if (allocs.TryGetValue(s.StoreID, out var row))
+                                    allocs[s.StoreID] = row with
+                                    {
+                                        AllocQty        = row.AllocQty + 1,
+                                        RoundRobinExtra = row.RoundRobinExtra + 1,
+                                    };
+                                else
+                                    allocs[s.StoreID] = MakeRow(s.StoreID, s.Country, s.VolumeGroup, s.MerchNeedMonth, cap, 1, 1);
+                                remaining--;
+                                idx++;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // Condition B: RR ALL stores by OTS DESC up to Effective SKU Max.
+                        var allByOts = stores
+                            .OrderBy(s => s.Ots.HasValue ? 0 : 1)
+                            .ThenByDescending(s => s.Ots)
+                            .ToList();
+                        while (remaining > 0 && allByOts.Count > 0)
+                        {
+                            bool any = false;
+                            foreach (var s in allByOts)
+                            {
+                                if (remaining <= 0) break;
+                                var cap = EffectiveSkuMax(s.SKUMax, s.StoreID, line.ItemCode);
+                                var current = allocs.TryGetValue(s.StoreID, out var row) ? row.AllocQty : 0;
+                                if (current >= cap) continue;
+                                allocs[s.StoreID] = row is null
+                                    ? MakeRow(s.StoreID, s.Country, s.VolumeGroup, s.MerchNeedMonth, cap, 1, 0)
+                                    : row with { AllocQty = current + 1 };
+                                remaining--;
+                                any = true;
+                            }
+                            if (!any) break;
+                        }
                     }
                 }
                 else
