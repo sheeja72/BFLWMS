@@ -1099,4 +1099,45 @@ public class BuildingService(IOnPremConnectionResolver resolver, ICurrentUser us
         await tx.CommitAsync(ct);
         return new(true, null, pcs);
     }
+
+    // ==================== 15. Building Exception dropdown ====================
+    /// <summary>Rows for the "Exception" dropdown in LPM Manual Building —
+    /// PalletTypes on dbo.WmsPalletType where BuildingException='Y'. Populated
+    /// by the PalletType Master sync from bfldata.dbo.pallettype.</summary>
+    public async Task<List<ExceptionPalletTypeRow>> GetExceptionPalletTypesAsync(CancellationToken ct = default)
+    {
+        await using var c = OpenWms();
+        var rows = await c.QueryAsync<ExceptionPalletTypeRow>(new CommandDefinition(
+            @"SELECT PalletType, ISNULL(TypeName, PalletType) AS TypeName
+                FROM dbo.WmsPalletType WITH (NOLOCK)
+               WHERE BuildingException = 'Y'
+               ORDER BY TypeName",
+            cancellationToken: ct));
+        return rows.AsList();
+    }
+
+    /// <summary>Applies a one-shot exception to the WMS_ContAllocationData row
+    /// that the just-completed scan resolved to. Sets FinalResult to the
+    /// exception PalletType code and Remarks to its TypeName. Called by the
+    /// razor immediately after ResolveAllocationAsync when the operator had
+    /// an exception selected.</summary>
+    public async Task<(bool Ok, string? Error)> ApplyExceptionToAllocationAsync(
+        int allocationIdNo, string exceptionPalletType, string? exceptionTypeName,
+        CancellationToken ct = default)
+    {
+        if (allocationIdNo <= 0) return (false, "AllocationIdNo is required.");
+        if (string.IsNullOrWhiteSpace(exceptionPalletType))
+            return (false, "Exception PalletType is required.");
+
+        await using var c = OpenWms();
+        var n = await c.ExecuteAsync(new CommandDefinition(
+            @"UPDATE dbo.WMS_ContAllocationData
+                 SET FinalResult = @pt,
+                     Remarks     = @tn
+               WHERE IdNo = @id",
+            new { id = allocationIdNo, pt = exceptionPalletType, tn = exceptionTypeName },
+            cancellationToken: ct));
+
+        return n == 1 ? (true, null) : (false, $"Allocation row IdNo={allocationIdNo} not found.");
+    }
 }

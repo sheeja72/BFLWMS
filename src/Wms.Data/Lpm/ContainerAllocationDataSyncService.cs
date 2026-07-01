@@ -1030,7 +1030,8 @@ public class ContainerAllocationDataSyncService(IOnPremConnectionResolver resolv
         "BuildCategoryMixAllow","PartofHOStock","ShopEligible","BlueBox",
         "DirectProduction","ShopPalletType","BuildSelItems","NonTrade",
         "ValidateHoStock","AllowInvalidItem","RegSIMExclude","PalletType_Shop",
-        "NegativePurchase","PalletCategory","ToWHLocation","ExcludeFromLPR"
+        "NegativePurchase","PalletCategory","ToWHLocation","ExcludeFromLPR",
+        "BuildingException"
     };
 
     /// <summary>Full refresh of dbo.WmsPalletType from bfldata.dbo.pallettype.
