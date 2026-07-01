@@ -1,0 +1,279 @@
+@page "/building/manual-allocation-upload"
+@rendermode RenderMode.InteractiveServer
+@using Wms.Core
+@using Wms.Data.Lpm
+@using ClosedXML.Excel
+@using Microsoft.AspNetCore.Components.Forms
+@attribute [Authorize(Policy = MenuKeys.MANUAL_ALLOCATION_UPLOAD)]
+@inject ManualAllocationService Svc
+@inject ICurrentUser Me
+@inject Microsoft.JSInterop.IJSRuntime JS
+
+<PageTitle>WMS — Manual Allocation Upload</PageTitle>
+
+<div class="aiwms-page-header">
+    <h2>Manual Allocation Upload</h2>
+    <p>
+        Upload an Excel (<code>.xlsx</code>) with header row and the columns
+        <b>StoreID, ContNo, Itemcode, AllocationQty</b>. All rows must match the container +
+        store you pick below. Building must not have started for this container.
+    </p>
+</div>
+
+@if (!string.IsNullOrEmpty(_message))
+{
+    <div class="aiwms-alert @(_isError ? "error" : "info")">@_message</div>
+}
+
+<div class="aiwms-section">
+    <div class="aiwms-card-header">Container + Store</div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr 2fr auto; gap:12px; align-items:end">
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">CONTAINER NO *</label>
+            <input @bind="_contno" placeholder="AELOC6928"
+                   style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); font-family:var(--font-mono); font-size:13px; background:white"
+                   disabled="@_busy" />
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">COUNTRY</label>
+            <select @bind="_country" @bind:after="OnCountryChangedAsync"
+                    style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); background:white; font-size:13px"
+                    disabled="@_busy">
+                <option value="">(pick)</option>
+                @foreach (var c in _countries) { <option value="@c">@c</option> }
+            </select>
+        </div>
+        <div>
+            <label style="display:block; font-size:11px; font-weight:700; color:var(--text-secondary); margin-bottom:4px;">STORE</label>
+            <select @bind="_storeId"
+                    style="width:100%; padding:8px 10px; border:1px solid var(--border-default); border-radius:var(--r-sm); background:white; font-size:13px"
+                    disabled="@(_busy || _stores.Count == 0)">
+                <option value="">(pick a store)</option>
+                @foreach (var s in _stores)
+                {
+                    <option value="@s.StoreID">@s.StoreID — @s.StoreName</option>
+                }
+            </select>
+        </div>
+        <button class="aiwms-btn aiwms-btn-primary" @onclick="ValidateAsync"
+                disabled="@(_busy || string.IsNullOrWhiteSpace(_contno) || string.IsNullOrWhiteSpace(_storeId))">
+            Validate
+        </button>
+    </div>
+</div>
+
+@if (_validated)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header">Upload Excel</div>
+        <p style="margin:0 0 10px 0; color:var(--text-secondary); font-size:12px">
+            Header row required. Columns: <code>StoreID, ContNo, Itemcode, AllocationQty</code>.
+            All rows must have ContNo = <b>@_contno</b> and StoreID = <b>@_storeId</b>.
+        </p>
+        <InputFile OnChange="OnFileSelected" accept=".xlsx" disabled="@_busy" />
+    </div>
+}
+
+@if (_rows.Count > 0)
+{
+    <div class="aiwms-section">
+        <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px">
+            <span>Preview — @_rows.Count row(s) &nbsp;•&nbsp; total allocation qty <b>@_rows.Sum(r => r.AllocationQty).ToString("N0")</b> &nbsp;•&nbsp; total qualified <b>@_rows.Where(r => r.QualifiedQty.HasValue).Sum(r => r.QualifiedQty!.Value).ToString("N0")</b></span>
+            <button class="aiwms-btn aiwms-btn-primary" @onclick="SaveAsync" disabled="@_busy">Save to WmsManualAllocation</button>
+        </div>
+        <div style="max-height:520px; overflow:auto">
+            <table class="aiwms-table aiwms-table-dense" style="font-size:11px">
+                <thead style="position:sticky; top:0; background:white; z-index:1">
+                    <tr>
+                        <th>StoreID</th>
+                        <th>ContNo</th>
+                        <th>Itemcode</th>
+                        <th style="text-align:right">Alloc Qty</th>
+                        <th>Division</th>
+                        <th style="text-align:right">PO Qty</th>
+                        <th style="text-align:right">eCom SOH</th>
+                        <th style="text-align:right">SKU Max</th>
+                        <th style="text-align:right">SKU Bal</th>
+                        <th style="text-align:right">Qualified</th>
+                        <th style="text-align:right">Div EOM</th>
+                        <th style="text-align:right">Div SOH</th>
+                        <th style="text-align:right">EOM Bal</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in _rows)
+                    {
+                        <tr>
+                            <td style="font-family:var(--font-mono)">@r.StoreID</td>
+                            <td style="font-family:var(--font-mono)">@r.ContNo</td>
+                            <td style="font-family:var(--font-mono)"><b>@r.Itemcode</b></td>
+                            <td style="text-align:right">@r.AllocationQty.ToString("N0")</td>
+                            <td>@r.Division</td>
+                            <td style="text-align:right">@(r.POQty?.ToString("N0") ?? "")</td>
+                            <td style="text-align:right">@(r.eComSOH?.ToString("N0") ?? "")</td>
+                            <td style="text-align:right">@(r.SkuMax?.ToString("N0") ?? "")</td>
+                            <td style="text-align:right">@(r.SkuBalance?.ToString("N0") ?? "")</td>
+                            <td style="text-align:right; font-weight:700">@(r.QualifiedQty?.ToString("N0") ?? "")</td>
+                            <td style="text-align:right">@(r.DivEOM?.ToString("N0") ?? "")</td>
+                            <td style="text-align:right">@(r.DivSOH?.ToString("N0") ?? "")</td>
+                            <td style="text-align:right">@(r.EomBalance?.ToString("N0") ?? "")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+}
+
+@code {
+    private string _contno = "";
+    private string _country = "";
+    private string _storeId = "";
+    private bool _busy;
+    private bool _validated;
+    private string _message = "";
+    private bool _isError;
+
+    private List<string> _countries = new();
+    private List<ManualAllocationStoreRow> _stores = new();
+    private List<ManualAllocationRow> _rows = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Me.EnsureLoadedAsync();
+        try
+        {
+            _countries = await Svc.GetCountriesAsync();
+            _country = Me.Country is not null && _countries.Contains(Me.Country, StringComparer.OrdinalIgnoreCase)
+                ? _countries.First(c => string.Equals(c, Me.Country, StringComparison.OrdinalIgnoreCase))
+                : "";
+            if (!string.IsNullOrEmpty(_country))
+                _stores = await Svc.GetStoresForCountryAsync(_country);
+        }
+        catch (Exception ex) { ShowError($"Failed to load countries/stores: {ex.Message}"); }
+    }
+
+    private async Task OnCountryChangedAsync()
+    {
+        _stores = new(); _storeId = ""; _validated = false; _rows = new();
+        if (string.IsNullOrWhiteSpace(_country)) return;
+        try { _stores = await Svc.GetStoresForCountryAsync(_country); }
+        catch (Exception ex) { ShowError($"Failed to load stores: {ex.Message}"); }
+    }
+
+    private async Task ValidateAsync()
+    {
+        _busy = true; _message = ""; _rows = new(); _validated = false;
+        try
+        {
+            var result = await Svc.ValidateContainerAsync(_contno.Trim());
+            if (!result.Ok) { ShowError(result.Error ?? "Validation failed."); return; }
+            _validated = true;
+            ShowInfo($"Container {_contno.Trim()} ok — building not started. Upload your Excel below.");
+        }
+        catch (Exception ex) { ShowError($"Validation failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        var file = e.File;
+        if (file is null) return;
+        if (!file.Name.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+        {
+            ShowError("File must be .xlsx");
+            return;
+        }
+        _busy = true; _message = ""; _rows = new();
+        try
+        {
+            List<ManualAllocationUploadRow> parsed;
+            await using (var stream = file.OpenReadStream(maxAllowedSize: 20 * 1024 * 1024))
+            using (var ms = new MemoryStream())
+            {
+                await stream.CopyToAsync(ms);
+                ms.Position = 0;
+                parsed = ParseXlsx(ms);
+            }
+
+            if (parsed.Count == 0) { ShowError("No data rows found in the Excel."); return; }
+
+            var contno = _contno.Trim();
+            var storeId = _storeId.Trim();
+            var bad = parsed.FirstOrDefault(r =>
+                !string.Equals(r.ContNo,  contno,  StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(r.StoreID, storeId, StringComparison.OrdinalIgnoreCase));
+            if (bad is not null)
+            {
+                ShowError($"Row mismatch: ContNo={bad.ContNo} / StoreID={bad.StoreID}. All rows must match ContNo={contno} + StoreID={storeId}.");
+                return;
+            }
+
+            _rows = await Svc.EnrichRowsAsync(contno, storeId, parsed);
+            ShowInfo($"Loaded and enriched {_rows.Count} row(s). Review below, then click Save.");
+        }
+        catch (Exception ex) { ShowError($"Excel parse / enrichment failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private async Task SaveAsync()
+    {
+        var confirm = await JS.InvokeAsync<bool>("confirm",
+            $"Save {_rows.Count} row(s) into dbo.WmsManualAllocation for container {_contno.Trim()}? " +
+            "Any prior rows for this container will be deleted first.");
+        if (!confirm) return;
+        _busy = true; _message = "";
+        try
+        {
+            var result = await Svc.SaveAsync(_contno.Trim(), _rows);
+            if (result.Ok) ShowInfo($"Saved {result.RowsSaved} row(s) to dbo.WmsManualAllocation.");
+            else           ShowError(result.Error ?? "Save failed.");
+        }
+        catch (Exception ex) { ShowError($"Save failed: {ex.Message}"); }
+        finally { _busy = false; }
+    }
+
+    private static List<ManualAllocationUploadRow> ParseXlsx(Stream stream)
+    {
+        using var wb = new XLWorkbook(stream);
+        var ws = wb.Worksheet(1);
+        var last = ws.LastRowUsed();
+        if (last is null) return new();
+
+        // Locate header columns by name — tolerant to column order.
+        var header = ws.Row(1);
+        int colStore = 0, colCont = 0, colItem = 0, colQty = 0;
+        for (int col = 1; col <= header.LastCellUsed()!.Address.ColumnNumber; col++)
+        {
+            var h = (header.Cell(col).GetString() ?? "").Trim().ToLowerInvariant();
+            switch (h)
+            {
+                case "storeid": case "store id":                       colStore = col; break;
+                case "contno":  case "cont no": case "container":      colCont  = col; break;
+                case "itemcode": case "item code":                     colItem  = col; break;
+                case "allocationqty": case "allocation qty": case "qty": colQty = col; break;
+            }
+        }
+        if (colStore == 0 || colCont == 0 || colItem == 0 || colQty == 0)
+            throw new InvalidOperationException("Header row must include: StoreID, ContNo, Itemcode, AllocationQty.");
+
+        var rows = new List<ManualAllocationUploadRow>();
+        for (int r = 2; r <= last.RowNumber(); r++)
+        {
+            var store = (ws.Cell(r, colStore).GetString() ?? "").Trim();
+            var cont  = (ws.Cell(r, colCont ).GetString() ?? "").Trim();
+            var item  = (ws.Cell(r, colItem ).GetString() ?? "").Trim();
+            var qtyC  = ws.Cell(r, colQty);
+            if (string.IsNullOrEmpty(store) && string.IsNullOrEmpty(cont) && string.IsNullOrEmpty(item))
+                continue;  // blank row
+            int qty = 0;
+            try { qty = (int)Math.Round(qtyC.GetDouble()); }
+            catch { int.TryParse(qtyC.GetString(), out qty); }
+            rows.Add(new ManualAllocationUploadRow(store, cont, item, qty));
+        }
+        return rows;
+    }
+
+    private void ShowError(string m) { _message = m; _isError = true; }
+    private void ShowInfo(string m)  { _message = m; _isError = false; }
+}
