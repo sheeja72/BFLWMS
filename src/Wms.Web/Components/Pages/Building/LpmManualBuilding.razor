@@ -266,13 +266,19 @@ else
 
 <div class="aiwms-section" style="margin-top:14px">
     <div class="aiwms-card-header" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px">
-        <span>My Activity Today — @_todayScans.Count scan(s) by @(Me.Name ?? "you")</span>
+        <span>
+            My Scans
+            @if (_contOk) { <text>— container <b>@_contno</b> — @_todayScans.Count scan(s)</text> }
+            else          { <text>— validate a container to see your scans</text> }
+        </span>
         <button class="aiwms-btn aiwms-btn-secondary" style="font-size:11px; padding:4px 10px"
                 @onclick="RefreshTodayScansAsync" disabled="@_busy">Refresh</button>
     </div>
     @if (_todayScans.Count == 0)
     {
-        <div style="padding:14px; font-style:italic; color:var(--text-secondary)">No scans recorded for you today yet.</div>
+        <div style="padding:14px; font-style:italic; color:var(--text-secondary)">
+            @(_contOk ? $"No scans by you into container {_contno} yet." : "Validate a container above.")
+        </div>
     }
     else
     {
@@ -352,12 +358,14 @@ else
     protected override async Task OnInitializedAsync()
     {
         await Me.EnsureLoadedAsync();
-        await RefreshTodayScansAsync();
+        // No refresh on init — the grid is scoped to the current container,
+        // so it stays empty until ValidateContainer succeeds.
     }
 
     private async Task RefreshTodayScansAsync()
     {
-        try { _todayScans = await Build.GetTodayScansAsync(); }
+        if (!_contOk) { _todayScans = new(); return; }
+        try { _todayScans = await Build.GetTodayScansAsync(contno: _contno); }
         catch { /* keep prior list; surface via _globalErr if needed */ }
     }
 
@@ -383,6 +391,7 @@ else
             if (!v.Ok) { _globalErr = v.Error; await Beep(); return; }
             _contno = input; _contOk = true;
             await RefreshOpenBoxes();
+            await RefreshTodayScansAsync();
             await Audit.LogAsync("Building.Container", _contno, 'X', $"Building/{_contno}", new { event_ = "validate" });
             await TryFocus(_boxRef);
         }
