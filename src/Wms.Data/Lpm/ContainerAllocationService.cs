@@ -1273,17 +1273,18 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
 
         // Per-RunOption final row counts from the Header table. Each Process run creates
         // one Header row per (GenCountry, ContNo, RunOption); RowCount1 holds the saved total.
-        var f = await c.QueryFirstOrDefaultAsync<(int Total, DateTime? Max1, int Fsm, int Rr)>(new CommandDefinition(@"
+        var f = await c.QueryFirstOrDefaultAsync<(int Total, DateTime? Max1, int Fsm, int Rr, int Frr)>(new CommandDefinition(@"
             SELECT
                 Total = ISNULL(SUM(RowCount1), 0),
                 Max1  = MAX(ProcessedTS),
-                Fsm   = ISNULL(SUM(CASE WHEN RunOption = 'FillSKUMax' THEN RowCount1 ELSE 0 END), 0),
-                Rr    = ISNULL(SUM(CASE WHEN RunOption = 'RoundRobin' THEN RowCount1 ELSE 0 END), 0)
+                Fsm   = ISNULL(SUM(CASE WHEN RunOption = 'FillSKUMax'           THEN RowCount1 ELSE 0 END), 0),
+                Rr    = ISNULL(SUM(CASE WHEN RunOption = 'RoundRobin'           THEN RowCount1 ELSE 0 END), 0),
+                Frr   = ISNULL(SUM(CASE WHEN RunOption = 'FillSKUMaxRoundRobin' THEN RowCount1 ELSE 0 END), 0)
             FROM LPMSIM.dbo.WMS_Cont_Allocation_Header
             WHERE GenCountry = @gc AND ContNo = @c",
             new { gc = genCountry, c = contno }, cancellationToken: ct));
         var hasFinal = f.Total > 0;
-        return new AllocationStatus(hasDraft, hasFinal, draftRows, f.Total, f.Max1, d.RunOption, f.Fsm, f.Rr);
+        return new AllocationStatus(hasDraft, hasFinal, draftRows, f.Total, f.Max1, d.RunOption, f.Fsm, f.Rr, f.Frr);
     }
 
     // ===================== Confirm & Save (Draft -> WMS_ContAllocationData) =====================

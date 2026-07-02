@@ -83,9 +83,12 @@
             <input type="checkbox" @bind="_validate" /> Validate before Process
         </label>
         @{
-            var currentRoRows = _runOption == "RoundRobin"
-                ? (_status?.RoundRobinRows ?? 0)
-                : (_status?.FillSkuMaxRows ?? 0);
+            var currentRoRows = _runOption switch
+            {
+                "RoundRobin"           => (_status?.RoundRobinRows ?? 0),
+                "FillSKUMaxRoundRobin" => (_status?.FillSKUMaxRoundRobinRows ?? 0),
+                _                      => (_status?.FillSkuMaxRows ?? 0),
+            };
         }
         @if (currentRoRows > 0 && !IsApproved)
         {
@@ -678,7 +681,12 @@
             "FillSKUMaxRoundRobin" => RunOption.FillSKUMaxRoundRobin,
             _                      => RunOption.FillSKUMax,
         };
-        var rowsForRo = ro == RunOption.RoundRobin ? (_status?.RoundRobinRows ?? 0) : (_status?.FillSkuMaxRows ?? 0);
+        var rowsForRo = ro switch
+        {
+            RunOption.RoundRobin           => (_status?.RoundRobinRows ?? 0),
+            RunOption.FillSKUMaxRoundRobin => (_status?.FillSKUMaxRoundRobinRows ?? 0),
+            _                              => (_status?.FillSkuMaxRows ?? 0),
+        };
         if (rowsForRo == 0) return;
         var ok = await JS.InvokeAsync<bool>("confirm",
             $"Delete {rowsForRo} {_runOption} allocation rows for {_contno}?\n\nThis cannot be undone.");

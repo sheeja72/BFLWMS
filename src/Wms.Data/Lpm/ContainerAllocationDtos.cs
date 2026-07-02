@@ -80,7 +80,8 @@ public record AllocationStatus(
     DateTime? FinalAt,
     string? DraftRunOption,
     int  FillSkuMaxRows,
-    int  RoundRobinRows);
+    int  RoundRobinRows,
+    int  FillSKUMaxRoundRobinRows = 0);
 
 /// <summary>How to distribute qty across eligible stores.</summary>
 public enum RunOption { FillSKUMax = 0, RoundRobin = 1, FillSKUMaxRoundRobin = 2 }
