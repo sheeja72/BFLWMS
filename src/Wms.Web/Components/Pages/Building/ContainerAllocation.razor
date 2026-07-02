@@ -614,7 +614,12 @@
                 "FillSKUMaxRoundRobin" => RunOption.FillSKUMaxRoundRobin,
                 _                      => RunOption.FillSKUMax,
             };
-            var existing = ro == RunOption.RoundRobin ? (_status?.RoundRobinRows ?? 0) : (_status?.FillSkuMaxRows ?? 0);
+            var existing = ro switch
+            {
+                RunOption.RoundRobin           => _status?.RoundRobinRows ?? 0,
+                RunOption.FillSKUMaxRoundRobin => _status?.FillSKUMaxRoundRobinRows ?? 0,
+                _                              => _status?.FillSkuMaxRows ?? 0,
+            };
             if (existing > 0)
             {
                 _allocation = await Svc.LoadFinalAsync(_country, _contno, ro);
@@ -622,6 +627,20 @@
                 _totalPoQty = await Svc.GetTotalPoQtyAsync(_contno);
                 _loadedBatch = await Svc.GetLatestBatchInfoAsync(_country, _contno, ro.ToString());
                 ShowInfo($"Loaded existing {_runOption} allocation — {_allocation.Count} rows, {_allocation.Sum(r => r.AllocQty)} pcs (in {FmtElapsed(totalSw.ElapsedMilliseconds)}).");
+                return;
+            }
+
+            // One-process-per-container rule: refuse if ANY other Run Option
+            // already has final rows for this container. Operator must delete
+            // those first (Delete button, which enforces its own Azure-state guard).
+            var totalFinal = _status?.FinalRows ?? 0;
+            if (totalFinal > 0)
+            {
+                var others = new List<string>();
+                if ((_status?.FillSkuMaxRows            ?? 0) > 0 && ro != RunOption.FillSKUMax)           others.Add($"FillSKUMax ({_status!.FillSkuMaxRows})");
+                if ((_status?.RoundRobinRows            ?? 0) > 0 && ro != RunOption.RoundRobin)           others.Add($"RoundRobin ({_status!.RoundRobinRows})");
+                if ((_status?.FillSKUMaxRoundRobinRows  ?? 0) > 0 && ro != RunOption.FillSKUMaxRoundRobin) others.Add($"FillSKUMaxRoundRobin ({_status!.FillSKUMaxRoundRobinRows})");
+                ShowError($"Container {_contno} was already processed with a different Run Option ({string.Join(", ", others)}). Only one process per container is allowed — delete that first before running {_runOption}.");
                 return;
             }
 
