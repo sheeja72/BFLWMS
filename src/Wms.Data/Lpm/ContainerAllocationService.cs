@@ -1226,23 +1226,43 @@ public class ContainerAllocationService(IOnPremConnectionResolver resolver, ICur
         }
 
         await using var c = OpenOnPremBackup();
+
+        // One process per container: on Delete, clean out ALL run options for
+        // the container (headers + details + blocked) AND the draft tables.
+        // The runOption parameter is kept for the caller's messaging but no
+        // longer filters the delete — otherwise a stale header for another
+        // run option would still block the next Process click.
         var batches = (await c.QueryAsync<int>(new CommandDefinition(@"
             SELECT BatchNo FROM LPMSIM.dbo.WMS_Cont_Allocation_Header
-             WHERE GenCountry = @gc AND ContNo = @c AND RunOption = @ro",
-            new { gc = genCountry, c = contno, ro = roTag },
+             WHERE GenCountry = @gc AND ContNo = @c",
+            new { gc = genCountry, c = contno },
             commandTimeout: 120, cancellationToken: ct))).ToList();
-        if (batches.Count == 0) return 0;
 
-        var n = await c.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData    WHERE BatchNo IN @bs",
-            new { bs = batches }, commandTimeout: 120, cancellationToken: ct));
-        await c.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM LPMSIM.dbo.WMS_ContAllocationBlocked WHERE BatchNo IN @bs",
-            new { bs = batches }, commandTimeout: 120, cancellationToken: ct));
-        await c.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM LPMSIM.dbo.WMS_Cont_Allocation_Header WHERE BatchNo IN @bs",
-            new { bs = batches }, commandTimeout: 120, cancellationToken: ct));
-        return n;
+        int detailDeleted = 0;
+        if (batches.Count > 0)
+        {
+            detailDeleted = await c.ExecuteAsync(new CommandDefinition(
+                "DELETE FROM LPMSIM.dbo.WMS_ContAllocationData    WHERE BatchNo IN @bs",
+                new { bs = batches }, commandTimeout: 120, cancellationToken: ct));
+            await c.ExecuteAsync(new CommandDefinition(
+                "DELETE FROM LPMSIM.dbo.WMS_ContAllocationBlocked WHERE BatchNo IN @bs",
+                new { bs = batches }, commandTimeout: 120, cancellationToken: ct));
+            await c.ExecuteAsync(new CommandDefinition(
+                "DELETE FROM LPMSIM.dbo.WMS_Cont_Allocation_Header WHERE BatchNo IN @bs",
+                new { bs = batches }, commandTimeout: 120, cancellationToken: ct));
+        }
+
+        // Also clear any lingering draft state for this container so the next
+        // Process click starts from a clean slate. Drafts key on (Country, ContNo),
+        // not BatchNo.
+        await c.ExecuteAsync(new CommandDefinition(@"
+            DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftDetail  WHERE Country = @ct AND ContNo = @c;
+            DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftBlocked WHERE Country = @ct AND ContNo = @c;
+            DELETE FROM LPMSIM.dbo.WMS_ContAllocationDraftHeader  WHERE Country = @ct AND ContNo = @c;",
+            new { ct = genCountry, c = contno }, commandTimeout: 120, cancellationToken: ct));
+
+        _ = roTag; // silence unused-warning while keeping the runOption param on the signature
+        return detailDeleted;
     }
 
     /// <summary>Load saved blocked items for the (Container, RunOption).</summary>
